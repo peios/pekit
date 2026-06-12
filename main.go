@@ -75,7 +75,7 @@ func cmdVerb(verb string, args []string) error {
 
 	stageDir := ""
 	if verb == "build" && cfg.OutDir != "" {
-		stageDir, err = prepareOutDir(cfg.OutDir, name, cfg.ClearOut)
+		stageDir, err = prepareOutDir(cfg.OutDir, verb, name, cfg.ClearOut)
 		if err != nil {
 			return err
 		}

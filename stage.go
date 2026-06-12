@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 )
 
-// prepareOutDir readies the staging directory for one build target
-// (outDir/<name>), optionally wiping it first, and returns its absolute
-// path for $PEKIT_OUT.
-func prepareOutDir(outDir, name string, clear bool) (string, error) {
-	dir := filepath.Join(outDir, name)
+// prepareOutDir readies the staging directory for one target of one step
+// (outDir/<step>/<name>), optionally wiping it first, and returns its
+// absolute path for $PEKIT_OUT. Scoping the stage by step keeps each
+// step's artifacts (and wipes) isolated from the others'.
+func prepareOutDir(outDir, step, name string, clear bool) (string, error) {
+	dir := filepath.Join(outDir, step, name)
 	if clear {
 		if err := os.RemoveAll(dir); err != nil {
 			return "", fmt.Errorf("clearing out dir %s: %w", dir, err)
