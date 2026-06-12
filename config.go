@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 
@@ -73,7 +74,7 @@ func ParseConfig(src string) (*Config, error) {
 	for _, key := range keys {
 		if table, isTable := raw[key].(map[string]any); isTable {
 			switch key {
-			case "build", "test", "install":
+			case "build", "test", "install", "clean":
 				targets, err := parseSection(key, table, parseTarget)
 				if err != nil {
 					return nil, err
@@ -103,6 +104,12 @@ func ParseConfig(src string) (*Config, error) {
 			if !ok || s == "" {
 				return nil, fmt.Errorf("outDir must be a non-empty string")
 			}
+			// pekit clean does RemoveAll(outDir); these values would
+			// make that "delete the project" (or worse).
+			switch filepath.Clean(s) {
+			case ".", "..", "/":
+				return nil, fmt.Errorf("outDir must name a subdirectory (got %q)", s)
+			}
 			cfg.OutDir = s
 		case "clearOut":
 			b, ok := raw[key].(bool)
@@ -111,7 +118,7 @@ func ParseConfig(src string) (*Config, error) {
 			}
 			cfg.ClearOut = b
 			clearOutSet = true
-		case "build", "test", "install", "package", "env":
+		case "build", "test", "install", "clean", "package", "env":
 			return nil, fmt.Errorf("[%s] must be a table", key)
 		default:
 			return nil, fmt.Errorf("unknown root key %q", key)

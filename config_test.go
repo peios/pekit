@@ -417,3 +417,27 @@ func TestEnvPrelude(t *testing.T) {
 		t.Errorf("envPrelude = %q, want %q", got, want)
 	}
 }
+
+func TestCleanVerbParsed(t *testing.T) {
+	cfg, err := ParseConfig(`
+[clean]
+command = "cargo clean"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.Commands["clean"]["main"].Command; got != "cargo clean" {
+		t.Errorf("clean main.Command = %q", got)
+	}
+}
+
+func TestDangerousOutDirRejected(t *testing.T) {
+	// pekit clean RemoveAlls outDir; these values would delete the
+	// project or worse.
+	for _, dir := range []string{".", "..", "/", "./", "foo/.."} {
+		_, err := ParseConfig("outDir = \"" + dir + "\"\n")
+		if err == nil || !strings.Contains(err.Error(), "subdirectory") {
+			t.Errorf("outDir %q: want subdirectory error, got: %v", dir, err)
+		}
+	}
+}

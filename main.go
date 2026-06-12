@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|package> [target]"
+const usage = "usage: pekit <build|test|install|package|clean> [target]"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -31,6 +31,8 @@ func run(args []string) error {
 		return cmdVerb(args[0], args[1:])
 	case "package":
 		return cmdPackage(args[1:])
+	case "clean":
+		return cmdClean(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
@@ -67,7 +69,10 @@ func cmdVerb(verb string, args []string) error {
 		return fmt.Errorf("no %s target %q (available: %s)",
 			verb, name, strings.Join(sortedNames(targets), ", "))
 	}
+	return runCommandTarget(cfg, verb, name, target)
+}
 
+func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	script := target.Command
 	if len(cfg.Env) > 0 {
 		script = envPrelude(cfg.Env) + script
@@ -81,21 +86,59 @@ func cmdVerb(verb string, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	stageDir := ""
 	if verb == "build" && cfg.OutDir != "" {
-		stageDir, err = prepareOutDir(cfg.OutDir, verb, name, cfg.ClearOut)
+		stageDir, err := prepareOutDir(cfg.OutDir, verb, name, cfg.ClearOut)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("pekit: out: %s\n", stageDir)
 		cmd.Env = append(os.Environ(), "PEKIT_OUT="+stageDir)
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+		if isEmptyDir(stageDir) {
+			fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
+		}
+		return nil
 	}
 
-	if err := cmd.Run(); err != nil {
+	return cmd.Run()
+}
+
+// cmdClean runs the [clean] command if the project defines one, then
+// removes outDir. Unlike other verbs a missing [clean] section is fine:
+// pekit always knows how to clean the stages it owns.
+func cmdClean(args []string) error {
+	name, err := targetArg(args)
+	if err != nil {
 		return err
 	}
-	if stageDir != "" && isEmptyDir(stageDir) {
-		fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
+
+	cfg, err := LoadConfig("pekit.toml")
+	if err != nil {
+		return err
+	}
+
+	targets, hasSection := cfg.Commands["clean"]
+	if !hasSection && len(args) == 1 {
+		return fmt.Errorf("pekit.toml has no [clean] section")
+	}
+	if hasSection {
+		target, ok := targets[name]
+		if !ok {
+			return fmt.Errorf("no clean target %q (available: %s)",
+				name, strings.Join(sortedNames(targets), ", "))
+		}
+		if err := runCommandTarget(cfg, "clean", name, target); err != nil {
+			return err
+		}
+	}
+
+	if cfg.OutDir != "" {
+		if err := os.RemoveAll(cfg.OutDir); err != nil {
+			return fmt.Errorf("removing %s: %w", cfg.OutDir, err)
+		}
+		fmt.Printf("pekit: removed %s\n", cfg.OutDir)
 	}
 	return nil
 }
