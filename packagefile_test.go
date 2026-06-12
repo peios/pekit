@@ -9,17 +9,14 @@ func TestParseMinimalPackageFile(t *testing.T) {
 	pf, err := ParsePackageFile(`
 format = "tar"
 
-[package]
-name = "loregd"
-
 [files]
 "main:loregd" = "usr/bin/loregd"
 `)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pf.Format != "tar" || pf.Name != "loregd" {
-		t.Errorf("Format=%q Name=%q", pf.Format, pf.Name)
+	if pf.Format != "tar" {
+		t.Errorf("Format = %q", pf.Format)
 	}
 	if len(pf.Files) != 1 {
 		t.Fatalf("want 1 file, got %d", len(pf.Files))
@@ -33,9 +30,6 @@ name = "loregd"
 func TestBareColonIsMainSugar(t *testing.T) {
 	pf, err := ParsePackageFile(`
 format = "tar"
-
-[package]
-name = "loregd"
 
 [files]
 ":loregd" = "usr/bin/loregd"
@@ -51,9 +45,6 @@ name = "loregd"
 func TestPlainPathSourceIsLiteral(t *testing.T) {
 	pf, err := ParsePackageFile(`
 format = "tar"
-
-[package]
-name = "prelude"
 
 [files]
 "target/x86_64-unknown-linux-musl/release/prelude" = "boot/initramfs/init"
@@ -71,9 +62,6 @@ func TestFilesSortedByDest(t *testing.T) {
 	pf, err := ParsePackageFile(`
 format = "tar"
 
-[package]
-name = "x"
-
 [files]
 ":b" = "usr/share/b"
 ":a" = "usr/bin/a"
@@ -88,9 +76,6 @@ name = "x"
 
 func TestPackageFileMissingFormat(t *testing.T) {
 	_, err := ParsePackageFile(`
-[package]
-name = "x"
-
 [files]
 ":x" = "usr/bin/x"
 `)
@@ -99,24 +84,26 @@ name = "x"
 	}
 }
 
-func TestPackageFileMissingName(t *testing.T) {
+func TestPackageSectionRejected(t *testing.T) {
+	// [package] was cut until a format needs identity fields; the
+	// package is named after the project directory meanwhile.
 	_, err := ParsePackageFile(`
 format = "tar"
+
+[package]
+name = "x"
 
 [files]
 ":x" = "usr/bin/x"
 `)
-	if err == nil || !strings.Contains(err.Error(), `missing required key "name"`) {
-		t.Errorf("want missing-name error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `unknown key "package"`) {
+		t.Errorf("want unknown-key error for [package], got: %v", err)
 	}
 }
 
 func TestPackageFileMissingFiles(t *testing.T) {
 	_, err := ParsePackageFile(`
 format = "tar"
-
-[package]
-name = "x"
 `)
 	if err == nil || !strings.Contains(err.Error(), "[files] must map at least one file") {
 		t.Errorf("want missing-files error, got: %v", err)
@@ -130,13 +117,12 @@ func TestCutFieldsRejected(t *testing.T) {
 format = "tar"
 
 [package]
-name = "x"
 architecture = "x86_64"
 
 [files]
 ":x" = "usr/bin/x"
 `)
-	if err == nil || !strings.Contains(err.Error(), `unknown key "architecture"`) {
+	if err == nil || !strings.Contains(err.Error(), `unknown key "package"`) {
 		t.Errorf("want unknown-key error, got: %v", err)
 	}
 
@@ -155,9 +141,6 @@ func TestEmptyStagePathRejected(t *testing.T) {
 	_, err := ParsePackageFile(`
 format = "tar"
 
-[package]
-name = "x"
-
 [files]
 "main:" = "usr/bin/x"
 `)
@@ -169,9 +152,6 @@ name = "x"
 func TestEscapingSourceRejected(t *testing.T) {
 	_, err := ParsePackageFile(`
 format = "tar"
-
-[package]
-name = "x"
 
 [files]
 "main:../../secrets" = "usr/bin/x"
@@ -186,9 +166,6 @@ func TestBadDestsRejected(t *testing.T) {
 		_, err := ParsePackageFile(`
 format = "tar"
 
-[package]
-name = "x"
-
 [files]
 ":x" = "` + dest + `"
 `)
@@ -201,9 +178,6 @@ name = "x"
 func TestDuplicateDestRejected(t *testing.T) {
 	_, err := ParsePackageFile(`
 format = "tar"
-
-[package]
-name = "x"
 
 [files]
 ":a" = "usr/bin/x"

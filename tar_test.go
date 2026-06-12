@@ -25,7 +25,8 @@ func makeJob(t *testing.T) PackageJob {
 		t.Fatal(err)
 	}
 	return PackageJob{
-		Pkg: &PackageFile{Format: "tar", Name: "loregd"},
+		Pkg:  &PackageFile{Format: "tar"},
+		Name: "loregd",
 		Files: []StagedFile{
 			{Source: bin, Dest: "usr/bin/loregd"},
 			{Source: doc, Dest: "usr/share/doc/loregd/README"},

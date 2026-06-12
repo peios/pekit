@@ -12,6 +12,7 @@ type StagedFile struct {
 // PackageJob is everything an engine needs to build one package.
 type PackageJob struct {
 	Pkg      *PackageFile
+	Name     string       // derived from the project directory name
 	Files    []StagedFile // sorted by Dest, sources verified to exist
 	OutStage string       // absolute path to outDir/package/<name>
 }

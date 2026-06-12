@@ -171,9 +171,17 @@ func cmdPackage(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The package is named after the project directory until a format
+	// needs an explicit name field.
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	name := filepath.Base(wd)
+
 	engine, err := engineFor(pf.Format)
 	if err != nil {
-		return fmt.Errorf("package %s: %w", pf.Name, err)
+		return fmt.Errorf("package %s: %w", name, err)
 	}
 
 	cfg, err := LoadConfig("pekit.toml")
@@ -181,26 +189,26 @@ func cmdPackage(args []string) error {
 		return err
 	}
 	if cfg.OutDir == "" {
-		return fmt.Errorf("package %s: packaging requires outDir in pekit.toml", pf.Name)
+		return fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
 	}
 
-	files, err := resolveFiles(pf, cfg.OutDir)
+	files, err := resolveFiles(pf, name, cfg.OutDir)
 	if err != nil {
 		return err
 	}
-	outStage, err := prepareOutDir(cfg.OutDir, "package", pf.Name, cfg.ClearOut)
+	outStage, err := prepareOutDir(cfg.OutDir, "package", name, cfg.ClearOut)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("pekit: package %s (format %s, %d files)\n", pf.Name, pf.Format, len(files))
-	return engine(PackageJob{Pkg: pf, Files: files, OutStage: outStage})
+	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
+	return engine(PackageJob{Pkg: pf, Name: name, Files: files, OutStage: outStage})
 }
 
 // resolveFiles turns [files] sources into verified absolute paths:
 // stage references resolve under outDir/build/<target>/, plain paths
 // resolve against the project root.
-func resolveFiles(pf *PackageFile, outDir string) ([]StagedFile, error) {
+func resolveFiles(pf *PackageFile, name, outDir string) ([]StagedFile, error) {
 	files := make([]StagedFile, 0, len(pf.Files))
 	for _, m := range pf.Files {
 		rel := m.Source.Path
@@ -217,7 +225,7 @@ func resolveFiles(pf *PackageFile, outDir string) ([]StagedFile, error) {
 				hint = fmt.Sprintf(" (run %q first?)", "pekit build "+m.Source.Target)
 			}
 			return nil, fmt.Errorf("package %s: source %q not found at %s%s",
-				pf.Name, m.Source, abs, hint)
+				name, m.Source, abs, hint)
 		}
 		files = append(files, StagedFile{Source: abs, Dest: m.Dest})
 	}

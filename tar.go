@@ -17,10 +17,10 @@ import (
 // at the epoch — identical inputs give byte-identical archives, which
 // signing and caching depend on.
 func tarEngine(job PackageJob) error {
-	outPath := filepath.Join(job.OutStage, job.Pkg.Name+".tar")
+	outPath := filepath.Join(job.OutStage, job.Name+".tar")
 	f, err := os.Create(outPath)
 	if err != nil {
-		return fmt.Errorf("package %s: %w", job.Pkg.Name, err)
+		return fmt.Errorf("package %s: %w", job.Name, err)
 	}
 	defer f.Close()
 
@@ -33,19 +33,19 @@ func tarEngine(job PackageJob) error {
 			ModTime:  time.Unix(0, 0),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			return fmt.Errorf("package %s: %w", job.Pkg.Name, err)
+			return fmt.Errorf("package %s: %w", job.Name, err)
 		}
 	}
 	for _, sf := range job.Files {
 		if err := writeTarFile(tw, sf); err != nil {
-			return fmt.Errorf("package %s: %w", job.Pkg.Name, err)
+			return fmt.Errorf("package %s: %w", job.Name, err)
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return fmt.Errorf("package %s: %w", job.Pkg.Name, err)
+		return fmt.Errorf("package %s: %w", job.Name, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("package %s: %w", job.Pkg.Name, err)
+		return fmt.Errorf("package %s: %w", job.Name, err)
 	}
 	fmt.Printf("pekit: wrote %s\n", outPath)
 	return nil
