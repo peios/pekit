@@ -1,4 +1,4 @@
-module pekit
+module github.com/peios/pekit
 
 go 1.26.3
 
