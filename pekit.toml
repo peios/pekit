@@ -7,4 +7,4 @@ command = "go build -o $PEKIT_OUT/pekit ."
 command = "go install ."
 
 [package]
-format = "peipkg"
+format = "tar"

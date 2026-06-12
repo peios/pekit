@@ -233,9 +233,15 @@ command = 42
 }
 
 func TestUnrecognisedFormatError(t *testing.T) {
-	err := buildPackage("main", Package{Format: "peipkg"})
+	_, err := engineFor("main", Package{Format: "peipkg"})
 	if err == nil || !strings.Contains(err.Error(), `unrecognised package format "peipkg"`) {
 		t.Errorf("want unrecognised-format error, got: %v", err)
+	}
+}
+
+func TestTarFormatRecognised(t *testing.T) {
+	if _, err := engineFor("main", Package{Format: "tar"}); err != nil {
+		t.Errorf("tar should be a registered format, got: %v", err)
 	}
 }
 

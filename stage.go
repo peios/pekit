@@ -32,3 +32,9 @@ func isEmptyDir(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	return err == nil && len(entries) == 0
 }
+
+// dirHasEntries reports whether dir exists and contains at least one entry.
+func dirHasEntries(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
+}

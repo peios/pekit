@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -111,7 +112,27 @@ func cmdPackage(args []string) error {
 		return fmt.Errorf("no package target %q (available: %s)",
 			name, strings.Join(sortedNames(cfg.Packages), ", "))
 	}
+	engine, err := engineFor(name, pkg)
+	if err != nil {
+		return err
+	}
+
+	if cfg.OutDir == "" {
+		return fmt.Errorf("package %s: packaging requires outDir to be set", name)
+	}
+	buildStage, err := filepath.Abs(filepath.Join(cfg.OutDir, "build", name))
+	if err != nil {
+		return err
+	}
+	if !dirHasEntries(buildStage) {
+		return fmt.Errorf("package %s: no build artifacts in %s (run %q first)",
+			name, buildStage, "pekit build "+name)
+	}
+	outStage, err := prepareOutDir(cfg.OutDir, "package", name, cfg.ClearOut)
+	if err != nil {
+		return err
+	}
 
 	fmt.Printf("pekit: package %s (format %s)\n", name, pkg.Format)
-	return buildPackage(name, pkg)
+	return engine(PackageJob{Name: name, BuildStage: buildStage, OutStage: outStage})
 }
