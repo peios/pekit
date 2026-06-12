@@ -334,3 +334,86 @@ command = "cargo test"
 		t.Errorf("test main.Command = %q", got)
 	}
 }
+
+func TestEnvParsedInDocumentOrder(t *testing.T) {
+	cfg, err := ParseConfig(`
+[env]
+ZED = "z"
+TC = "$HOME/.rustup/bin"
+PATH = "$TC:$PATH"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []EnvVar{
+		{"ZED", "z"},
+		{"TC", "$HOME/.rustup/bin"},
+		{"PATH", "$TC:$PATH"},
+	}
+	if len(cfg.Env) != len(want) {
+		t.Fatalf("Env = %v, want %v", cfg.Env, want)
+	}
+	for i := range want {
+		if cfg.Env[i] != want[i] {
+			t.Fatalf("Env[%d] = %v, want %v (document order)", i, cfg.Env[i], want[i])
+		}
+	}
+}
+
+func TestEnvInvalidNameRejected(t *testing.T) {
+	_, err := ParseConfig(`
+[env]
+"BAD-NAME" = "x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "invalid variable name") {
+		t.Errorf("want invalid-name error, got: %v", err)
+	}
+}
+
+func TestEnvInjectionNameRejected(t *testing.T) {
+	_, err := ParseConfig(`
+[env]
+"X\"; rm -rf /; \"" = "x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "invalid variable name") {
+		t.Errorf("want invalid-name error, got: %v", err)
+	}
+}
+
+func TestEnvPekitOutRejected(t *testing.T) {
+	_, err := ParseConfig(`
+[env]
+PEKIT_OUT = "/tmp/elsewhere"
+`)
+	if err == nil || !strings.Contains(err.Error(), "PEKIT_OUT") {
+		t.Errorf("want PEKIT_OUT-reserved error, got: %v", err)
+	}
+}
+
+func TestEnvNonStringValueRejected(t *testing.T) {
+	_, err := ParseConfig(`
+[env]
+RETRIES = 3
+`)
+	if err == nil || !strings.Contains(err.Error(), "must be a string") {
+		t.Errorf("want non-string error, got: %v", err)
+	}
+}
+
+func TestEnvTableRejected(t *testing.T) {
+	_, err := ParseConfig(`
+[env.build]
+CC = "gcc"
+`)
+	if err == nil || !strings.Contains(err.Error(), "must be a string") {
+		t.Errorf("want table-rejected error, got: %v", err)
+	}
+}
+
+func TestEnvPrelude(t *testing.T) {
+	got := envPrelude([]EnvVar{{"TC", "$HOME/bin"}, {"PATH", "$TC:$PATH"}})
+	want := "export TC=\"$HOME/bin\"\nexport PATH=\"$TC:$PATH\"\n"
+	if got != want {
+		t.Errorf("envPrelude = %q, want %q", got, want)
+	}
+}

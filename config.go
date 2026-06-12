@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 
 	"github.com/BurntSushi/toml"
@@ -18,8 +19,17 @@ type Package struct {
 	Format string
 }
 
+// EnvVar is one [env] entry. Order matters: later values may reference
+// earlier ones, so Config.Env preserves document order.
+type EnvVar struct {
+	Name  string
+	Value string
+}
+
 // Config is a parsed pekit.toml.
 type Config struct {
+	// Env is exported (in order) at the top of every command script.
+	Env []EnvVar
 	// OutDir is the pekit-managed staging directory; empty when unset.
 	// Each build target gets OutDir/<name>, exported as $PEKIT_OUT.
 	OutDir string
@@ -51,7 +61,8 @@ func LoadConfig(path string) (*Config, error) {
 // may be bare while another is named.
 func ParseConfig(src string) (*Config, error) {
 	var raw map[string]any
-	if _, err := toml.Decode(src, &raw); err != nil {
+	md, err := toml.Decode(src, &raw)
+	if err != nil {
 		return nil, err
 	}
 
@@ -74,6 +85,12 @@ func ParseConfig(src string) (*Config, error) {
 					return nil, err
 				}
 				cfg.Packages = packages
+			case "env":
+				env, err := parseEnv(table, md)
+				if err != nil {
+					return nil, err
+				}
+				cfg.Env = env
 			default:
 				return nil, fmt.Errorf("unknown section %q", key)
 			}
@@ -94,7 +111,7 @@ func ParseConfig(src string) (*Config, error) {
 			}
 			cfg.ClearOut = b
 			clearOutSet = true
-		case "build", "test", "install", "package":
+		case "build", "test", "install", "package", "env":
 			return nil, fmt.Errorf("[%s] must be a table", key)
 		default:
 			return nil, fmt.Errorf("unknown root key %q", key)
@@ -188,6 +205,35 @@ func parsePackage(section string, table map[string]any) (Package, error) {
 		return pkg, fmt.Errorf("[%s]: missing required key %q", section, "format")
 	}
 	return pkg, nil
+}
+
+// envNameRe matches valid sh identifiers. Anything else in an export
+// line would be a syntax error at best and script injection at worst.
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// parseEnv parses [env] preserving document order (TOML maps lose it,
+// so order comes from the decoder metadata). Values are verbatim sh
+// double-quoted-string contents; only names are validated.
+func parseEnv(table map[string]any, md toml.MetaData) ([]EnvVar, error) {
+	var env []EnvVar
+	for _, key := range md.Keys() {
+		if len(key) != 2 || key[0] != "env" {
+			continue
+		}
+		name := key[1]
+		if !envNameRe.MatchString(name) {
+			return nil, fmt.Errorf("[env]: invalid variable name %q", name)
+		}
+		if name == "PEKIT_OUT" {
+			return nil, fmt.Errorf("[env]: PEKIT_OUT is set by pekit and cannot be overridden")
+		}
+		val, ok := table[name].(string)
+		if !ok {
+			return nil, fmt.Errorf("[env]: %s must be a string", name)
+		}
+		env = append(env, EnvVar{Name: name, Value: val})
+	}
+	return env, nil
 }
 
 func stringValue(section, key string, val any) (string, error) {

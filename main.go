@@ -68,10 +68,15 @@ func cmdVerb(verb string, args []string) error {
 			verb, name, strings.Join(sortedNames(targets), ", "))
 	}
 
+	script := target.Command
+	if len(cfg.Env) > 0 {
+		script = envPrelude(cfg.Env) + script
+		fmt.Printf("pekit: env: %s\n", strings.Join(envNames(cfg.Env), ", "))
+	}
 	fmt.Printf("pekit: %s %s: %s\n", verb, name, target.Command)
 	// -eu so multi-line commands stop at the first failure instead of
 	// barrelling on (e.g. staging a stale binary after a failed compile).
-	cmd := exec.Command("sh", "-euc", target.Command)
+	cmd := exec.Command("sh", "-euc", script)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -93,6 +98,25 @@ func cmdVerb(verb string, args []string) error {
 		fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
 	}
 	return nil
+}
+
+// envPrelude compiles [env] into export lines prepended to command
+// scripts. Values land verbatim inside double quotes, so sh expansion
+// ($HOME, $TC, $(...)) works in them exactly as it does in command.
+func envPrelude(env []EnvVar) string {
+	var b strings.Builder
+	for _, e := range env {
+		fmt.Fprintf(&b, "export %s=\"%s\"\n", e.Name, e.Value)
+	}
+	return b.String()
+}
+
+func envNames(env []EnvVar) []string {
+	names := make([]string, 0, len(env))
+	for _, e := range env {
+		names = append(names, e.Name)
+	}
+	return names
 }
 
 func cmdPackage(args []string) error {
