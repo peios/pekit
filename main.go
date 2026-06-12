@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit build [target]"
+const usage = "usage: pekit <build|install> [target]"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -26,14 +26,14 @@ func run(args []string) error {
 		return errors.New(usage)
 	}
 	switch args[0] {
-	case "build":
-		return cmdBuild(args[1:])
+	case "build", "install":
+		return cmdVerb(args[0], args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
 }
 
-func cmdBuild(args []string) error {
+func cmdVerb(verb string, args []string) error {
 	if len(args) > 1 {
 		return errors.New(usage)
 	}
@@ -43,17 +43,22 @@ func cmdBuild(args []string) error {
 		return err
 	}
 
+	targets, ok := cfg.Sections[verb]
+	if !ok {
+		return fmt.Errorf("pekit.toml has no [%s] section", verb)
+	}
+
 	name := "main"
 	if len(args) == 1 {
 		name = args[0]
 	}
-	target, ok := cfg.Targets[name]
+	target, ok := targets[name]
 	if !ok {
-		return fmt.Errorf("no build target %q (available: %s)",
-			name, strings.Join(cfg.TargetNames(), ", "))
+		return fmt.Errorf("no %s target %q (available: %s)",
+			verb, name, strings.Join(sortedNames(targets), ", "))
 	}
 
-	fmt.Printf("pekit: build %s: %s\n", name, target.Command)
+	fmt.Printf("pekit: %s %s: %s\n", verb, name, target.Command)
 	cmd := exec.Command("sh", "-c", target.Command)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

@@ -13,10 +13,11 @@ command = "cargo build"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.Targets) != 1 {
-		t.Fatalf("want 1 target, got %d", len(cfg.Targets))
+	build := cfg.Sections["build"]
+	if len(build) != 1 {
+		t.Fatalf("want 1 build target, got %d", len(build))
 	}
-	if got := cfg.Targets["main"].Command; got != "cargo build" {
+	if got := build["main"].Command; got != "cargo build" {
 		t.Errorf("main.Command = %q, want %q", got, "cargo build")
 	}
 }
@@ -32,10 +33,11 @@ command = "cargo build -p app2"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := cfg.TargetNames(); len(got) != 2 || got[0] != "app1" || got[1] != "app2" {
-		t.Fatalf("TargetNames() = %v, want [app1 app2]", got)
+	build := cfg.Sections["build"]
+	if got := sortedNames(build); len(got) != 2 || got[0] != "app1" || got[1] != "app2" {
+		t.Fatalf("target names = %v, want [app1 app2]", got)
 	}
-	if got := cfg.Targets["app2"].Command; got != "cargo build -p app2" {
+	if got := build["app2"].Command; got != "cargo build -p app2" {
 		t.Errorf("app2.Command = %q", got)
 	}
 }
@@ -56,10 +58,47 @@ command = "cargo build -p app1"
 	}
 }
 
-func TestMissingBuildSection(t *testing.T) {
-	_, err := ParseConfig(``)
-	if err == nil || !strings.Contains(err.Error(), "missing [build]") {
-		t.Errorf("want missing-[build] error, got: %v", err)
+func TestMixedShapesRejectedInInstall(t *testing.T) {
+	_, err := ParseConfig(`
+[install]
+command = "go install ."
+
+[install.app1]
+command = "go install ./cmd/app1"
+`)
+	if err == nil || !strings.Contains(err.Error(), "[install] mixes") {
+		t.Errorf("want [install] mix error, got: %v", err)
+	}
+}
+
+func TestSectionsHaveIndependentShapes(t *testing.T) {
+	cfg, err := ParseConfig(`
+[build]
+command = "go build ./..."
+
+[install.app1]
+command = "go install ./cmd/app1"
+`)
+	if err != nil {
+		t.Fatalf("bare [build] alongside named [install.*] should parse, got: %v", err)
+	}
+	if got := cfg.Sections["build"]["main"].Command; got != "go build ./..." {
+		t.Errorf("build main.Command = %q", got)
+	}
+	if got := cfg.Sections["install"]["app1"].Command; got != "go install ./cmd/app1" {
+		t.Errorf("install app1.Command = %q", got)
+	}
+}
+
+func TestMissingSectionsAreValid(t *testing.T) {
+	// Sections are optional at parse time; "no such section" is an
+	// invocation-time error so e.g. a build-only project can exist.
+	cfg, err := ParseConfig(``)
+	if err != nil {
+		t.Fatalf("empty config should parse, got: %v", err)
+	}
+	if len(cfg.Sections) != 0 {
+		t.Errorf("want no sections, got %v", cfg.Sections)
 	}
 }
 
@@ -105,7 +144,7 @@ command = ""
 
 func TestNonStringCommandRejected(t *testing.T) {
 	_, err := ParseConfig(`
-[build]
+[install]
 command = 42
 `)
 	if err == nil || !strings.Contains(err.Error(), "string") {

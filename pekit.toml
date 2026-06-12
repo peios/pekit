@@ -1,2 +1,5 @@
 [build]
 command = "go build -o pekit ."
+
+[install]
+command = "go install ."
