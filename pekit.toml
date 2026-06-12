@@ -1,0 +1,10 @@
+# Example 1
+[build]
+command = "cargo build"
+
+# Example 2
+[build.app1]
+command = "cargo build app1"
+
+[build.app2]
+command = "cargo build app2"
