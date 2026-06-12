@@ -20,6 +20,11 @@ type Package struct {
 
 // Config is a parsed pekit.toml.
 type Config struct {
+	// OutDir is the pekit-managed staging directory; empty when unset.
+	// Each build target gets OutDir/<name>, exported as $PEKIT_OUT.
+	OutDir string
+	// ClearOut wipes a target's staging dir before its build. Default true.
+	ClearOut bool
 	// Commands holds the command-running verbs: verb -> target name -> target.
 	Commands map[string]map[string]Target
 	// Packages holds [package] targets; nil when the section is absent.
@@ -50,35 +55,54 @@ func ParseConfig(src string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{Commands: make(map[string]map[string]Target)}
+	cfg := &Config{ClearOut: true, Commands: make(map[string]map[string]Target)}
+	clearOutSet := false
 
-	sections := make([]string, 0, len(raw))
-	for key := range raw {
-		sections = append(sections, key)
-	}
-	sort.Strings(sections)
-
-	for _, section := range sections {
-		table, ok := raw[section].(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("[%s] must be a table", section)
+	keys := sortedKeys(raw)
+	for _, key := range keys {
+		if table, isTable := raw[key].(map[string]any); isTable {
+			switch key {
+			case "build", "install":
+				targets, err := parseSection(key, table, parseTarget)
+				if err != nil {
+					return nil, err
+				}
+				cfg.Commands[key] = targets
+			case "package":
+				packages, err := parseSection(key, table, parsePackage)
+				if err != nil {
+					return nil, err
+				}
+				cfg.Packages = packages
+			default:
+				return nil, fmt.Errorf("unknown section %q", key)
+			}
+			continue
 		}
-		switch section {
-		case "build", "install":
-			targets, err := parseSection(section, table, parseTarget)
-			if err != nil {
-				return nil, err
+
+		switch key {
+		case "outDir":
+			s, ok := raw[key].(string)
+			if !ok || s == "" {
+				return nil, fmt.Errorf("outDir must be a non-empty string")
 			}
-			cfg.Commands[section] = targets
-		case "package":
-			packages, err := parseSection(section, table, parsePackage)
-			if err != nil {
-				return nil, err
+			cfg.OutDir = s
+		case "clearOut":
+			b, ok := raw[key].(bool)
+			if !ok {
+				return nil, fmt.Errorf("clearOut must be a boolean")
 			}
-			cfg.Packages = packages
+			cfg.ClearOut = b
+			clearOutSet = true
+		case "build", "install", "package":
+			return nil, fmt.Errorf("[%s] must be a table", key)
 		default:
-			return nil, fmt.Errorf("unknown section %q", section)
+			return nil, fmt.Errorf("unknown root key %q", key)
 		}
+	}
+
+	if clearOutSet && cfg.OutDir == "" {
+		return nil, fmt.Errorf("clearOut requires outDir to be set")
 	}
 	return cfg, nil
 }

@@ -238,3 +238,80 @@ func TestUnrecognisedFormatError(t *testing.T) {
 		t.Errorf("want unrecognised-format error, got: %v", err)
 	}
 }
+
+func TestOutDirAndClearOutParsed(t *testing.T) {
+	cfg, err := ParseConfig(`
+outDir = "out"
+clearOut = false
+
+[build]
+command = "go build -o $PEKIT_OUT/x ."
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OutDir != "out" {
+		t.Errorf("OutDir = %q, want %q", cfg.OutDir, "out")
+	}
+	if cfg.ClearOut {
+		t.Error("ClearOut = true, want false")
+	}
+}
+
+func TestClearOutDefaultsTrue(t *testing.T) {
+	cfg, err := ParseConfig(`
+outDir = "out"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.ClearOut {
+		t.Error("ClearOut should default to true")
+	}
+}
+
+func TestClearOutWithoutOutDirRejected(t *testing.T) {
+	_, err := ParseConfig(`
+clearOut = false
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires outDir") {
+		t.Errorf("want clearOut-requires-outDir error, got: %v", err)
+	}
+}
+
+func TestOutDirMustBeString(t *testing.T) {
+	_, err := ParseConfig(`
+outDir = 42
+`)
+	if err == nil || !strings.Contains(err.Error(), "outDir must be") {
+		t.Errorf("want outDir type error, got: %v", err)
+	}
+}
+
+func TestClearOutMustBeBool(t *testing.T) {
+	_, err := ParseConfig(`
+outDir = "out"
+clearOut = "yes"
+`)
+	if err == nil || !strings.Contains(err.Error(), "clearOut must be") {
+		t.Errorf("want clearOut type error, got: %v", err)
+	}
+}
+
+func TestUnknownRootKeyRejected(t *testing.T) {
+	_, err := ParseConfig(`
+outdir = "out"
+`)
+	if err == nil || !strings.Contains(err.Error(), `unknown root key "outdir"`) {
+		t.Errorf("want unknown-root-key error, got: %v", err)
+	}
+}
+
+func TestScalarSectionRejected(t *testing.T) {
+	_, err := ParseConfig(`
+build = "go build ./..."
+`)
+	if err == nil || !strings.Contains(err.Error(), "[build] must be a table") {
+		t.Errorf("want section-must-be-table error, got: %v", err)
+	}
+}

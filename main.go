@@ -72,7 +72,24 @@ func cmdVerb(verb string, args []string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	stageDir := ""
+	if verb == "build" && cfg.OutDir != "" {
+		stageDir, err = prepareOutDir(cfg.OutDir, name, cfg.ClearOut)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("pekit: out: %s\n", stageDir)
+		cmd.Env = append(os.Environ(), "PEKIT_OUT="+stageDir)
+	}
+
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if stageDir != "" && isEmptyDir(stageDir) {
+		fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
+	}
+	return nil
 }
 
 func cmdPackage(args []string) error {

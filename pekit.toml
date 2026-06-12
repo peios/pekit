@@ -1,5 +1,7 @@
+outDir = "out"
+
 [build]
-command = "go build -o pekit ."
+command = "go build -o $PEKIT_OUT/pekit ."
 
 [install]
 command = "go install ."
