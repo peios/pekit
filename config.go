@@ -62,7 +62,7 @@ func ParseConfig(src string) (*Config, error) {
 	for _, key := range keys {
 		if table, isTable := raw[key].(map[string]any); isTable {
 			switch key {
-			case "build", "install":
+			case "build", "test", "install":
 				targets, err := parseSection(key, table, parseTarget)
 				if err != nil {
 					return nil, err
@@ -94,7 +94,7 @@ func ParseConfig(src string) (*Config, error) {
 			}
 			cfg.ClearOut = b
 			clearOutSet = true
-		case "build", "install", "package":
+		case "build", "test", "install", "package":
 			return nil, fmt.Errorf("[%s] must be a table", key)
 		default:
 			return nil, fmt.Errorf("unknown root key %q", key)

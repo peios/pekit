@@ -321,3 +321,16 @@ build = "go build ./..."
 		t.Errorf("want section-must-be-table error, got: %v", err)
 	}
 }
+
+func TestTestVerbParsed(t *testing.T) {
+	cfg, err := ParseConfig(`
+[test]
+command = "cargo test"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.Commands["test"]["main"].Command; got != "cargo test" {
+		t.Errorf("test main.Command = %q", got)
+	}
+}

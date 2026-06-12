@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|install|package> [target]"
+const usage = "usage: pekit <build|test|install|package> [target]"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -27,7 +27,7 @@ func run(args []string) error {
 		return errors.New(usage)
 	}
 	switch args[0] {
-	case "build", "install":
+	case "build", "test", "install":
 		return cmdVerb(args[0], args[1:])
 	case "package":
 		return cmdPackage(args[1:])
@@ -69,7 +69,9 @@ func cmdVerb(verb string, args []string) error {
 	}
 
 	fmt.Printf("pekit: %s %s: %s\n", verb, name, target.Command)
-	cmd := exec.Command("sh", "-c", target.Command)
+	// -eu so multi-line commands stop at the first failure instead of
+	// barrelling on (e.g. staging a stale binary after a failed compile).
+	cmd := exec.Command("sh", "-euc", target.Command)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
