@@ -84,20 +84,38 @@ func TestPackageFileMissingFormat(t *testing.T) {
 	}
 }
 
-func TestPackageSectionRejected(t *testing.T) {
-	// [package] was cut until a format needs identity fields; the
-	// package is named after the project directory meanwhile.
-	_, err := ParsePackageFile(`
+func TestPackageNameOverride(t *testing.T) {
+	pf, err := ParsePackageFile(`
 format = "tar"
 
 [package]
-name = "x"
+name = "libp"
 
 [files]
 ":x" = "usr/bin/x"
 `)
-	if err == nil || !strings.Contains(err.Error(), `unknown key "package"`) {
-		t.Errorf("want unknown-key error for [package], got: %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pf.Name != "libp" {
+		t.Errorf("Name = %q, want %q", pf.Name, "libp")
+	}
+}
+
+func TestPackageNameDefaultsEmpty(t *testing.T) {
+	// No [package] -> Name empty; the caller falls back to the
+	// project directory name.
+	pf, err := ParsePackageFile(`
+format = "tar"
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pf.Name != "" {
+		t.Errorf("Name = %q, want empty", pf.Name)
 	}
 }
 
@@ -122,7 +140,7 @@ architecture = "x86_64"
 [files]
 ":x" = "usr/bin/x"
 `)
-	if err == nil || !strings.Contains(err.Error(), `unknown key "package"`) {
+	if err == nil || !strings.Contains(err.Error(), `unknown key "architecture"`) {
 		t.Errorf("want unknown-key error, got: %v", err)
 	}
 

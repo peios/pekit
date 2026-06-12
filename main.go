@@ -171,13 +171,14 @@ func cmdPackage(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The package is named after the project directory until a format
-	// needs an explicit name field.
-	wd, err := os.Getwd()
-	if err != nil {
-		return err
+	name := pf.Name
+	if name == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		name = filepath.Base(wd)
 	}
-	name := filepath.Base(wd)
 
 	engine, err := engineFor(pf.Format)
 	if err != nil {

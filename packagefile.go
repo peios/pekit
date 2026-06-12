@@ -14,6 +14,7 @@ import (
 // Strictly minimal — fields grow only when a format needs them.
 type PackageFile struct {
 	Format string
+	Name   string        // optional override; defaults to the project dir name
 	Files  []FileMapping // sorted by Dest
 }
 
@@ -69,6 +70,21 @@ func ParsePackageFile(src string) (*PackageFile, error) {
 				return nil, err
 			}
 			pf.Format = s
+		case "package":
+			table, ok := raw[key].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("[package] must be a table")
+			}
+			for _, pkey := range sortedKeys(table) {
+				if pkey != "name" {
+					return nil, fmt.Errorf("[package]: unknown key %q", pkey)
+				}
+				s, err := stringValue("package", pkey, table[pkey])
+				if err != nil {
+					return nil, err
+				}
+				pf.Name = s
+			}
 		case "files":
 			table, ok := raw[key].(map[string]any)
 			if !ok {
