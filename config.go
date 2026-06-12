@@ -3,24 +3,27 @@ package main
 import (
 	"fmt"
 	"os"
-	"slices"
 	"sort"
 
 	"github.com/BurntSushi/toml"
 )
 
-// knownSections are the verbs pekit understands. Anything else in
-// pekit.toml is rejected so typos stay loud.
-var knownSections = []string{"build", "install"}
-
-// Target is a single runnable target within a section.
+// Target is a single runnable target within a command section.
 type Target struct {
 	Command string
 }
 
-// Config is a parsed pekit.toml: verb -> target name -> target.
+// Package is a single package target.
+type Package struct {
+	Format string
+}
+
+// Config is a parsed pekit.toml.
 type Config struct {
-	Sections map[string]map[string]Target
+	// Commands holds the command-running verbs: verb -> target name -> target.
+	Commands map[string]map[string]Target
+	// Packages holds [package] targets; nil when the section is absent.
+	Packages map[string]Package
 }
 
 // LoadConfig reads and parses a pekit.toml file.
@@ -47,7 +50,7 @@ func ParseConfig(src string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{Sections: make(map[string]map[string]Target)}
+	cfg := &Config{Commands: make(map[string]map[string]Target)}
 
 	sections := make([]string, 0, len(raw))
 	for key := range raw {
@@ -56,23 +59,33 @@ func ParseConfig(src string) (*Config, error) {
 	sort.Strings(sections)
 
 	for _, section := range sections {
-		if !slices.Contains(knownSections, section) {
-			return nil, fmt.Errorf("unknown section %q", section)
-		}
 		table, ok := raw[section].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("[%s] must be a table", section)
 		}
-		targets, err := parseSection(section, table)
-		if err != nil {
-			return nil, err
+		switch section {
+		case "build", "install":
+			targets, err := parseSection(section, table, parseTarget)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Commands[section] = targets
+		case "package":
+			packages, err := parseSection(section, table, parsePackage)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Packages = packages
+		default:
+			return nil, fmt.Errorf("unknown section %q", section)
 		}
-		cfg.Sections[section] = targets
 	}
 	return cfg, nil
 }
 
-func parseSection(section string, table map[string]any) (map[string]Target, error) {
+// parseSection applies the shared shape rules (bare vs named, never mixed)
+// and parses each target table with parseOne.
+func parseSection[T any](section string, table map[string]any, parseOne func(string, map[string]any) (T, error)) (map[string]T, error) {
 	// Subtables are named targets; scalar keys are bare-form target fields.
 	// The presence of both means the two shapes are mixed.
 	var fields, subtables []string
@@ -92,10 +105,10 @@ func parseSection(section string, table map[string]any) (map[string]Target, erro
 			section, fields[0], section, subtables[0])
 	}
 
-	targets := make(map[string]Target)
+	targets := make(map[string]T)
 
 	if len(subtables) == 0 {
-		target, err := parseTarget(section, table)
+		target, err := parseOne(section, table)
 		if err != nil {
 			return nil, err
 		}
@@ -104,7 +117,7 @@ func parseSection(section string, table map[string]any) (map[string]Target, erro
 	}
 
 	for _, name := range subtables {
-		target, err := parseTarget(section+"."+name, table[name].(map[string]any))
+		target, err := parseOne(section+"."+name, table[name].(map[string]any))
 		if err != nil {
 			return nil, err
 		}
@@ -115,21 +128,12 @@ func parseSection(section string, table map[string]any) (map[string]Target, erro
 
 func parseTarget(section string, table map[string]any) (Target, error) {
 	var target Target
-	keys := make([]string, 0, len(table))
-	for key := range table {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
+	for _, key := range sortedKeys(table) {
 		switch key {
 		case "command":
-			s, ok := table[key].(string)
-			if !ok {
-				return target, fmt.Errorf("[%s]: command must be a string", section)
-			}
-			if s == "" {
-				return target, fmt.Errorf("[%s]: command must not be empty", section)
+			s, err := stringValue(section, key, table[key])
+			if err != nil {
+				return target, err
 			}
 			target.Command = s
 		default:
@@ -142,7 +146,44 @@ func parseTarget(section string, table map[string]any) (Target, error) {
 	return target, nil
 }
 
-func sortedNames(targets map[string]Target) []string {
+func parsePackage(section string, table map[string]any) (Package, error) {
+	pkg := Package{Format: "peipkg"}
+	for _, key := range sortedKeys(table) {
+		switch key {
+		case "format":
+			s, err := stringValue(section, key, table[key])
+			if err != nil {
+				return pkg, err
+			}
+			pkg.Format = s
+		default:
+			return pkg, fmt.Errorf("[%s]: unknown key %q", section, key)
+		}
+	}
+	return pkg, nil
+}
+
+func stringValue(section, key string, val any) (string, error) {
+	s, ok := val.(string)
+	if !ok {
+		return "", fmt.Errorf("[%s]: %s must be a string", section, key)
+	}
+	if s == "" {
+		return "", fmt.Errorf("[%s]: %s must not be empty", section, key)
+	}
+	return s, nil
+}
+
+func sortedKeys(table map[string]any) []string {
+	keys := make([]string, 0, len(table))
+	for key := range table {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedNames[T any](targets map[string]T) []string {
 	names := make([]string, 0, len(targets))
 	for name := range targets {
 		names = append(names, name)

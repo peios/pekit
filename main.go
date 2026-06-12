@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|install> [target]"
+const usage = "usage: pekit <build|install|package> [target]"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -28,14 +28,28 @@ func run(args []string) error {
 	switch args[0] {
 	case "build", "install":
 		return cmdVerb(args[0], args[1:])
+	case "package":
+		return cmdPackage(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
 }
 
+func targetArg(args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return "main", nil
+	case 1:
+		return args[0], nil
+	default:
+		return "", errors.New(usage)
+	}
+}
+
 func cmdVerb(verb string, args []string) error {
-	if len(args) > 1 {
-		return errors.New(usage)
+	name, err := targetArg(args)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := LoadConfig("pekit.toml")
@@ -43,14 +57,9 @@ func cmdVerb(verb string, args []string) error {
 		return err
 	}
 
-	targets, ok := cfg.Sections[verb]
+	targets, ok := cfg.Commands[verb]
 	if !ok {
 		return fmt.Errorf("pekit.toml has no [%s] section", verb)
-	}
-
-	name := "main"
-	if len(args) == 1 {
-		name = args[0]
 	}
 	target, ok := targets[name]
 	if !ok {
@@ -64,4 +73,28 @@ func cmdVerb(verb string, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func cmdPackage(args []string) error {
+	name, err := targetArg(args)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := LoadConfig("pekit.toml")
+	if err != nil {
+		return err
+	}
+
+	if cfg.Packages == nil {
+		return fmt.Errorf("pekit.toml has no [package] section")
+	}
+	pkg, ok := cfg.Packages[name]
+	if !ok {
+		return fmt.Errorf("no package target %q (available: %s)",
+			name, strings.Join(sortedNames(cfg.Packages), ", "))
+	}
+
+	fmt.Printf("pekit: package %s (format %s)\n", name, pkg.Format)
+	return buildPackage(name, pkg)
 }

@@ -3,3 +3,6 @@ command = "go build -o pekit ."
 
 [install]
 command = "go install ."
+
+[package]
+format = "peipkg"
