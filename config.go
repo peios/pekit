@@ -147,7 +147,7 @@ func parseTarget(section string, table map[string]any) (Target, error) {
 }
 
 func parsePackage(section string, table map[string]any) (Package, error) {
-	pkg := Package{Format: "peipkg"}
+	var pkg Package
 	for _, key := range sortedKeys(table) {
 		switch key {
 		case "format":
@@ -159,6 +159,9 @@ func parsePackage(section string, table map[string]any) (Package, error) {
 		default:
 			return pkg, fmt.Errorf("[%s]: unknown key %q", section, key)
 		}
+	}
+	if pkg.Format == "" {
+		return pkg, fmt.Errorf("[%s]: missing required key %q", section, "format")
 	}
 	return pkg, nil
 }

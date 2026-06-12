@@ -118,15 +118,14 @@ format = "peipkg"
 	}
 }
 
-func TestPackageFormatDefaultsToPeipkg(t *testing.T) {
-	cfg, err := ParseConfig(`
+func TestPackageMissingFormatRejected(t *testing.T) {
+	// format is mandatory: pekit is format-agnostic, so no format gets
+	// to be a silent default.
+	_, err := ParseConfig(`
 [package.app1]
 `)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cfg.Packages["app1"].Format; got != "peipkg" {
-		t.Errorf("app1.Format = %q, want default %q", got, "peipkg")
+	if err == nil || !strings.Contains(err.Error(), `missing required key "format"`) {
+		t.Errorf("want missing-format error, got: %v", err)
 	}
 }
 
