@@ -15,11 +15,6 @@ type Target struct {
 	Command string
 }
 
-// Package is a single package target.
-type Package struct {
-	Format string
-}
-
 // EnvVar is one [env] entry. Order matters: later values may reference
 // earlier ones, so Config.Env preserves document order.
 type EnvVar struct {
@@ -38,8 +33,6 @@ type Config struct {
 	ClearOut bool
 	// Commands holds the command-running verbs: verb -> target name -> target.
 	Commands map[string]map[string]Target
-	// Packages holds [package] targets; nil when the section is absent.
-	Packages map[string]Package
 }
 
 // LoadConfig reads and parses a pekit.toml file.
@@ -81,11 +74,7 @@ func ParseConfig(src string) (*Config, error) {
 				}
 				cfg.Commands[key] = targets
 			case "package":
-				packages, err := parseSection(key, table, parsePackage)
-				if err != nil {
-					return nil, err
-				}
-				cfg.Packages = packages
+				return nil, fmt.Errorf("[package] has moved to package.pekit.toml")
 			case "env":
 				env, err := parseEnv(table, md)
 				if err != nil {
@@ -192,26 +181,6 @@ func parseTarget(section string, table map[string]any) (Target, error) {
 		return target, fmt.Errorf("[%s]: missing required key %q", section, "command")
 	}
 	return target, nil
-}
-
-func parsePackage(section string, table map[string]any) (Package, error) {
-	var pkg Package
-	for _, key := range sortedKeys(table) {
-		switch key {
-		case "format":
-			s, err := stringValue(section, key, table[key])
-			if err != nil {
-				return pkg, err
-			}
-			pkg.Format = s
-		default:
-			return pkg, fmt.Errorf("[%s]: unknown key %q", section, key)
-		}
-	}
-	if pkg.Format == "" {
-		return pkg, fmt.Errorf("[%s]: missing required key %q", section, "format")
-	}
-	return pkg, nil
 }
 
 // envNameRe matches valid sh identifiers. Anything else in an export

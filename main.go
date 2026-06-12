@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|package|clean> [target]"
+const usage = "usage: pekit <build|test|install|clean> [target] | pekit package"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -163,45 +163,63 @@ func envNames(env []EnvVar) []string {
 }
 
 func cmdPackage(args []string) error {
-	name, err := targetArg(args)
+	if len(args) != 0 {
+		return fmt.Errorf("pekit package takes no arguments (one package.pekit.toml per package)")
+	}
+
+	pf, err := LoadPackageFile("package.pekit.toml")
 	if err != nil {
 		return err
+	}
+	engine, err := engineFor(pf.Format)
+	if err != nil {
+		return fmt.Errorf("package %s: %w", pf.Name, err)
 	}
 
 	cfg, err := LoadConfig("pekit.toml")
 	if err != nil {
 		return err
 	}
-
-	if cfg.Packages == nil {
-		return fmt.Errorf("pekit.toml has no [package] section")
-	}
-	pkg, ok := cfg.Packages[name]
-	if !ok {
-		return fmt.Errorf("no package target %q (available: %s)",
-			name, strings.Join(sortedNames(cfg.Packages), ", "))
-	}
-	engine, err := engineFor(name, pkg)
-	if err != nil {
-		return err
-	}
-
 	if cfg.OutDir == "" {
-		return fmt.Errorf("package %s: packaging requires outDir to be set", name)
+		return fmt.Errorf("package %s: packaging requires outDir in pekit.toml", pf.Name)
 	}
-	buildStage, err := filepath.Abs(filepath.Join(cfg.OutDir, "build", name))
+
+	files, err := resolveFiles(pf, cfg.OutDir)
 	if err != nil {
 		return err
 	}
-	if !dirHasEntries(buildStage) {
-		return fmt.Errorf("package %s: no build artifacts in %s (run %q first)",
-			name, buildStage, "pekit build "+name)
-	}
-	outStage, err := prepareOutDir(cfg.OutDir, "package", name, cfg.ClearOut)
+	outStage, err := prepareOutDir(cfg.OutDir, "package", pf.Name, cfg.ClearOut)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("pekit: package %s (format %s)\n", name, pkg.Format)
-	return engine(PackageJob{Name: name, BuildStage: buildStage, OutStage: outStage})
+	fmt.Printf("pekit: package %s (format %s, %d files)\n", pf.Name, pf.Format, len(files))
+	return engine(PackageJob{Pkg: pf, Files: files, OutStage: outStage})
+}
+
+// resolveFiles turns [files] sources into verified absolute paths:
+// stage references resolve under outDir/build/<target>/, plain paths
+// resolve against the project root.
+func resolveFiles(pf *PackageFile, outDir string) ([]StagedFile, error) {
+	files := make([]StagedFile, 0, len(pf.Files))
+	for _, m := range pf.Files {
+		rel := m.Source.Path
+		if m.Source.Target != "" {
+			rel = filepath.Join(outDir, "build", m.Source.Target, m.Source.Path)
+		}
+		abs, err := filepath.Abs(rel)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(abs); err != nil {
+			hint := ""
+			if m.Source.Target != "" {
+				hint = fmt.Sprintf(" (run %q first?)", "pekit build "+m.Source.Target)
+			}
+			return nil, fmt.Errorf("package %s: source %q not found at %s%s",
+				pf.Name, m.Source, abs, hint)
+		}
+		files = append(files, StagedFile{Source: abs, Dest: m.Dest})
+	}
+	return files, nil
 }

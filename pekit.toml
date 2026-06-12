@@ -5,6 +5,3 @@ command = "go build -o $PEKIT_OUT/pekit ."
 
 [install]
 command = "go install ."
-
-[package]
-format = "tar"

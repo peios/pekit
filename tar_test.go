@@ -9,23 +9,29 @@ import (
 	"testing"
 )
 
-func makeStage(t *testing.T) (job PackageJob) {
+func makeJob(t *testing.T) PackageJob {
 	t.Helper()
 	root := t.TempDir()
-	build := filepath.Join(root, "build", "main")
-	out := filepath.Join(root, "package", "main")
-	for _, dir := range []string{filepath.Join(build, "bin"), out} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(build, "bin", "app"), []byte("binary"), 0o755); err != nil {
+	bin := filepath.Join(root, "loregd")
+	doc := filepath.Join(root, "README")
+	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(build, "README"), []byte("docs"), 0o644); err != nil {
+	if err := os.WriteFile(doc, []byte("docs"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return PackageJob{Name: "main", BuildStage: build, OutStage: out}
+	out := filepath.Join(root, "out", "package", "loregd")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return PackageJob{
+		Pkg: &PackageFile{Format: "tar", Name: "loregd"},
+		Files: []StagedFile{
+			{Source: bin, Dest: "usr/bin/loregd"},
+			{Source: doc, Dest: "usr/share/doc/loregd/README"},
+		},
+		OutStage: out,
+	}
 }
 
 func readTar(t *testing.T, path string) ([]*tar.Header, map[string]string) {
@@ -58,56 +64,54 @@ func readTar(t *testing.T, path string) ([]*tar.Header, map[string]string) {
 	return headers, contents
 }
 
-func TestTarEnginePackagesStage(t *testing.T) {
-	job := makeStage(t)
+func TestTarEnginePackagesFiles(t *testing.T) {
+	job := makeJob(t)
 	if err := tarEngine(job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	headers, contents := readTar(t, filepath.Join(job.OutStage, "main.tar"))
+	headers, contents := readTar(t, filepath.Join(job.OutStage, "loregd.tar"))
 
 	var names []string
 	for _, hdr := range headers {
 		names = append(names, hdr.Name)
 	}
-	want := []string{"README", "bin/", "bin/app"}
+	want := []string{
+		"usr/", "usr/bin/", "usr/share/", "usr/share/doc/", "usr/share/doc/loregd/",
+		"usr/bin/loregd", "usr/share/doc/loregd/README",
+	}
 	if len(names) != len(want) {
 		t.Fatalf("entries = %v, want %v", names, want)
 	}
 	for i := range want {
 		if names[i] != want[i] {
-			t.Fatalf("entries = %v, want %v (lexical order)", names, want)
+			t.Fatalf("entries = %v, want %v", names, want)
 		}
 	}
 
-	if contents["bin/app"] != "binary" || contents["README"] != "docs" {
+	if contents["usr/bin/loregd"] != "binary" || contents["usr/share/doc/loregd/README"] != "docs" {
 		t.Errorf("contents = %v", contents)
 	}
 
 	for _, hdr := range headers {
 		if hdr.Uid != 0 || hdr.Gid != 0 || hdr.Uname != "" || hdr.Gname != "" {
-			t.Errorf("%s: owner not normalised: uid=%d gid=%d %q %q",
-				hdr.Name, hdr.Uid, hdr.Gid, hdr.Uname, hdr.Gname)
+			t.Errorf("%s: owner not normalised", hdr.Name)
 		}
 		if hdr.ModTime.Unix() != 0 {
 			t.Errorf("%s: ModTime = %v, want epoch", hdr.Name, hdr.ModTime)
 		}
 	}
 
-	var app *tar.Header
 	for _, hdr := range headers {
-		if hdr.Name == "bin/app" {
-			app = hdr
+		if hdr.Name == "usr/bin/loregd" && hdr.Mode&0o111 == 0 {
+			t.Errorf("usr/bin/loregd lost its exec bit: mode %o", hdr.Mode)
 		}
-	}
-	if app.Mode&0o111 == 0 {
-		t.Errorf("bin/app lost its exec bit: mode %o", app.Mode)
 	}
 }
 
 func TestTarEngineIsDeterministic(t *testing.T) {
-	job := makeStage(t)
-	outPath := filepath.Join(job.OutStage, "main.tar")
+	job := makeJob(t)
+	outPath := filepath.Join(job.OutStage, "loregd.tar")
 
 	if err := tarEngine(job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -126,6 +130,6 @@ func TestTarEngineIsDeterministic(t *testing.T) {
 	}
 
 	if !bytes.Equal(first, second) {
-		t.Error("two runs over the same stage produced different bytes")
+		t.Error("two runs over the same inputs produced different bytes")
 	}
 }
