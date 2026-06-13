@@ -266,6 +266,22 @@ func cmdWorkspace(args []string) error {
 			if local {
 				return run([]string{verb, "--local"})
 			}
+			// Sourceless members (a buildless package like fsbase/live-boot,
+			// whose version is pinned in its package file) have no upstream
+			// tags to enumerate, so --all/--latest don't apply: build the one
+			// fixed version with a bare verb (no --version renders the package
+			// file as-is). The ledger flags key on enumerated versions and
+			// likewise don't apply.
+			src, serr := loadRecipeSource()
+			if serr != nil {
+				return serr
+			}
+			if src == nil {
+				if remember {
+					fmt.Fprintf(os.Stderr, "pekit: %s: no [source]; building its fixed version (--remember-built does not apply)\n", name)
+				}
+				return run([]string{verb})
+			}
 			sel := "*"
 			if latest {
 				v, lerr := latestVersion()
