@@ -1,0 +1,71 @@
+# Kitchen-sink package.pekit.toml — a pretend package exercising every
+# field the peipkg format will need (mirroring peipkg/pack.Manifest /
+# PSD-009 §3.3). DESIGN SKETCH: today pekit parses only format,
+# [package].name and [files]; everything else here is proposal.
+
+format = "peipkg"
+
+[package]
+name         = "jellyfind"           # optional for tar (defaults to dir name); peipkg requires it
+version      = "2.4.1"               # OPEN QUESTION: explicit here vs derived from git tag
+architecture = "x86_64"
+description  = "Media indexing daemon for the Tuesday-afternoon demo"
+license      = "MIT"
+homepage     = "https://github.com/peios/jellyfind"
+
+# Hard dependencies. Value = version constraint, "*" = any version.
+# Arch-qualified deps use the inline-table form.
+[dependencies]
+loregd  = ">= 0.3.0"
+eventd  = "*"
+libkacs = { constraint = ">= 1.2", arch = "x86_64" }
+
+[optionalDependencies]
+jellyfind-webui = "*"
+
+[conflicts]
+jellyscan = "< 1.0"
+
+# Virtual capabilities this package satisfies.
+[provides]
+media-indexer = "1.0"
+
+# Packages this one supersedes on upgrade.
+[replaces]
+old-jellyfind = "< 2.0"
+
+# Values from the PSD-009 §4.3.4 enumerated set; order is semantic
+# (emitted as given, unlike the name-keyed arrays which sort).
+sideEffects = ["registers-service", "creates-state-dirs"]
+
+# Per-path security-descriptor overrides (§3.3.5).
+# OPEN QUESTION: SDDL here (compiled to the binary SD by pekit via
+# libp-go's sddl package) vs raw base64 of the self-relative SD, which
+# is what peipkg/pack actually takes. SDDL shown — humans can read it.
+[sdOverrides]
+"usr/bin/jellyfind-admin" = "O:SY D:(A;;FX;;;BA)"
+"var/lib/jellyfind"       = "O:SY D:(A;OICI;FA;;;SY)"
+
+[files]
+# Stage references — the standard. ":path" is sugar for "main:path";
+# "target:path" names another build target's stage.
+":jellyfind"        = "usr/bin/jellyfind"
+"cli:jellyfindctl"  = "usr/bin/jellyfindctl"
+
+# Literal project-relative path, for build systems (cargo) that cannot
+# redirect output into the stage.
+"target/x86_64-unknown-linux-musl/release/jellyfind-scan" = "usr/lib/jellyfind/scan"
+
+# Non-binary payload straight from the source tree.
+"configs/jellyfind.default.toml" = "usr/share/jellyfind/default.toml"
+
+# A directory source becomes an explicit empty-directory entry
+# (peipkg/pack supports this; the .keep sentinel workaround dies here).
+"payload/empty-state-dir" = "var/lib/jellyfind"
+
+# NOT in this file, by design:
+#  - build provenance (§3.3.4): computed at pack time — proposal:
+#    timestamp = HEAD commit time, sourceRef = commit hash,
+#    farmId = "local" off-farm (farm overrides all three)
+#  - signing: SignKey is farm infrastructure, never project config
+#  - schema_version / size_installed: computed by peipkg/pack
