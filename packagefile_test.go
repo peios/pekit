@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -128,19 +129,17 @@ format = "tar"
 	}
 }
 
-func TestCutFieldsRejected(t *testing.T) {
-	// architecture/description/meta were cut until a format needs them;
-	// accepting them silently would be a compat promise nobody made.
+func TestUnknownFieldsRejected(t *testing.T) {
 	_, err := ParsePackageFile(`
 format = "tar"
 
 [package]
-architecture = "x86_64"
+arch = "x86_64"
 
 [files]
 ":x" = "usr/bin/x"
 `)
-	if err == nil || !strings.Contains(err.Error(), `unknown key "architecture"`) {
+	if err == nil || !strings.Contains(err.Error(), `unknown key "arch"`) {
 		t.Errorf("want unknown-key error, got: %v", err)
 	}
 
@@ -207,8 +206,126 @@ format = "tar"
 }
 
 func TestUnrecognisedFormatError(t *testing.T) {
-	_, err := engineFor("peipkg")
-	if err == nil || !strings.Contains(err.Error(), `unrecognised package format "peipkg"`) {
+	_, err := engineFor("rpm")
+	if err == nil || !strings.Contains(err.Error(), `unrecognised package format "rpm"`) {
 		t.Errorf("want unrecognised-format error, got: %v", err)
+	}
+}
+
+func TestKitchenSinkExampleParses(t *testing.T) {
+	// The design-sketch example must stay parse-clean as the format grows.
+	data, err := os.ReadFile("examples/package.pekit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf, err := ParsePackageFile(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pf.Name != "jellyfind" || pf.Version != "2.4.1" || pf.Architecture != "x86_64" {
+		t.Errorf("identity = %q %q %q", pf.Name, pf.Version, pf.Architecture)
+	}
+	if len(pf.Dependencies) != 3 || len(pf.Files) != 5 || len(pf.SDOverrides) != 2 {
+		t.Errorf("deps=%d files=%d sdOverrides=%d", len(pf.Dependencies), len(pf.Files), len(pf.SDOverrides))
+	}
+}
+
+func TestDependencyForms(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "peipkg"
+
+[dependencies]
+loregd  = ">= 0.3.0"
+eventd  = "*"
+libkacs = { constraint = ">= 1.2", arch = "x86_64" }
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []Dependency{
+		{Name: "eventd", Constraint: ""},
+		{Name: "libkacs", Constraint: ">= 1.2", Arch: "x86_64"},
+		{Name: "loregd", Constraint: ">= 0.3.0"},
+	}
+	if len(pf.Dependencies) != len(want) {
+		t.Fatalf("deps = %+v", pf.Dependencies)
+	}
+	for i := range want {
+		if pf.Dependencies[i] != want[i] {
+			t.Errorf("deps[%d] = %+v, want %+v", i, pf.Dependencies[i], want[i])
+		}
+	}
+}
+
+func TestEmptyConstraintRejected(t *testing.T) {
+	_, err := ParsePackageFile(`
+format = "peipkg"
+
+[dependencies]
+loregd = ""
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err == nil || !strings.Contains(err.Error(), `use "*" for any version`) {
+		t.Errorf("want any-version-spelling error, got: %v", err)
+	}
+}
+
+func TestSideEffectsOrderPreserved(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "peipkg"
+
+[package]
+sideEffects = ["zeta", "alpha"]
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pf.SideEffects) != 2 || pf.SideEffects[0] != "zeta" || pf.SideEffects[1] != "alpha" {
+		t.Errorf("SideEffects = %v, want document order", pf.SideEffects)
+	}
+}
+
+func TestSDOverridePathValidated(t *testing.T) {
+	_, err := ParsePackageFile(`
+format = "peipkg"
+
+[sdOverrides]
+"/usr/bin/x" = "O:SY"
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "relative path") {
+		t.Errorf("want path-validation error, got: %v", err)
+	}
+}
+
+func TestTarRejectsManifestFields(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "tar"
+
+[package]
+version = "1.0"
+
+[dependencies]
+loregd = "*"
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	err = tarEngine(PackageJob{Pkg: pf, Name: "x", OutStage: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "format tar cannot express version, dependencies") {
+		t.Errorf("want tar-cannot-express error, got: %v", err)
 	}
 }

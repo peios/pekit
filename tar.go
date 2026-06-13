@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -17,6 +18,11 @@ import (
 // at the epoch — identical inputs give byte-identical archives, which
 // signing and caching depend on.
 func tarEngine(job PackageJob) error {
+	// tar has no manifest: rejecting these beats silently dropping them.
+	if extras := job.Pkg.manifestExtras(); len(extras) > 0 {
+		return fmt.Errorf("package %s: format tar cannot express %s",
+			job.Name, strings.Join(extras, ", "))
+	}
 	outPath := filepath.Join(job.OutStage, job.Name+".tar")
 	f, err := os.Create(outPath)
 	if err != nil {

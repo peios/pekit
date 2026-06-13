@@ -12,7 +12,8 @@ type StagedFile struct {
 // PackageJob is everything an engine needs to build one package.
 type PackageJob struct {
 	Pkg      *PackageFile
-	Name     string       // derived from the project directory name
+	Name     string       // [package] name, or the project directory name
+	Root     string       // absolute project root (provenance, etc.)
 	Files    []StagedFile // sorted by Dest, sources verified to exist
 	OutStage string       // absolute path to outDir/package/<name>
 }
@@ -22,7 +23,8 @@ type packageEngine func(job PackageJob) error
 
 // packageEngines is the format switchboard.
 var packageEngines = map[string]packageEngine{
-	"tar": tarEngine,
+	"tar":    tarEngine,
+	"peipkg": peipkgEngine,
 }
 
 func engineFor(format string) (packageEngine, error) {

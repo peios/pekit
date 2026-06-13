@@ -171,12 +171,12 @@ func cmdPackage(args []string) error {
 	if err != nil {
 		return err
 	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 	name := pf.Name
 	if name == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
 		name = filepath.Base(wd)
 	}
 
@@ -203,7 +203,7 @@ func cmdPackage(args []string) error {
 	}
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
-	return engine(PackageJob{Pkg: pf, Name: name, Files: files, OutStage: outStage})
+	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, Files: files, OutStage: outStage})
 }
 
 // resolveFiles turns [files] sources into verified absolute paths:

@@ -13,6 +13,12 @@ description  = "Media indexing daemon for the Tuesday-afternoon demo"
 license      = "MIT"
 homepage     = "https://github.com/peios/jellyfind"
 
+# Values from the PSD-009 §4.3.4 enumerated set; order is semantic
+# (emitted as given, unlike the name-keyed arrays which sort). Lives in
+# [package] — a root-level key after any [section] would silently belong
+# to that section (TOML), so root-level manifest keys are a trap.
+sideEffects = ["registers-service", "creates-state-dirs"]
+
 # Hard dependencies. Value = version constraint, "*" = any version.
 # Arch-qualified deps use the inline-table form.
 [dependencies]
@@ -34,17 +40,13 @@ media-indexer = "1.0"
 [replaces]
 old-jellyfind = "< 2.0"
 
-# Values from the PSD-009 §4.3.4 enumerated set; order is semantic
-# (emitted as given, unlike the name-keyed arrays which sort).
-sideEffects = ["registers-service", "creates-state-dirs"]
-
 # Per-path security-descriptor overrides (§3.3.5).
 # OPEN QUESTION: SDDL here (compiled to the binary SD by pekit via
 # libp-go's sddl package) vs raw base64 of the self-relative SD, which
 # is what peipkg/pack actually takes. SDDL shown — humans can read it.
 [sdOverrides]
-"usr/bin/jellyfind-admin" = "O:SY D:(A;;FX;;;BA)"
-"var/lib/jellyfind"       = "O:SY D:(A;OICI;FA;;;SY)"
+"usr/bin/jellyfind-admin" = "O:SYD:(A;;FX;;;BA)"
+"var/lib/jellyfind"       = "O:SYD:(A;OICI;FA;;;SY)"
 
 [files]
 # Stage references — the standard. ":path" is sugar for "main:path";

@@ -11,11 +11,90 @@ import (
 )
 
 // PackageFile is a parsed package.pekit.toml: one file, one package.
-// Strictly minimal — fields grow only when a format needs them.
+// Fields grow only when a format needs them; the peipkg format needed
+// most of the PSD-009 manifest surface.
 type PackageFile struct {
 	Format string
-	Name   string        // optional override; defaults to the project dir name
 	Files  []FileMapping // sorted by Dest
+
+	// [package] identity. Name is an optional override (default: the
+	// project dir name); the rest is required or optional per-format.
+	Name         string
+	Version      string
+	Architecture string
+	Description  string
+	License      string
+	Homepage     string
+
+	Dependencies         []Dependency
+	OptionalDependencies []Dependency
+	Conflicts            []Dependency
+	Provides             []Provides
+	Replaces             []Replaces
+
+	// SideEffects order is semantic (PSD-009 §4.3.4), so it is an
+	// array, not a name-keyed table.
+	SideEffects []string
+
+	// SDOverrides hold SDDL (compiled to binary SDs at pack time);
+	// sorted by path.
+	SDOverrides []SDOverride
+}
+
+// Dependency is one [dependencies]/[optionalDependencies]/[conflicts]
+// entry. Constraint "" means any version (written "*" in TOML).
+type Dependency struct {
+	Name       string
+	Constraint string
+	Arch       string
+}
+
+// Provides is one [provides] entry: a virtual capability satisfied.
+type Provides struct {
+	Name    string
+	Version string
+}
+
+// Replaces is one [replaces] entry: a package superseded on upgrade.
+type Replaces struct {
+	Name       string
+	Constraint string
+}
+
+// SDOverride is one [sdOverrides] entry: an explicit security
+// descriptor for one packaged path, in SDDL.
+type SDOverride struct {
+	Path string
+	SDDL string
+}
+
+// manifestExtras names every set field that exists for manifest-bearing
+// formats, so formats without a manifest (tar) can reject them loudly
+// instead of dropping them silently.
+func (pf *PackageFile) manifestExtras() []string {
+	var extras []string
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"version", pf.Version != ""},
+		{"architecture", pf.Architecture != ""},
+		{"description", pf.Description != ""},
+		{"license", pf.License != ""},
+		{"homepage", pf.Homepage != ""},
+		{"dependencies", len(pf.Dependencies) > 0},
+		{"optionalDependencies", len(pf.OptionalDependencies) > 0},
+		{"conflicts", len(pf.Conflicts) > 0},
+		{"provides", len(pf.Provides) > 0},
+		{"replaces", len(pf.Replaces) > 0},
+		{"sideEffects", len(pf.SideEffects) > 0},
+		{"sdOverrides", len(pf.SDOverrides) > 0},
+	} {
+		if f.set {
+			extras = append(extras, f.name)
+		}
+	}
+	return extras
 }
 
 // FileMapping maps one build output to its install path.
@@ -75,16 +154,48 @@ func ParsePackageFile(src string) (*PackageFile, error) {
 			if !ok {
 				return nil, fmt.Errorf("[package] must be a table")
 			}
-			for _, pkey := range sortedKeys(table) {
-				if pkey != "name" {
-					return nil, fmt.Errorf("[package]: unknown key %q", pkey)
-				}
-				s, err := stringValue("package", pkey, table[pkey])
-				if err != nil {
-					return nil, err
-				}
-				pf.Name = s
+			if err := pf.parseIdentity(table); err != nil {
+				return nil, err
 			}
+		case "dependencies", "optionalDependencies", "conflicts":
+			deps, err := parseDeps(key, raw[key])
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "dependencies":
+				pf.Dependencies = deps
+			case "optionalDependencies":
+				pf.OptionalDependencies = deps
+			case "conflicts":
+				pf.Conflicts = deps
+			}
+		case "provides":
+			entries, err := parseNameValueTable(key, raw[key])
+			if err != nil {
+				return nil, err
+			}
+			for _, e := range entries {
+				pf.Provides = append(pf.Provides, Provides{Name: e[0], Version: e[1]})
+			}
+		case "replaces":
+			entries, err := parseNameValueTable(key, raw[key])
+			if err != nil {
+				return nil, err
+			}
+			for _, e := range entries {
+				pf.Replaces = append(pf.Replaces, Replaces{Name: e[0], Constraint: e[1]})
+			}
+		case "sdOverrides":
+			table, ok := raw[key].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("[sdOverrides] must be a table")
+			}
+			overrides, err := parseSDOverrides(table)
+			if err != nil {
+				return nil, err
+			}
+			pf.SDOverrides = overrides
 		case "files":
 			table, ok := raw[key].(map[string]any)
 			if !ok {
@@ -107,6 +218,123 @@ func ParsePackageFile(src string) (*PackageFile, error) {
 		return nil, fmt.Errorf("[files] must map at least one file")
 	}
 	return pf, nil
+}
+
+func (pf *PackageFile) parseIdentity(table map[string]any) error {
+	for _, key := range sortedKeys(table) {
+		if key == "sideEffects" {
+			vals, ok := table[key].([]any)
+			if !ok {
+				return fmt.Errorf("[package]: sideEffects must be an array of strings")
+			}
+			for _, v := range vals {
+				s, ok := v.(string)
+				if !ok || s == "" {
+					return fmt.Errorf("[package]: sideEffects must be an array of non-empty strings")
+				}
+				pf.SideEffects = append(pf.SideEffects, s)
+			}
+			continue
+		}
+		dst, ok := map[string]*string{
+			"name":         &pf.Name,
+			"version":      &pf.Version,
+			"architecture": &pf.Architecture,
+			"description":  &pf.Description,
+			"license":      &pf.License,
+			"homepage":     &pf.Homepage,
+		}[key]
+		if !ok {
+			return fmt.Errorf("[package]: unknown key %q", key)
+		}
+		s, err := stringValue("package", key, table[key])
+		if err != nil {
+			return err
+		}
+		*dst = s
+	}
+	return nil
+}
+
+// parseDeps parses a dependency table. Values are either a constraint
+// string ("*" = any version) or an inline table {constraint, arch}.
+func parseDeps(section string, raw any) ([]Dependency, error) {
+	table, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("[%s] must be a table", section)
+	}
+	var deps []Dependency
+	for _, name := range sortedKeys(table) {
+		dep := Dependency{Name: name}
+		switch v := table[name].(type) {
+		case string:
+			if v == "" {
+				return nil, fmt.Errorf("[%s]: %s: use %q for any version, not an empty string", section, name, "*")
+			}
+			dep.Constraint = v
+		case map[string]any:
+			for _, k := range sortedKeys(v) {
+				switch k {
+				case "constraint", "arch":
+					s, err := stringValue(section+"."+name, k, v[k])
+					if err != nil {
+						return nil, err
+					}
+					if k == "constraint" {
+						dep.Constraint = s
+					} else {
+						dep.Arch = s
+					}
+				default:
+					return nil, fmt.Errorf("[%s.%s]: unknown key %q", section, name, k)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("[%s]: %s must be a constraint string or {constraint, arch} table", section, name)
+		}
+		if dep.Constraint == "*" {
+			dep.Constraint = "" // pack's any-version spelling
+		}
+		deps = append(deps, dep)
+	}
+	return deps, nil
+}
+
+// parseNameValueTable parses a flat string->string table ([provides],
+// [replaces]) into sorted (name, value) pairs, translating "*" to "".
+func parseNameValueTable(section string, raw any) ([][2]string, error) {
+	table, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("[%s] must be a table", section)
+	}
+	var entries [][2]string
+	for _, name := range sortedKeys(table) {
+		s, err := stringValue(section, name, table[name])
+		if err != nil {
+			return nil, err
+		}
+		if s == "*" {
+			s = ""
+		}
+		entries = append(entries, [2]string{name, s})
+	}
+	return entries, nil
+}
+
+func parseSDOverrides(table map[string]any) ([]SDOverride, error) {
+	var overrides []SDOverride
+	for _, key := range sortedKeys(table) {
+		cleaned, err := cleanDest(key)
+		if err != nil {
+			return nil, fmt.Errorf("[sdOverrides]: %w", err)
+		}
+		s, err := stringValue("sdOverrides", key, table[key])
+		if err != nil {
+			return nil, err
+		}
+		overrides = append(overrides, SDOverride{Path: cleaned, SDDL: s})
+	}
+	return overrides, nil
 }
 
 func parseFiles(table map[string]any) ([]FileMapping, error) {
