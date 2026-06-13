@@ -1,0 +1,5 @@
+outDir = "out"
+
+[source]
+git = "https://github.com/peios/loregd.git"
+rev = "40c9ee8360816a8bda57f9d9e34a5e757c30c0fd"

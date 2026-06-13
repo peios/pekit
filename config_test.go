@@ -450,3 +450,40 @@ func TestLoregdRecipeExampleParses(t *testing.T) {
 		t.Errorf("Source = %+v", cfg.Source)
 	}
 }
+
+func TestDefaultNameFromGitURL(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/peios/loregd.git": "loregd",
+		"https://github.com/peios/loregd":     "loregd",
+		"git@github.com:peios/loregd.git":     "loregd",
+		"/home/jack/projects/peios/loregd":    "loregd",
+		"https://example.com/x/loregd.git/":   "loregd",
+	}
+	for url, want := range cases {
+		if got := defaultName(&Source{Git: url, Rev: "x"}, "/tmp/recipe-dir"); got != want {
+			t.Errorf("defaultName(%q) = %q, want %q", url, got, want)
+		}
+	}
+	if got := defaultName(nil, "/tmp/foo/bar"); got != "bar" {
+		t.Errorf("defaultName(nil) = %q, want bar", got)
+	}
+}
+
+func TestCoolerRecipeParses(t *testing.T) {
+	// A pure-delegate recipe: just [source], no build/package — pekit
+	// borrows both from the fetched source.
+	data, err := os.ReadFile("examples/loregd-cooler/pekit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil {
+		t.Fatal("expected [source]")
+	}
+	if _, hasBuild := cfg.Commands["build"]; hasBuild {
+		t.Error("cooler recipe should have no [build] of its own")
+	}
+}

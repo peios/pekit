@@ -217,28 +217,69 @@ func cmdPackage(args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("pekit package takes no arguments (one package.pekit.toml per package)")
 	}
-
-	pf, err := LoadPackageFile("package.pekit.toml")
-	if err != nil {
-		return err
-	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
+	cfg, err := LoadConfig("pekit.toml")
+	if err != nil {
+		return err
+	}
+
+	pf, err := tryLoadPackageFile("package.pekit.toml")
+	if err != nil {
+		return err
+	}
+	_, hasBuild := cfg.Commands["build"]
+
+	// With [source], config resolves recipe-first, source-fallback: a
+	// self-describing upstream (loregd) ships its own pekit files, so the
+	// recipe can be just [source] and we borrow the source's build +
+	// package definition. Whatever the recipe does provide shadows it.
+	provenanceDir, literalRoot := wd, wd
+	if cfg.Source != nil {
+		checkout, aerr := filepath.Abs(sourceDir(cfg.Source, cfg.OutDir))
+		if aerr != nil {
+			return aerr
+		}
+		provenanceDir, literalRoot = checkout, checkout
+		if pf == nil || !hasBuild {
+			if _, ferr := fetchSource(cfg.Source, cfg.OutDir); ferr != nil {
+				return ferr
+			}
+			if pf == nil {
+				p, lerr := tryLoadPackageFile(filepath.Join(checkout, "package.pekit.toml"))
+				if lerr != nil {
+					return lerr
+				}
+				pf = p
+			}
+			if !hasBuild {
+				if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml")); cerr == nil {
+					if b, ok := srcCfg.Commands["build"]; ok {
+						cfg.Commands["build"] = b
+						hasBuild = true
+					}
+					if len(cfg.Env) == 0 {
+						cfg.Env = srcCfg.Env
+					}
+				}
+			}
+		}
+	}
+
+	if pf == nil {
+		return fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
+	}
+
 	name := pf.Name
 	if name == "" {
-		name = filepath.Base(wd)
+		name = defaultName(cfg.Source, wd)
 	}
 
 	engine, err := engineFor(pf.Format)
 	if err != nil {
 		return fmt.Errorf("package %s: %w", name, err)
-	}
-
-	cfg, err := LoadConfig("pekit.toml")
-	if err != nil {
-		return err
 	}
 	if cfg.OutDir == "" {
 		return fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
@@ -250,7 +291,7 @@ func cmdPackage(args []string) error {
 	for _, targetName := range referencedBuildTargets(pf) {
 		target, ok := cfg.Commands["build"][targetName]
 		if !ok {
-			return fmt.Errorf("package %s: [files] references build target %q but pekit.toml has no [build.%s]",
+			return fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
 				name, targetName, targetName)
 		}
 		if err := runCommandTarget(cfg, "build", targetName, target); err != nil {
@@ -258,7 +299,7 @@ func cmdPackage(args []string) error {
 		}
 	}
 
-	files, err := resolveFiles(pf, name, cfg.OutDir)
+	files, err := resolveFiles(pf, name, cfg.OutDir, literalRoot)
 	if err != nil {
 		return err
 	}
@@ -267,18 +308,30 @@ func cmdPackage(args []string) error {
 		return err
 	}
 
-	// Provenance identifies what built the package: the fetched source
-	// for a [source] recipe (already checked out by the build above),
-	// else the recipe dir.
-	provenanceDir := wd
-	if cfg.Source != nil {
-		if provenanceDir, err = filepath.Abs(sourceDir(cfg.Source, cfg.OutDir)); err != nil {
-			return err
-		}
-	}
-
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
 	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage})
+}
+
+// tryLoadPackageFile loads a package file, returning (nil, nil) when it
+// does not exist so callers can fall back to another location.
+func tryLoadPackageFile(path string) (*PackageFile, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	}
+	return LoadPackageFile(path)
+}
+
+// defaultName derives a package name when [package] name is unset: the
+// source repo (git URL basename minus .git) for a [source] recipe — so
+// the name doesn't depend on the checkout dir — else the project dir.
+func defaultName(src *Source, wd string) string {
+	if src != nil {
+		base := strings.TrimSuffix(filepath.Base(strings.TrimRight(src.Git, "/")), ".git")
+		if base != "" && base != "." && base != string(filepath.Separator) {
+			return base
+		}
+	}
+	return filepath.Base(wd)
 }
 
 // referencedBuildTargets returns the distinct build targets to run
@@ -301,10 +354,10 @@ func referencedBuildTargets(pf *PackageFile) []string {
 // resolveFiles turns [files] sources into verified absolute paths:
 // stage references resolve under outDir/build/<target>/, plain paths
 // resolve against the project root.
-func resolveFiles(pf *PackageFile, name, outDir string) ([]StagedFile, error) {
+func resolveFiles(pf *PackageFile, name, outDir, literalRoot string) ([]StagedFile, error) {
 	files := make([]StagedFile, 0, len(pf.Files))
 	for _, m := range pf.Files {
-		rel := m.Source.Path
+		rel := filepath.Join(literalRoot, m.Source.Path)
 		if m.Source.Target != "" {
 			rel = filepath.Join(outDir, "build", m.Source.Target, m.Source.Path)
 		}
