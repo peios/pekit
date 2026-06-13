@@ -122,13 +122,13 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 
 	if verb == "build" && cfg.OutDir != "" {
 		if cfg.Source != nil {
-			srcDir, err := fetchSource(cfg.Source, cfg.OutDir)
+			srcDir, err := fetchSource(cfg.Source, sourceCheckout(cfg))
 			if err != nil {
 				return err
 			}
 			cmd.Dir = srcDir
 		}
-		stageDir, err := prepareOutDir(cfg.OutDir, verb, name, cfg.ClearOut)
+		stageDir, err := prepareOutDir(outBase(cfg), verb, name, cfg.ClearOut)
 		if err != nil {
 			return err
 		}
@@ -146,21 +146,34 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	return cmd.Run()
 }
 
-// sourceDir is the checkout path for a [source] block: OutDir/source/<rev>.
-// The rev keys the directory — an immutable rev makes the checkout a
-// valid cache; '/' in refs is flattened so the path stays one level deep.
-func sourceDir(src *Source, outDir string) string {
-	rev := strings.ReplaceAll(src.Rev, "/", "_")
-	return filepath.Join(outDir, "source", rev)
+// revScope is the filesystem-safe form of a source rev ('/' flattened).
+func revScope(src *Source) string {
+	return strings.ReplaceAll(src.Rev, "/", "_")
 }
 
-// fetchSource ensures the pinned source is checked out and returns its
-// absolute path. An existing checkout is reused (immutable rev → valid;
-// a mutable ref may go stale — pekit clean forces a re-fetch). A failed
-// checkout is torn down so the next run re-clones rather than reusing a
-// half-built tree.
-func fetchSource(src *Source, outDir string) (string, error) {
-	abs, err := filepath.Abs(sourceDir(src, outDir))
+// outBase is the staging root. In source mode everything for one rev is
+// scoped under OutDir/<rev>/ (source, build, package) so builds of
+// different revs coexist; without a source it's just OutDir.
+func outBase(cfg *Config) string {
+	if cfg.Source != nil {
+		return filepath.Join(cfg.OutDir, revScope(cfg.Source))
+	}
+	return cfg.OutDir
+}
+
+// sourceCheckout is where [source] is checked out: OutBase/source. The
+// rev is already in OutBase, so an immutable rev makes this a valid cache.
+func sourceCheckout(cfg *Config) string {
+	return filepath.Join(outBase(cfg), "source")
+}
+
+// fetchSource ensures the pinned source is checked out at dir and returns
+// its absolute path. An existing checkout is reused (immutable rev →
+// valid; a mutable ref may go stale — pekit clean forces a re-fetch). A
+// failed checkout is torn down so the next run re-clones rather than
+// reusing a half-built tree.
+func fetchSource(src *Source, dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
@@ -272,13 +285,13 @@ func cmdPackage(args []string, ver *Version) error {
 	// package definition. Whatever the recipe does provide shadows it.
 	provenanceDir, literalRoot := wd, wd
 	if cfg.Source != nil {
-		checkout, aerr := filepath.Abs(sourceDir(cfg.Source, cfg.OutDir))
+		checkout, aerr := filepath.Abs(sourceCheckout(cfg))
 		if aerr != nil {
 			return aerr
 		}
 		provenanceDir, literalRoot = checkout, checkout
 		if pf == nil || !hasBuild {
-			if _, ferr := fetchSource(cfg.Source, cfg.OutDir); ferr != nil {
+			if _, ferr := fetchSource(cfg.Source, sourceCheckout(cfg)); ferr != nil {
 				return ferr
 			}
 			if pf == nil {
@@ -333,11 +346,11 @@ func cmdPackage(args []string, ver *Version) error {
 		}
 	}
 
-	files, err := resolveFiles(pf, name, cfg.OutDir, literalRoot)
+	files, err := resolveFiles(pf, name, outBase(cfg), literalRoot)
 	if err != nil {
 		return err
 	}
-	outStage, err := prepareOutDir(cfg.OutDir, "package", name, cfg.ClearOut)
+	outStage, err := prepareOutDir(outBase(cfg), "package", name, cfg.ClearOut)
 	if err != nil {
 		return err
 	}

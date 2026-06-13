@@ -416,10 +416,18 @@ func TestSourceUnknownKeyRejected(t *testing.T) {
 	}
 }
 
-func TestSourceDirFlattensRev(t *testing.T) {
-	got := sourceDir(&Source{Git: "u", Rev: "refs/tags/v1.2"}, "out")
-	if got != "out/source/refs_tags_v1.2" {
-		t.Errorf("sourceDir = %q, want flattened", got)
+func TestOutBaseRevScopesSourceMode(t *testing.T) {
+	src := &Source{Git: "u", Rev: "refs/tags/v1.2"}
+	cfg := &Config{OutDir: "out", Source: src}
+	if got := outBase(cfg); got != "out/refs_tags_v1.2" {
+		t.Errorf("outBase = %q, want out/refs_tags_v1.2 (rev-scoped, flattened)", got)
+	}
+	if got := sourceCheckout(cfg); got != "out/refs_tags_v1.2/source" {
+		t.Errorf("sourceCheckout = %q", got)
+	}
+	// No source: plain outDir, no rev scope.
+	if got := outBase(&Config{OutDir: "out"}); got != "out" {
+		t.Errorf("outBase(no source) = %q, want out", got)
 	}
 }
 
