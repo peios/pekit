@@ -436,3 +436,17 @@ func TestRemoteSourceExampleParses(t *testing.T) {
 		t.Errorf("Source = %+v", cfg.Source)
 	}
 }
+
+func TestLoregdRecipeExampleParses(t *testing.T) {
+	data, err := os.ReadFile("examples/loregd/pekit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.Git != "https://github.com/peios/loregd.git" || cfg.Source.Rev != "v0.21.0" {
+		t.Errorf("Source = %+v", cfg.Source)
+	}
+}

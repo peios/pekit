@@ -1,0 +1,12 @@
+# Demo recipe: build and package loregd straight from its git repo,
+# the way the farm would — no local loregd checkout needed. The recipe
+# (this file) lives here; the source comes from upstream at a pinned tag.
+
+outDir = "out"
+
+[source]
+git = "https://github.com/peios/loregd.git"
+rev = "v0.21.0"
+
+[build]
+command = "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o \"$PEKIT_OUT/loregd\" ."

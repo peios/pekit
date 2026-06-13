@@ -1,2 +1,3 @@
 /pekit
-/out/
+# pekit stage dirs, at the repo root and under examples/*/
+out/

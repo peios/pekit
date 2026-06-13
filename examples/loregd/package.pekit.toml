@@ -1,0 +1,11 @@
+format = "peipkg"
+
+[package]
+name         = "loregd"
+version      = "0.21.0-1"
+architecture = "x86_64"
+description  = "Local Registry Daemon - RSI storage backend for LCS hives"
+license      = "MIT"
+
+[files]
+":loregd" = "usr/bin/loregd"
