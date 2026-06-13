@@ -36,8 +36,10 @@ func peipkgEngine(job PackageJob) error {
 		return fmt.Errorf("package %s: %w", job.Name, err)
 	}
 
+	// Farm naming convention: name_version_arch.peipkg
+	// (e.g. kernel_0.20.0-alpha1-1_x86_64.peipkg).
 	outPath := filepath.Join(job.OutStage,
-		fmt.Sprintf("%s-%s-%s.peipkg", job.Name, pf.Version, pf.Architecture))
+		fmt.Sprintf("%s_%s_%s.peipkg", job.Name, pf.Version, pf.Architecture))
 	f, err := os.Create(outPath)
 	if err != nil {
 		return fmt.Errorf("package %s: %w", job.Name, err)
