@@ -37,11 +37,14 @@ func peipkgEngine(job PackageJob) (string, error) {
 		// to (the tree may be dirty or not even a git repo), so stamp a
 		// visible localdev marker instead of reading git HEAD.
 		build = localdevProvenance()
+	} else if b, err := localProvenance(job.ProvenanceDir); err != nil {
+		// No commit to anchor to (a sourceless recipe in an uncommitted
+		// tree). Provenance is best-effort metadata, not a reason to refuse
+		// to build: warn and stamp an unanchored marker. A committed recipe
+		// (every farm build) gets real provenance.
+		fmt.Fprintf(os.Stderr, "pekit: warning: package %s: %v; stamping unanchored provenance (no commit ref)\n", job.Name, err)
+		build = unanchoredProvenance()
 	} else {
-		b, err := localProvenance(job.ProvenanceDir)
-		if err != nil {
-			return "", fmt.Errorf("package %s: %w", job.Name, err)
-		}
 		build = b
 	}
 
@@ -148,6 +151,21 @@ func localdevProvenance() pack.BuildInfo {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		FarmID:    "localdev",
 		SourceRef: "working-tree",
+	}
+}
+
+// unanchoredProvenance is the build info for a package whose recipe dir has
+// no git commit to anchor to. Like localProvenance it is a non-farm "local"
+// build, but with no commit ref ("unknown") and a wall-clock timestamp — so,
+// unlike a git-anchored build, it is not reproducible. Distinct from
+// localdevProvenance ("localdev"/"working-tree"), which marks a --local
+// working-copy build. The farm builds from committed recipes and never hits
+// this path.
+func unanchoredProvenance() pack.BuildInfo {
+	return pack.BuildInfo{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		FarmID:    "local",
+		SourceRef: "unknown",
 	}
 }
 
