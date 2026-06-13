@@ -84,3 +84,49 @@ func TestRevMatcherRejectsNoTemplate(t *testing.T) {
 		t.Error("a literal rev has nothing to enumerate; want error")
 	}
 }
+
+// versionSet builds a set the way resolveVersions does, for cap tests.
+func versionSet(t *testing.T, vs ...string) map[string]*Version {
+	t.Helper()
+	m := map[string]*Version{}
+	for _, s := range vs {
+		v, err := parseVersion(s)
+		if err != nil {
+			t.Fatalf("parseVersion(%q): %v", s, err)
+		}
+		m[v.Full] = v
+	}
+	return m
+}
+
+func TestCapVersions(t *testing.T) {
+	set := versionSet(t, "0.21.0", "0.21.1", "0.21.2")
+	excluded, err := capVersions(set, ">=0.21.1")
+	if err != nil {
+		t.Fatalf("capVersions: %v", err)
+	}
+	if len(set) != 2 || set["0.21.1"] == nil || set["0.21.2"] == nil {
+		t.Errorf("kept = %v, want {0.21.1, 0.21.2}", sortedNames(set))
+	}
+	if len(excluded) != 1 || excluded[0] != "0.21.0" {
+		t.Errorf("excluded = %v, want [0.21.0]", excluded)
+	}
+}
+
+func TestCapVersionsExcludedIsSorted(t *testing.T) {
+	// 0.10.0 must sort before 0.9.0 (semver, not lexical).
+	set := versionSet(t, "0.9.0", "0.10.0", "1.0.0")
+	excluded, err := capVersions(set, ">=1.0.0")
+	if err != nil {
+		t.Fatalf("capVersions: %v", err)
+	}
+	if len(excluded) != 2 || excluded[0] != "0.9.0" || excluded[1] != "0.10.0" {
+		t.Errorf("excluded = %v, want [0.9.0 0.10.0]", excluded)
+	}
+}
+
+func TestCapVersionsBadConstraint(t *testing.T) {
+	if _, err := capVersions(versionSet(t, "1.0.0"), "not a constraint"); err == nil {
+		t.Error("want error for invalid constraint")
+	}
+}

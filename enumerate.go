@@ -125,7 +125,10 @@ func enumerateVersions(git, revTmpl string) ([]*Version, error) {
 // Comma separates selectors (union). A selector that is a plain version
 // is used as-is (no enumeration); one that is a constraint (>3.4.0, ^3,
 // 3.x, *) triggers a single upstream enumeration that all constraints
-// then filter. Absent --version → one run with no version (nil).
+// then filter. The recipe's [source].versions caps the whole result —
+// versions outside it are dropped (and logged) so a "*" sweep never trips
+// over tags the recipe can't build. Absent --version → one run with no
+// version (nil).
 func resolveVersions(raw string, found bool) ([]*Version, error) {
 	if !found {
 		return []*Version{nil}, nil
@@ -149,10 +152,17 @@ func resolveVersions(raw string, found bool) ([]*Version, error) {
 		constraints = append(constraints, c)
 	}
 
+	// The recipe is loaded once: it supplies the enumeration source AND
+	// the optional [source].versions cap. A recipe with no [source] (or
+	// no pekit.toml here) simply has neither.
+	src, err := loadRecipeSource()
+	if err != nil {
+		return nil, err
+	}
+
 	if len(constraints) > 0 {
-		src, err := loadRecipeSource()
-		if err != nil {
-			return nil, err
+		if src == nil {
+			return nil, fmt.Errorf("--version constraints need a [source] to enumerate upstream tags")
 		}
 		all, err := enumerateVersions(src.Git, src.Rev)
 		if err != nil {
@@ -172,15 +182,50 @@ func resolveVersions(raw string, found bool) ([]*Version, error) {
 		}
 	}
 
+	capped := src != nil && src.Versions != ""
+	if capped {
+		excluded, err := capVersions(set, src.Versions)
+		if err != nil {
+			return nil, err
+		}
+		if len(excluded) > 0 {
+			fmt.Fprintf(os.Stderr, "pekit: skipping %s (outside [source].versions %s)\n",
+				strings.Join(excluded, ", "), src.Versions)
+		}
+	}
+
 	vers := make([]*Version, 0, len(set))
 	for _, v := range set {
 		vers = append(vers, v)
 	}
 	if len(vers) == 0 {
+		if capped {
+			return nil, fmt.Errorf("--version %q matched no versions within [source].versions %s", raw, src.Versions)
+		}
 		return nil, fmt.Errorf("--version %q matched no versions", raw)
 	}
 	sortVersions(vers)
 	return vers, nil
+}
+
+// capVersions removes from set every version outside the semver
+// constraint, returning the excluded versions (semver-sorted) so the
+// caller can report what it dropped. It mutates set in place.
+func capVersions(set map[string]*Version, constraint string) ([]string, error) {
+	supported, err := semver.NewConstraint(constraint)
+	if err != nil {
+		return nil, fmt.Errorf("[source].versions %q: %w", constraint, err)
+	}
+	var excluded []string
+	for full, v := range set {
+		sv, err := semver.NewVersion(v.Full)
+		if err != nil || !supported.Check(sv) {
+			delete(set, full)
+			excluded = append(excluded, full)
+		}
+	}
+	sortVersionStrings(excluded)
+	return excluded, nil
 }
 
 func sortVersions(vers []*Version) {
@@ -195,19 +240,22 @@ func sortVersions(vers []*Version) {
 }
 
 // loadRecipeSource reads the recipe's [source] WITHOUT version rendering
-// (the raw rev template is what we invert). Constraints can't be resolved
-// without a source to enumerate.
+// (the raw rev template is what we invert, and the versions cap is a
+// constraint). Returns (nil, nil) when there is no pekit.toml here or it
+// declares no [source]: callers that genuinely need a source (constraint
+// enumeration) check for nil; the missing-recipe error then surfaces with
+// proper context at dispatch. Real read/parse errors propagate.
 func loadRecipeSource() (*Source, error) {
 	data, err := os.ReadFile("pekit.toml")
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	cfg, err := ParseConfig(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("pekit.toml: %w", err)
-	}
-	if cfg.Source == nil {
-		return nil, fmt.Errorf("--version constraints need a [source] to enumerate upstream tags")
 	}
 	return cfg.Source, nil
 }

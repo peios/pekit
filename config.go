@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/BurntSushi/toml"
+	semver "github.com/Masterminds/semver/v3"
 )
 
 // Target is a single runnable target within a command section.
@@ -44,6 +45,12 @@ type Config struct {
 type Source struct {
 	Git string
 	Rev string
+	// Versions, when set, is a semver constraint bounding which upstream
+	// versions this recipe builds. The resolved --version set (including
+	// an enumerated "*") is intersected with it, so tags the recipe can't
+	// build (e.g. releases predating its packaging files) are skipped
+	// rather than attempted. Empty = no bound.
+	Versions string
 }
 
 // LoadConfig reads, templates, and parses a pekit.toml file.
@@ -164,6 +171,15 @@ func parseSource(table map[string]any) (*Source, error) {
 				return nil, err
 			}
 			src.Rev = s
+		case "versions":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			if _, err := semver.NewConstraint(s); err != nil {
+				return nil, fmt.Errorf("[source]: versions %q is not a valid semver constraint: %w", s, err)
+			}
+			src.Versions = s
 		default:
 			return nil, fmt.Errorf("[source]: unknown key %q", key)
 		}

@@ -416,6 +416,23 @@ func TestSourceUnknownKeyRejected(t *testing.T) {
 	}
 }
 
+func TestSourceVersionsParsed(t *testing.T) {
+	cfg, err := ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"v{{version}}\"\nversions=\">=0.21.1\"\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.Versions != ">=0.21.1" {
+		t.Errorf("Source.Versions = %+v, want >=0.21.1", cfg.Source)
+	}
+}
+
+func TestSourceVersionsRejectsBadConstraint(t *testing.T) {
+	_, err := ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"r\"\nversions=\"not a constraint\"\n")
+	if err == nil || !strings.Contains(err.Error(), "not a valid semver constraint") {
+		t.Errorf("want bad-constraint error, got: %v", err)
+	}
+}
+
 func TestOutBaseRevScopesSourceMode(t *testing.T) {
 	src := &Source{Git: "u", Rev: "refs/tags/v1.2"}
 	cfg := &Config{OutDir: "out", Source: src}
