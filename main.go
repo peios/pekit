@@ -23,19 +23,53 @@ func main() {
 }
 
 func run(args []string) error {
+	args, ver, err := extractVersion(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	switch args[0] {
 	case "build", "test", "install":
-		return cmdVerb(args[0], args[1:])
+		return cmdVerb(args[0], args[1:], ver)
 	case "package":
-		return cmdPackage(args[1:])
+		return cmdPackage(args[1:], ver)
 	case "clean":
-		return cmdClean(args[1:])
+		return cmdClean(args[1:], ver)
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
+}
+
+// extractVersion pulls --version/-V (or --version=) out of args, parses
+// it, and returns the remaining args plus the version (nil if absent).
+func extractVersion(args []string) ([]string, *Version, error) {
+	var rest []string
+	verStr, found := "", false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--version" || a == "-V":
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("%s requires a value", a)
+			}
+			verStr, found = args[i+1], true
+			i++
+		case strings.HasPrefix(a, "--version="):
+			verStr, found = strings.TrimPrefix(a, "--version="), true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if !found {
+		return args, nil, nil
+	}
+	ver, err := parseVersion(verStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rest, ver, nil
 }
 
 func targetArg(args []string) (string, error) {
@@ -49,13 +83,13 @@ func targetArg(args []string) (string, error) {
 	}
 }
 
-func cmdVerb(verb string, args []string) error {
+func cmdVerb(verb string, args []string, ver *Version) error {
 	name, err := targetArg(args)
 	if err != nil {
 		return err
 	}
 
-	cfg, err := LoadConfig("pekit.toml")
+	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
 	}
@@ -159,13 +193,13 @@ func runGit(dir string, args ...string) error {
 // cmdClean runs the [clean] command if the project defines one, then
 // removes outDir. Unlike other verbs a missing [clean] section is fine:
 // pekit always knows how to clean the stages it owns.
-func cmdClean(args []string) error {
+func cmdClean(args []string, ver *Version) error {
 	name, err := targetArg(args)
 	if err != nil {
 		return err
 	}
 
-	cfg, err := LoadConfig("pekit.toml")
+	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
 	}
@@ -213,7 +247,7 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string) error {
+func cmdPackage(args []string, ver *Version) error {
 	if len(args) != 0 {
 		return fmt.Errorf("pekit package takes no arguments (one package.pekit.toml per package)")
 	}
@@ -221,12 +255,12 @@ func cmdPackage(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := LoadConfig("pekit.toml")
+	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
 	}
 
-	pf, err := tryLoadPackageFile("package.pekit.toml")
+	pf, err := tryLoadPackageFile("package.pekit.toml", ver)
 	if err != nil {
 		return err
 	}
@@ -248,14 +282,14 @@ func cmdPackage(args []string) error {
 				return ferr
 			}
 			if pf == nil {
-				p, lerr := tryLoadPackageFile(filepath.Join(checkout, "package.pekit.toml"))
+				p, lerr := tryLoadPackageFile(filepath.Join(checkout, "package.pekit.toml"), ver)
 				if lerr != nil {
 					return lerr
 				}
 				pf = p
 			}
 			if !hasBuild {
-				if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml")); cerr == nil {
+				if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml"), ver); cerr == nil {
 					if b, ok := srcCfg.Commands["build"]; ok {
 						cfg.Commands["build"] = b
 						hasBuild = true
@@ -314,11 +348,11 @@ func cmdPackage(args []string) error {
 
 // tryLoadPackageFile loads a package file, returning (nil, nil) when it
 // does not exist so callers can fall back to another location.
-func tryLoadPackageFile(path string) (*PackageFile, error) {
+func tryLoadPackageFile(path string, ver *Version) (*PackageFile, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, nil
 	}
-	return LoadPackageFile(path)
+	return LoadPackageFile(path, ver)
 }
 
 // defaultName derives a package name when [package] name is unset: the

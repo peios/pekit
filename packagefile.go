@@ -125,13 +125,17 @@ func (s SourceRef) String() string {
 	return s.Target + ":" + s.Path
 }
 
-// LoadPackageFile reads and parses a package.pekit.toml.
-func LoadPackageFile(path string) (*PackageFile, error) {
+// LoadPackageFile reads, templates, and parses a package.pekit.toml.
+func LoadPackageFile(path string, ver *Version) (*PackageFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	pf, err := ParsePackageFile(string(data))
+	rendered, err := renderTemplate(string(data), ver)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	pf, err := ParsePackageFile(rendered)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}

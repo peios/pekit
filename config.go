@@ -46,13 +46,17 @@ type Source struct {
 	Rev string
 }
 
-// LoadConfig reads and parses a pekit.toml file.
-func LoadConfig(path string) (*Config, error) {
+// LoadConfig reads, templates, and parses a pekit.toml file.
+func LoadConfig(path string, ver *Version) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := ParseConfig(string(data))
+	rendered, err := renderTemplate(string(data), ver)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	cfg, err := ParseConfig(rendered)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}

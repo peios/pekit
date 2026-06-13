@@ -493,11 +493,17 @@ func TestActaRecipeExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := ParseConfig(string(data))
+	// Templated recipe: render with a version, then parse.
+	v, _ := parseVersion("0.34.0")
+	rendered, err := renderTemplate(string(data), v)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	cfg, err := ParseConfig(rendered)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.Source == nil || cfg.Source.Rev != "v0.34.0" {
-		t.Errorf("Source = %+v", cfg.Source)
+		t.Errorf("Source.Rev = %q, want v0.34.0", cfg.Source.Rev)
 	}
 }

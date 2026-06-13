@@ -3,6 +3,12 @@
 # and (in package.pekit.toml) the package — the busybox-style mode, not
 # the self-describing loregd-cooler delegate mode.
 #
+# Version-templated: pass the upstream version once and it drives the tag,
+# the package version, and the binary's embedded version. Build with
+#   pekit package --version 0.34.0
+# {{version}} is the whole input; {{major}}/{{minor}}/{{patch}} (and
+# {{prerelease}}/{{buildmeta}}) are there for other tag-naming schemes.
+#
 # Two binaries from one source: acta-server (the service; templates and
 # migrations are go:embed'd, so it's self-contained) and acta (the client
 # CLI). -trimpath + -s -w match acta's own Dockerfile for a stripped,
@@ -12,10 +18,10 @@ outDir = "out"
 
 [source]
 git = "https://github.com/peios/acta.git"
-rev = "v0.34.0"
+rev = "v{{version}}"
 
 [build]
 command = """
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$PEKIT_OUT/acta-server" ./cmd/acta-server
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$PEKIT_OUT/acta" ./cmd/acta
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version={{version}}" -o "$PEKIT_OUT/acta-server" ./cmd/acta-server
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version={{version}}" -o "$PEKIT_OUT/acta" ./cmd/acta
 """
