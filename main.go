@@ -30,33 +30,57 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	// pekit.built is consulted for build/package only (the work-doing
+	// verbs); test/clean ignore it.
+	ledgerActive := args[0] == "build" || args[0] == "package"
+	if f.remember && !ledgerActive {
+		return fmt.Errorf("--remember-built only applies to build and package")
+	}
+	if f.remember && !f.hasVersion {
+		return fmt.Errorf("--remember-built needs --version (nothing to record otherwise)")
+	}
+
 	vers, err := resolveVersions(f.version, f.hasVersion)
 	if err != nil {
 		return err
 	}
 
-	// Plain single version (or none): dispatch directly so a child's exit
-	// code propagates unchanged.
-	if len(vers) == 1 && !f.remember {
-		return dispatch(args, vers[0])
-	}
-
-	// Multiple, or --remember-built: build each, optionally skipping and
-	// recording against the built-ledger, collecting failures.
+	// The ledger is authoritative just by existing: any version it lists
+	// is skipped (--bust overrides). An absent file is an empty ledger,
+	// so this is a no-op until something has been recorded. Recording is
+	// the separate, opt-in act (--remember-built).
 	var ledger *builtLedger
-	if f.remember {
-		if !f.hasVersion {
-			return fmt.Errorf("--remember-built needs --version (nothing to skip or record otherwise)")
-		}
+	if ledgerActive {
 		if ledger, err = loadLedger("pekit.built"); err != nil {
 			return err
 		}
+	}
+	skip := func(v *Version) bool {
+		return ledger != nil && v != nil && !f.bust && ledger.has(v.Full)
+	}
+
+	// Plain single version (or none) that won't be recorded: dispatch
+	// directly so a child's exit code propagates unchanged.
+	if len(vers) == 1 && !f.remember {
+		if skip(vers[0]) {
+			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
+			return nil
+		}
+		return dispatch(args, vers[0])
+	}
+
+	if len(vers) > 1 {
+		labels := make([]string, len(vers))
+		for i, v := range vers {
+			labels[i] = v.Full
+		}
+		fmt.Fprintf(os.Stderr, "pekit: %s → %d versions: %s\n", f.version, len(vers), strings.Join(labels, ", "))
 	}
 
 	var failed []string
 	built, skipped := 0, 0
 	for _, ver := range vers {
-		if ledger != nil && !f.bust && ledger.has(ver.Full) {
+		if skip(ver) {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", ver.Full)
 			skipped++
 			continue
@@ -66,14 +90,14 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
 		}
-		if ledger != nil {
+		if f.remember {
 			if err := ledger.add(ver.Full); err != nil {
 				return fmt.Errorf("recording %s in pekit.built: %w", ver.Full, err)
 			}
 		}
 		built++
 	}
-	if ledger != nil {
+	if f.remember || skipped > 0 {
 		fmt.Fprintf(os.Stderr, "pekit: %d built, %d skipped, %d failed\n", built, skipped, len(failed))
 	}
 	if len(failed) > 0 {
