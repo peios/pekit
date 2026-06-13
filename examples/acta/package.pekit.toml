@@ -1,0 +1,12 @@
+format = "peipkg"
+
+[package]
+name         = "acta"
+version      = "0.34.0-1"
+architecture = "x86_64"
+description  = "Acta - project management tool for Peios (Go, htmx, Postgres)"
+license      = "MIT"
+
+[files]
+":acta-server" = "usr/bin/acta-server"
+":acta"        = "usr/bin/acta"

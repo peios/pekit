@@ -487,3 +487,17 @@ func TestCoolerRecipeParses(t *testing.T) {
 		t.Error("cooler recipe should have no [build] of its own")
 	}
 }
+
+func TestActaRecipeExampleParses(t *testing.T) {
+	data, err := os.ReadFile("examples/acta/pekit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.Rev != "v0.34.0" {
+		t.Errorf("Source = %+v", cfg.Source)
+	}
+}

@@ -1,0 +1,21 @@
+# Remote-source recipe for acta (Peios PM tool: Go + htmx + Postgres).
+# acta ships no pekit files of its own, so the recipe supplies the build
+# and (in package.pekit.toml) the package — the busybox-style mode, not
+# the self-describing loregd-cooler delegate mode.
+#
+# Two binaries from one source: acta-server (the service; templates and
+# migrations are go:embed'd, so it's self-contained) and acta (the client
+# CLI). -trimpath + -s -w match acta's own Dockerfile for a stripped,
+# reproducible build.
+
+outDir = "out"
+
+[source]
+git = "https://github.com/peios/acta.git"
+rev = "v0.34.0"
+
+[build]
+command = """
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$PEKIT_OUT/acta-server" ./cmd/acta-server
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$PEKIT_OUT/acta" ./cmd/acta
+"""
