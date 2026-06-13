@@ -30,7 +30,7 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
-	vers, err := versionList(raw, found)
+	vers, err := resolveVersions(raw, found)
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,11 @@ func run(args []string) error {
 	if len(vers) == 1 {
 		return dispatch(args, vers[0])
 	}
+	labels := make([]string, len(vers))
+	for i, v := range vers {
+		labels[i] = v.Full
+	}
+	fmt.Fprintf(os.Stderr, "pekit: %s → %d versions: %s\n", raw, len(vers), strings.Join(labels, ", "))
 	var failed []string
 	for _, ver := range vers {
 		if err := dispatch(args, ver); err != nil {
@@ -89,33 +94,6 @@ func extractVersionArg(args []string) ([]string, string, bool, error) {
 		}
 	}
 	return rest, raw, found, nil
-}
-
-// versionList parses a comma-separated --version value into versions.
-// Absent → [nil] (one run, no templating). Duplicates are dropped; order
-// is preserved.
-func versionList(raw string, found bool) ([]*Version, error) {
-	if !found {
-		return []*Version{nil}, nil
-	}
-	var vers []*Version
-	seen := map[string]bool{}
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" || seen[part] {
-			continue
-		}
-		seen[part] = true
-		v, err := parseVersion(part)
-		if err != nil {
-			return nil, err
-		}
-		vers = append(vers, v)
-	}
-	if len(vers) == 0 {
-		return nil, fmt.Errorf("--version was empty")
-	}
-	return vers, nil
 }
 
 func targetArg(args []string) (string, error) {

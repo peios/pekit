@@ -114,8 +114,8 @@ func TestExtractVersionForms(t *testing.T) {
 	}
 }
 
-func TestVersionListMultiple(t *testing.T) {
-	vers, err := versionList("0.33.0, 0.34.0,0.34.0", true)
+func TestResolveVersionsMultiple(t *testing.T) {
+	vers, err := resolveVersions("0.33.0, 0.34.0,0.34.0", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,15 +124,15 @@ func TestVersionListMultiple(t *testing.T) {
 	}
 }
 
-func TestVersionListAbsentIsSingleNil(t *testing.T) {
-	vers, err := versionList("", false)
+func TestResolveVersionsAbsentIsSingleNil(t *testing.T) {
+	vers, err := resolveVersions("", false)
 	if err != nil || len(vers) != 1 || vers[0] != nil {
 		t.Errorf("absent: vers=%v err=%v", vers, err)
 	}
 }
 
-func TestVersionListRejectsJunkMember(t *testing.T) {
-	if _, err := versionList("0.34.0,nope", true); err == nil {
+func TestResolveVersionsRejectsJunkMember(t *testing.T) {
+	if _, err := resolveVersions("0.34.0,nope", true); err == nil {
 		t.Error("want error for junk version in list")
 	}
 }

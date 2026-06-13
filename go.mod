@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/peios/libp-go v0.8.0 // indirect
 	github.com/peios/pkm/uapi/go v0.20.0 // indirect
