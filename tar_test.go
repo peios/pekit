@@ -67,7 +67,7 @@ func readTar(t *testing.T, path string) ([]*tar.Header, map[string]string) {
 
 func TestTarEnginePackagesFiles(t *testing.T) {
 	job := makeJob(t)
-	if err := tarEngine(job); err != nil {
+	if _, err := tarEngine(job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestTarEngineIsDeterministic(t *testing.T) {
 	job := makeJob(t)
 	outPath := filepath.Join(job.OutStage, "loregd.tar")
 
-	if err := tarEngine(job); err != nil {
+	if _, err := tarEngine(job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	first, err := os.ReadFile(outPath)
@@ -122,7 +122,7 @@ func TestTarEngineIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := tarEngine(job); err != nil {
+	if _, err := tarEngine(job); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	second, err := os.ReadFile(outPath)

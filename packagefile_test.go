@@ -324,7 +324,7 @@ loregd = "*"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	err = tarEngine(PackageJob{Pkg: pf, Name: "x", OutStage: t.TempDir()})
+	_, err = tarEngine(PackageJob{Pkg: pf, Name: "x", OutStage: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "format tar cannot express version, dependencies") {
 		t.Errorf("want tar-cannot-express error, got: %v", err)
 	}
@@ -446,5 +446,92 @@ func TestMergeDoesNotMutateSource(t *testing.T) {
 	_ = mergePackageRaw(recipe, source)
 	if srcPkg["description"] != "upstream" {
 		t.Errorf("source [package] was mutated: %v", srcPkg["description"])
+	}
+}
+
+// --- [[publish.<type>]] parsing ---
+
+func TestParsePublishLocalDir(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "peipkg"
+[[publish.localdir]]
+path = "pkgsOut"
+[files]
+":x" = "usr/bin/x"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pf.Publish) != 1 || pf.Publish[0].Type != "localdir" || pf.Publish[0].Path != "pkgsOut" {
+		t.Errorf("Publish = %+v, want one localdir->pkgsOut", pf.Publish)
+	}
+}
+
+func TestParsePublishUnknownType(t *testing.T) {
+	_, err := ParsePackageFile(`
+format = "peipkg"
+[[publish.ftp]]
+host = "x"
+[files]
+":x" = "usr/bin/x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "unknown publish target type") {
+		t.Errorf("want unknown-type error, got: %v", err)
+	}
+}
+
+func TestParsePublishRejectsEscapingPath(t *testing.T) {
+	_, err := ParsePackageFile(`
+format = "peipkg"
+[[publish.localdir]]
+path = "../escape"
+[files]
+":x" = "usr/bin/x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "must stay within the workspace") {
+		t.Errorf("want path-escape error, got: %v", err)
+	}
+}
+
+// --- three-layer merge: workspace-root < source < leaf ---
+
+func TestMergeThreeLayerPrecedence(t *testing.T) {
+	root := map[string]any{ // workspace defaults: publish only
+		"publish": map[string]any{"localdir": []map[string]any{{"path": "pkgsOut"}}},
+	}
+	source := map[string]any{ // the package's own definition
+		"format":  "peipkg",
+		"package": map[string]any{"version": "1.0.0-1", "architecture": "x86_64", "description": "src"},
+		"files":   map[string]any{":x": "usr/bin/x"},
+	}
+	var leaf map[string]any // pure delegate
+
+	pf, err := parsePackageRaw(mergePackageRaw(leaf, mergePackageRaw(source, root)))
+	if err != nil {
+		t.Fatalf("parse merged: %v", err)
+	}
+	if pf.Description != "src" {
+		t.Errorf("Description = %q, want src (source beats root default)", pf.Description)
+	}
+	if len(pf.Publish) != 1 || pf.Publish[0].Path != "pkgsOut" {
+		t.Errorf("Publish = %+v, want root's pkgsOut (source/leaf set none)", pf.Publish)
+	}
+}
+
+func TestMergeThreeLayerLeafWins(t *testing.T) {
+	root := map[string]any{"publish": map[string]any{"localdir": []map[string]any{{"path": "pkgsOut"}}}}
+	source := map[string]any{
+		"format":  "peipkg",
+		"package": map[string]any{"version": "1.0.0-1", "architecture": "x86_64", "description": "src"},
+		"files":   map[string]any{":x": "usr/bin/x"},
+	}
+	leaf := map[string]any{"package": map[string]any{"description": "leaf"}}
+
+	pf, err := parsePackageRaw(mergePackageRaw(leaf, mergePackageRaw(source, root)))
+	if err != nil {
+		t.Fatalf("parse merged: %v", err)
+	}
+	if pf.Description != "leaf" {
+		t.Errorf("Description = %q, want leaf (leaf beats source)", pf.Description)
 	}
 }

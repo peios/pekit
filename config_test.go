@@ -103,12 +103,6 @@ func TestMissingSectionsAreValid(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
 func TestUnknownSectionRejected(t *testing.T) {
 	_, err := ParseConfig(`
 [buidl]
@@ -158,8 +152,6 @@ command = 42
 		t.Errorf("want non-string-command error, got: %v", err)
 	}
 }
-
-
 
 func TestOutDirAndClearOutParsed(t *testing.T) {
 	cfg, err := ParseConfig(`

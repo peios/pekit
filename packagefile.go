@@ -45,6 +45,20 @@ type PackageFile struct {
 	// SDOverrides hold SDDL (compiled to binary SDs at pack time);
 	// sorted by path.
 	SDOverrides []SDOverride
+
+	// Publish are the destinations a built package ships to. Operational,
+	// not manifest data (like Builds) — never projected into the .peipkg.
+	// Typically supplied by the workspace-root package.pekit.toml and
+	// inherited; sorted by (Type, Path).
+	Publish []PublishTarget
+}
+
+// PublishTarget is one [[publish.<type>]] entry: where a built package is
+// shipped. Type names the mechanism; the remaining fields are
+// type-specific (only localdir's Path today).
+type PublishTarget struct {
+	Type string // "localdir"
+	Path string // localdir: destination dir, relative to the workspace root
 }
 
 // Dependency is one [dependencies]/[optionalDependencies]/[conflicts]
@@ -291,6 +305,16 @@ func parsePackageRaw(raw map[string]any) (*PackageFile, error) {
 				return nil, err
 			}
 			pf.Files = files
+		case "publish":
+			table, ok := raw[key].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("[publish] must be a table of typed targets ([[publish.<type>]])")
+			}
+			targets, err := parsePublish(table)
+			if err != nil {
+				return nil, err
+			}
+			pf.Publish = targets
 		default:
 			return nil, fmt.Errorf("unknown key %q", key)
 		}
@@ -420,6 +444,83 @@ func parseSDOverrides(table map[string]any) ([]SDOverride, error) {
 		overrides = append(overrides, SDOverride{Path: cleaned, SDDL: s})
 	}
 	return overrides, nil
+}
+
+// parsePublish parses the [publish] table, whose keys are target types
+// ([[publish.localdir]] -> "localdir") each holding an array of target
+// tables. Targets are returned sorted by (type, path) for determinism.
+func parsePublish(table map[string]any) ([]PublishTarget, error) {
+	var targets []PublishTarget
+	for _, typ := range sortedKeys(table) {
+		rows, err := tableSlice(typ, table[typ])
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			switch typ {
+			case "localdir":
+				t, err := parseLocalDir(row)
+				if err != nil {
+					return nil, err
+				}
+				targets = append(targets, t)
+			default:
+				return nil, fmt.Errorf("[[publish.%s]]: unknown publish target type %q", typ, typ)
+			}
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Type != targets[j].Type {
+			return targets[i].Type < targets[j].Type
+		}
+		return targets[i].Path < targets[j].Path
+	})
+	return targets, nil
+}
+
+func parseLocalDir(row map[string]any) (PublishTarget, error) {
+	t := PublishTarget{Type: "localdir"}
+	for _, k := range sortedKeys(row) {
+		switch k {
+		case "path":
+			s, err := stringValue("publish.localdir", k, row[k])
+			if err != nil {
+				return t, err
+			}
+			cleaned := path.Clean(s)
+			if path.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+				return t, fmt.Errorf("[[publish.localdir]]: path %q must stay within the workspace", s)
+			}
+			t.Path = cleaned
+		default:
+			return t, fmt.Errorf("[[publish.localdir]]: unknown key %q", k)
+		}
+	}
+	if t.Path == "" {
+		return t, fmt.Errorf("[[publish.localdir]]: missing required key %q", "path")
+	}
+	return t, nil
+}
+
+// tableSlice coerces a decoded [[array.of.tables]] value into a slice of
+// tables, accepting the shapes BurntSushi may produce.
+func tableSlice(section string, v any) ([]map[string]any, error) {
+	switch arr := v.(type) {
+	case []map[string]any:
+		return arr, nil
+	case []any:
+		rows := make([]map[string]any, 0, len(arr))
+		for _, e := range arr {
+			row, ok := e.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("[[publish.%s]] must be an array of tables", section)
+			}
+			rows = append(rows, row)
+		}
+		return rows, nil
+	default:
+		return nil, fmt.Errorf("[[publish.%s]] must be an array of tables", section)
+	}
 }
 
 func parseFiles(table map[string]any) ([]FileMapping, error) {

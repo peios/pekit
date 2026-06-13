@@ -14,13 +14,13 @@ import (
 // peipkgEngine packs the job into a signed-format (but locally
 // unsigned) .peipkg via peipkg's public pack API — the format has
 // exactly one implementation and this is not it.
-func peipkgEngine(job PackageJob) error {
+func peipkgEngine(job PackageJob) (string, error) {
 	pf := job.Pkg
 	if pf.Version == "" {
-		return fmt.Errorf("package %s: format peipkg requires [package] version", job.Name)
+		return "", fmt.Errorf("package %s: format peipkg requires [package] version", job.Name)
 	}
 	if pf.Architecture == "" {
-		return fmt.Errorf("package %s: format peipkg requires [package] architecture", job.Name)
+		return "", fmt.Errorf("package %s: format peipkg requires [package] architecture", job.Name)
 	}
 
 	files := make(map[string]string, len(job.Files))
@@ -28,12 +28,12 @@ func peipkgEngine(job PackageJob) error {
 		files[sf.Dest] = sf.Source
 	}
 	if err := pack.ValidateFiles(pf.Architecture, files); err != nil {
-		return fmt.Errorf("package %s: payload layout: %w", job.Name, err)
+		return "", fmt.Errorf("package %s: payload layout: %w", job.Name, err)
 	}
 
 	build, err := localProvenance(job.ProvenanceDir)
 	if err != nil {
-		return fmt.Errorf("package %s: %w", job.Name, err)
+		return "", fmt.Errorf("package %s: %w", job.Name, err)
 	}
 
 	// Farm naming convention: name_version_arch.peipkg
@@ -42,7 +42,7 @@ func peipkgEngine(job PackageJob) error {
 		fmt.Sprintf("%s_%s_%s.peipkg", job.Name, pf.Version, pf.Architecture))
 	f, err := os.Create(outPath)
 	if err != nil {
-		return fmt.Errorf("package %s: %w", job.Name, err)
+		return "", fmt.Errorf("package %s: %w", job.Name, err)
 	}
 	defer f.Close()
 
@@ -52,13 +52,12 @@ func peipkgEngine(job PackageJob) error {
 		Out:      f,
 	})
 	if err != nil {
-		return fmt.Errorf("package %s: %w", job.Name, err)
+		return "", fmt.Errorf("package %s: %w", job.Name, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("package %s: %w", job.Name, err)
+		return "", fmt.Errorf("package %s: %w", job.Name, err)
 	}
-	fmt.Printf("pekit: wrote %s\n", outPath)
-	return nil
+	return outPath, nil
 }
 
 func packManifest(name string, pf *PackageFile, build pack.BuildInfo) pack.Manifest {
