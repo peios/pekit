@@ -366,3 +366,85 @@ builds = []
 		t.Errorf("want empty-builds error, got: %v", err)
 	}
 }
+
+// --- per-section delegation merge (recipe over source) ---
+
+func TestMergeFieldLevelPackage(t *testing.T) {
+	// Recipe overrides only [package].description; everything else —
+	// format, version, architecture, [files] — comes from the source.
+	source := map[string]any{
+		"format": "peipkg",
+		"package": map[string]any{
+			"version":      "0.21.2-1",
+			"architecture": "x86_64",
+			"description":  "upstream desc",
+		},
+		"files": map[string]any{":loregd": "usr/bin/loregd"},
+	}
+	recipe := map[string]any{
+		"package": map[string]any{"description": "farm desc"},
+	}
+	pf, err := parsePackageRaw(mergePackageRaw(recipe, source))
+	if err != nil {
+		t.Fatalf("parse merged: %v", err)
+	}
+	if pf.Format != "peipkg" {
+		t.Errorf("Format = %q, want peipkg (source)", pf.Format)
+	}
+	if pf.Version != "0.21.2-1" || pf.Architecture != "x86_64" {
+		t.Errorf("version/arch = %q/%q, want source's", pf.Version, pf.Architecture)
+	}
+	if pf.Description != "farm desc" {
+		t.Errorf("Description = %q, want recipe override", pf.Description)
+	}
+	if len(pf.Files) != 1 || pf.Files[0].Dest != "usr/bin/loregd" {
+		t.Errorf("Files = %+v, want source's", pf.Files)
+	}
+}
+
+func TestMergeWholeUnitFilesAndFormat(t *testing.T) {
+	source := map[string]any{
+		"format":  "peipkg",
+		"package": map[string]any{"version": "1.0.0-1", "architecture": "x86_64"},
+		"files":   map[string]any{":app": "usr/bin/app"},
+	}
+	// Recipe replaces [files] wholesale and overrides format.
+	recipe := map[string]any{
+		"format": "tar",
+		"files":  map[string]any{":app": "usr/sbin/app"},
+	}
+	pf, err := parsePackageRaw(mergePackageRaw(recipe, source))
+	if err != nil {
+		t.Fatalf("parse merged: %v", err)
+	}
+	if pf.Format != "tar" {
+		t.Errorf("Format = %q, want tar (recipe whole-unit)", pf.Format)
+	}
+	if len(pf.Files) != 1 || pf.Files[0].Dest != "usr/sbin/app" {
+		t.Errorf("Files = %+v, want recipe's usr/sbin/app", pf.Files)
+	}
+}
+
+func TestMergeNilSides(t *testing.T) {
+	src := map[string]any{"format": "peipkg"}
+	if got := mergePackageRaw(nil, src); got["format"] != "peipkg" {
+		t.Error("nil recipe should yield source")
+	}
+	rec := map[string]any{"format": "tar"}
+	if got := mergePackageRaw(rec, nil); got["format"] != "tar" {
+		t.Error("nil source should yield recipe")
+	}
+	if mergePackageRaw(nil, nil) != nil {
+		t.Error("both nil should yield nil")
+	}
+}
+
+func TestMergeDoesNotMutateSource(t *testing.T) {
+	srcPkg := map[string]any{"description": "upstream"}
+	source := map[string]any{"package": srcPkg}
+	recipe := map[string]any{"package": map[string]any{"description": "recipe"}}
+	_ = mergePackageRaw(recipe, source)
+	if srcPkg["description"] != "upstream" {
+		t.Errorf("source [package] was mutated: %v", srcPkg["description"])
+	}
+}

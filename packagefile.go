@@ -125,21 +125,75 @@ func (s SourceRef) String() string {
 	return s.Target + ":" + s.Path
 }
 
-// LoadPackageFile reads, templates, and parses a package.pekit.toml.
-func LoadPackageFile(path string, ver *Version) (*PackageFile, error) {
+// decodePackageFile reads, templates, and TOML-decodes a package.pekit.toml
+// into a raw table without parsing or validating it, so it can be merged
+// with another (a source's, in delegate mode) before parsing. Returns
+// (nil, false, nil) when the file is absent; real read/render/decode
+// errors propagate.
+func decodePackageFile(path string, ver *Version) (map[string]any, bool, error) {
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	rendered, err := renderTemplate(string(data), ver)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, false, fmt.Errorf("%s: %w", path, err)
 	}
-	pf, err := ParsePackageFile(rendered)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	var raw map[string]any
+	if _, err := toml.Decode(rendered, &raw); err != nil {
+		return nil, false, fmt.Errorf("%s: %w", path, err)
 	}
-	return pf, nil
+	return raw, true, nil
+}
+
+// mergePackageRaw overlays a recipe's package.pekit.toml table onto the
+// source's, implementing per-section delegation: [package] merges
+// field-by-field (a recipe field wins, the source fills the rest), while
+// every other top-level key (format, files, dependencies, ...) is
+// whole-unit — present in the recipe replaces the source's, absent
+// inherits it. Either side may be nil.
+func mergePackageRaw(recipe, source map[string]any) map[string]any {
+	if recipe == nil {
+		return source
+	}
+	if source == nil {
+		return recipe
+	}
+	out := make(map[string]any, len(source))
+	for k, v := range source {
+		out[k] = v
+	}
+	for k, v := range recipe {
+		if k == "package" {
+			out[k] = mergePackageTable(source[k], v)
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// mergePackageTable field-merges two [package] tables (recipe over
+// source). If either operand is not a table, the recipe's value stands
+// whole so parsing reports the type error against it rather than silently
+// blending mismatched shapes.
+func mergePackageTable(source, recipe any) any {
+	srcT, sok := source.(map[string]any)
+	recT, rok := recipe.(map[string]any)
+	if !sok || !rok {
+		return recipe
+	}
+	out := make(map[string]any, len(srcT)+len(recT))
+	for k, v := range srcT {
+		out[k] = v
+	}
+	for k, v := range recT {
+		out[k] = v
+	}
+	return out
 }
 
 // ParsePackageFile parses package.pekit.toml source.
@@ -148,7 +202,13 @@ func ParsePackageFile(src string) (*PackageFile, error) {
 	if _, err := toml.Decode(src, &raw); err != nil {
 		return nil, err
 	}
+	return parsePackageRaw(raw)
+}
 
+// parsePackageRaw turns an already-decoded package.pekit.toml table into a
+// PackageFile. Split from ParsePackageFile so a merged table (recipe
+// overlaid on source) parses through exactly the same path and validation.
+func parsePackageRaw(raw map[string]any) (*PackageFile, error) {
 	pf := &PackageFile{}
 
 	for _, key := range sortedKeys(raw) {

@@ -354,50 +354,63 @@ func cmdPackage(args []string, ver *Version) error {
 		return err
 	}
 
-	pf, err := tryLoadPackageFile("package.pekit.toml", ver)
+	// The recipe's own package.pekit.toml, kept as a raw table so a partial
+	// override can be merged field-by-field with the source's below (a
+	// struct can't distinguish "field unset" from "field empty").
+	recipeRaw, _, err := decodePackageFile("package.pekit.toml", ver)
 	if err != nil {
 		return err
 	}
 	_, hasBuild := cfg.Commands["build"]
 
-	// With [source], config resolves recipe-first, source-fallback: a
-	// self-describing upstream (loregd) ships its own pekit files, so the
-	// recipe can be just [source] and we borrow the source's build +
-	// package definition. Whatever the recipe does provide shadows it.
+	// With [source], the recipe and the upstream are merged per section: a
+	// self-describing upstream (loregd) ships its own pekit files, so a
+	// recipe can be just [source] and inherit everything — or override
+	// individual pieces. pekit.toml's [build]/[env] fall back whole;
+	// package.pekit.toml's [package] merges field-by-field, its other
+	// sections whole. The recipe always wins what it provides.
 	provenanceDir, literalRoot := wd, wd
+	merged := recipeRaw
 	if cfg.Source != nil {
 		checkout, aerr := filepath.Abs(sourceCheckout(cfg))
 		if aerr != nil {
 			return aerr
 		}
 		provenanceDir, literalRoot = checkout, checkout
-		if pf == nil || !hasBuild {
-			if _, ferr := fetchSource(cfg.Source, sourceCheckout(cfg)); ferr != nil {
-				return ferr
-			}
-			if pf == nil {
-				p, lerr := tryLoadPackageFile(filepath.Join(checkout, "package.pekit.toml"), ver)
-				if lerr != nil {
-					return lerr
-				}
-				pf = p
-			}
+
+		// Delegate mode builds from the source and may borrow parts of its
+		// recipe, so fetch it up front (the build step reuses the checkout).
+		if _, ferr := fetchSource(cfg.Source, sourceCheckout(cfg)); ferr != nil {
+			return ferr
+		}
+
+		// pekit.toml: section-level fallback.
+		if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml"), ver); cerr == nil {
 			if !hasBuild {
-				if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml"), ver); cerr == nil {
-					if b, ok := srcCfg.Commands["build"]; ok {
-						cfg.Commands["build"] = b
-						hasBuild = true
-					}
-					if len(cfg.Env) == 0 {
-						cfg.Env = srcCfg.Env
-					}
+				if b, ok := srcCfg.Commands["build"]; ok {
+					cfg.Commands["build"] = b
+					hasBuild = true
 				}
+			}
+			if len(cfg.Env) == 0 {
+				cfg.Env = srcCfg.Env
 			}
 		}
+
+		// package.pekit.toml: field-level [package], whole-unit elsewhere.
+		srcRaw, _, perr := decodePackageFile(filepath.Join(checkout, "package.pekit.toml"), ver)
+		if perr != nil {
+			return perr
+		}
+		merged = mergePackageRaw(recipeRaw, srcRaw)
 	}
 
-	if pf == nil {
+	if merged == nil {
 		return fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
+	}
+	pf, err := parsePackageRaw(merged)
+	if err != nil {
+		return fmt.Errorf("package.pekit.toml: %w", err)
 	}
 
 	name := pf.Name
@@ -438,15 +451,6 @@ func cmdPackage(args []string, ver *Version) error {
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
 	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage})
-}
-
-// tryLoadPackageFile loads a package file, returning (nil, nil) when it
-// does not exist so callers can fall back to another location.
-func tryLoadPackageFile(path string, ver *Version) (*PackageFile, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, nil
-	}
-	return LoadPackageFile(path, ver)
 }
 
 // defaultName derives a package name when [package] name is unset: the
