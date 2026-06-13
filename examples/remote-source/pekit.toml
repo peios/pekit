@@ -1,0 +1,17 @@
+# Recipe for a third-party package: pekit fetches upstream source,
+# builds it, and packages the result — no local source tree.
+# The checkout lands in out/source/<rev> and is the build's working dir.
+
+outDir = "out"
+
+[source]
+git = "https://github.com/mirror/busybox.git"
+rev = "1_36_1"          # tag/commit; required. Build is reproducible for a
+                        # fixed rev — in production an orchestrator injects it.
+
+[build]
+command = """
+make defconfig
+make -j"$(nproc)"
+cp busybox "$PEKIT_OUT/busybox"
+"""

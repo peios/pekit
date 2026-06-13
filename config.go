@@ -33,6 +33,17 @@ type Config struct {
 	ClearOut bool
 	// Commands holds the command-running verbs: verb -> target name -> target.
 	Commands map[string]map[string]Target
+	// Source, when set, is upstream source the build fetches and builds
+	// in instead of the project directory; nil = the cwd is the source.
+	Source *Source
+}
+
+// Source is a [source] block: upstream the build checks out before
+// running. The checkout lands in OutDir/source/<rev> and becomes the
+// build's working directory.
+type Source struct {
+	Git string
+	Rev string
 }
 
 // LoadConfig reads and parses a pekit.toml file.
@@ -81,6 +92,12 @@ func ParseConfig(src string) (*Config, error) {
 					return nil, err
 				}
 				cfg.Env = env
+			case "source":
+				source, err := parseSource(table)
+				if err != nil {
+					return nil, err
+				}
+				cfg.Source = source
 			default:
 				return nil, fmt.Errorf("unknown section %q", key)
 			}
@@ -107,7 +124,7 @@ func ParseConfig(src string) (*Config, error) {
 			}
 			cfg.ClearOut = b
 			clearOutSet = true
-		case "build", "test", "install", "clean", "package", "env":
+		case "build", "test", "install", "clean", "package", "env", "source":
 			return nil, fmt.Errorf("[%s] must be a table", key)
 		default:
 			return nil, fmt.Errorf("unknown root key %q", key)
@@ -117,7 +134,43 @@ func ParseConfig(src string) (*Config, error) {
 	if clearOutSet && cfg.OutDir == "" {
 		return nil, fmt.Errorf("clearOut requires outDir to be set")
 	}
+	if cfg.Source != nil && cfg.OutDir == "" {
+		return nil, fmt.Errorf("[source] requires outDir to be set (the checkout lands under it)")
+	}
 	return cfg, nil
+}
+
+// parseSource parses a [source] block. git and rev are both required;
+// rev is taken verbatim (tag, commit, or any git-checkout-able ref) —
+// reproducibility comes from passing an immutable rev, not from pekit
+// policing it, since in practice an orchestrator injects a concrete one.
+func parseSource(table map[string]any) (*Source, error) {
+	var src Source
+	for _, key := range sortedKeys(table) {
+		switch key {
+		case "git":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			src.Git = s
+		case "rev":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			src.Rev = s
+		default:
+			return nil, fmt.Errorf("[source]: unknown key %q", key)
+		}
+	}
+	if src.Git == "" {
+		return nil, fmt.Errorf("[source]: missing required key %q", "git")
+	}
+	if src.Rev == "" {
+		return nil, fmt.Errorf("[source]: missing required key %q", "rev")
+	}
+	return &src, nil
 }
 
 // parseSection applies the shared shape rules (bare vs named, never mixed)

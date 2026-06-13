@@ -1,0 +1,15 @@
+format = "peipkg"
+
+[package]
+name         = "busybox"
+version      = "1.36.1-1"
+architecture = "x86_64"
+description  = "The Swiss army knife of embedded Linux - single static binary providing dozens of POSIX utilities"
+license      = "GPL-2.0-only"
+homepage     = "https://busybox.net/"
+
+# Stage ref: the build copies the compiled binary into $PEKIT_OUT, so
+# packaging derives + rebuilds the source automatically. [files] works
+# exactly as for a local-source package — the working dir just moved.
+[files]
+":busybox" = "bin/busybox"

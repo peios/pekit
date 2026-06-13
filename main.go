@@ -87,6 +87,13 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	cmd.Stderr = os.Stderr
 
 	if verb == "build" && cfg.OutDir != "" {
+		if cfg.Source != nil {
+			srcDir, err := fetchSource(cfg.Source, cfg.OutDir)
+			if err != nil {
+				return err
+			}
+			cmd.Dir = srcDir
+		}
 		stageDir, err := prepareOutDir(cfg.OutDir, verb, name, cfg.ClearOut)
 		if err != nil {
 			return err
@@ -102,6 +109,50 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 		return nil
 	}
 
+	return cmd.Run()
+}
+
+// sourceDir is the checkout path for a [source] block: OutDir/source/<rev>.
+// The rev keys the directory — an immutable rev makes the checkout a
+// valid cache; '/' in refs is flattened so the path stays one level deep.
+func sourceDir(src *Source, outDir string) string {
+	rev := strings.ReplaceAll(src.Rev, "/", "_")
+	return filepath.Join(outDir, "source", rev)
+}
+
+// fetchSource ensures the pinned source is checked out and returns its
+// absolute path. An existing checkout is reused (immutable rev → valid;
+// a mutable ref may go stale — pekit clean forces a re-fetch). A failed
+// checkout is torn down so the next run re-clones rather than reusing a
+// half-built tree.
+func fetchSource(src *Source, outDir string) (string, error) {
+	abs, err := filepath.Abs(sourceDir(src, outDir))
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(abs); err == nil {
+		return abs, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return "", err
+	}
+	fmt.Printf("pekit: source: %s @ %s\n", src.Git, src.Rev)
+	if err := runGit("", "clone", "--quiet", src.Git, abs); err != nil {
+		os.RemoveAll(abs)
+		return "", fmt.Errorf("cloning %s: %w", src.Git, err)
+	}
+	if err := runGit(abs, "checkout", "--quiet", "--detach", src.Rev); err != nil {
+		os.RemoveAll(abs)
+		return "", fmt.Errorf("checking out %s: %w", src.Rev, err)
+	}
+	return abs, nil
+}
+
+func runGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
@@ -216,8 +267,18 @@ func cmdPackage(args []string) error {
 		return err
 	}
 
+	// Provenance identifies what built the package: the fetched source
+	// for a [source] recipe (already checked out by the build above),
+	// else the recipe dir.
+	provenanceDir := wd
+	if cfg.Source != nil {
+		if provenanceDir, err = filepath.Abs(sourceDir(cfg.Source, cfg.OutDir)); err != nil {
+			return err
+		}
+	}
+
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
-	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, Files: files, OutStage: outStage})
+	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage})
 }
 
 // referencedBuildTargets returns the distinct build targets to run

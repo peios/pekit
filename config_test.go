@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -364,5 +365,74 @@ format = "tar"
 `)
 	if err == nil || !strings.Contains(err.Error(), "moved to package.pekit.toml") {
 		t.Errorf("want moved-to-package-file error, got: %v", err)
+	}
+}
+
+func TestSourceParsed(t *testing.T) {
+	cfg, err := ParseConfig(`
+outDir = "out"
+
+[source]
+git = "https://github.com/mirror/busybox.git"
+rev = "1_36_1"
+
+[build]
+command = "make"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.Git != "https://github.com/mirror/busybox.git" || cfg.Source.Rev != "1_36_1" {
+		t.Errorf("Source = %+v", cfg.Source)
+	}
+}
+
+func TestSourceRequiresGitAndRev(t *testing.T) {
+	_, err := ParseConfig("outDir=\"out\"\n[source]\nrev=\"x\"\n")
+	if err == nil || !strings.Contains(err.Error(), `missing required key "git"`) {
+		t.Errorf("want missing-git error, got: %v", err)
+	}
+	_, err = ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\n")
+	if err == nil || !strings.Contains(err.Error(), `missing required key "rev"`) {
+		t.Errorf("want missing-rev error, got: %v", err)
+	}
+}
+
+func TestSourceRequiresOutDir(t *testing.T) {
+	_, err := ParseConfig(`
+[source]
+git = "u"
+rev = "r"
+`)
+	if err == nil || !strings.Contains(err.Error(), "[source] requires outDir") {
+		t.Errorf("want source-requires-outDir error, got: %v", err)
+	}
+}
+
+func TestSourceUnknownKeyRejected(t *testing.T) {
+	_, err := ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"r\"\nbranch=\"main\"\n")
+	if err == nil || !strings.Contains(err.Error(), `[source]: unknown key "branch"`) {
+		t.Errorf("want unknown-key error, got: %v", err)
+	}
+}
+
+func TestSourceDirFlattensRev(t *testing.T) {
+	got := sourceDir(&Source{Git: "u", Rev: "refs/tags/v1.2"}, "out")
+	if got != "out/source/refs_tags_v1.2" {
+		t.Errorf("sourceDir = %q, want flattened", got)
+	}
+}
+
+func TestRemoteSourceExampleParses(t *testing.T) {
+	data, err := os.ReadFile("examples/remote-source/pekit.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.Rev != "1_36_1" {
+		t.Errorf("Source = %+v", cfg.Source)
 	}
 }

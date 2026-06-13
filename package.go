@@ -11,11 +11,15 @@ type StagedFile struct {
 
 // PackageJob is everything an engine needs to build one package.
 type PackageJob struct {
-	Pkg      *PackageFile
-	Name     string       // [package] name, or the project directory name
-	Root     string       // absolute project root (provenance, etc.)
-	Files    []StagedFile // sorted by Dest, sources verified to exist
-	OutStage string       // absolute path to outDir/package/<name>
+	Pkg     *PackageFile
+	Name    string // [package] name, or the project directory name
+	Root    string // absolute project root (recipe dir)
+	// ProvenanceDir is the git tree whose commit identifies what built
+	// this package: the fetched source checkout for a [source] recipe,
+	// else the recipe dir.
+	ProvenanceDir string
+	Files         []StagedFile // sorted by Dest, sources verified to exist
+	OutStage      string       // absolute path to outDir/package/<name>
 }
 
 // packageEngine builds one package in a specific format.

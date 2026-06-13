@@ -31,7 +31,7 @@ func peipkgEngine(job PackageJob) error {
 		return fmt.Errorf("package %s: payload layout: %w", job.Name, err)
 	}
 
-	build, err := localProvenance(job.Root)
+	build, err := localProvenance(job.ProvenanceDir)
 	if err != nil {
 		return fmt.Errorf("package %s: %w", job.Name, err)
 	}
