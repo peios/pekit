@@ -205,6 +205,39 @@ format = "tar"
 	}
 }
 
+func TestParseGlobFileEntry(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "peipkg"
+
+[files]
+":usr/share/figlet/**" = "usr/share/figlet"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := FileMapping{Source: SourceRef{Target: "main", Path: "usr/share/figlet/**"}, Dest: "usr/share/figlet"}
+	if pf.Files[0] != want {
+		t.Errorf("Files[0] = %+v, want %+v", pf.Files[0], want)
+	}
+}
+
+func TestParseGlobDestDotAllowed(t *testing.T) {
+	// A glob source may target "." (the archive root) — "keep every staged
+	// path". A concrete source may not (covered by TestBadDestsRejected).
+	pf, err := ParsePackageFile(`
+format = "tar"
+
+[files]
+":**" = "."
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pf.Files[0].Dest != "." {
+		t.Errorf("Dest = %q, want %q", pf.Files[0].Dest, ".")
+	}
+}
+
 func TestUnrecognisedFormatError(t *testing.T) {
 	_, err := engineFor("rpm")
 	if err == nil || !strings.Contains(err.Error(), `unrecognised package format "rpm"`) {

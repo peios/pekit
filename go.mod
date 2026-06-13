@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver/v3 v3.5.0
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/peios/peipkg v0.1.2-0.20260613010658-cef5b065e6ed
 )
 

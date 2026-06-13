@@ -525,7 +525,7 @@ func tableSlice(section string, v any) ([]map[string]any, error) {
 
 func parseFiles(table map[string]any) ([]FileMapping, error) {
 	var files []FileMapping
-	seen := make(map[string]string) // dest -> source, for duplicate detection
+	seen := make(map[string]string) // concrete dest -> source key, for duplicate detection
 
 	for _, key := range sortedKeys(table) {
 		dest, ok := table[key].(string)
@@ -536,14 +536,21 @@ func parseFiles(table map[string]any) ([]FileMapping, error) {
 		if err != nil {
 			return nil, err
 		}
-		cleaned, err := cleanDest(dest)
+		glob := hasGlobMeta(src.Path)
+		cleaned, err := cleanFileDest(dest, glob)
 		if err != nil {
 			return nil, err
 		}
-		if prev, dup := seen[cleaned]; dup {
-			return nil, fmt.Errorf("[files]: %q and %q both map to %q", prev, key, cleaned)
+		// A glob's dest is a directory prefix; the archive paths it produces
+		// are only known after expansion against the stage, so its collisions
+		// are caught there (resolveFiles). Only concrete dests can be deduped
+		// up front, before any build has run.
+		if !glob {
+			if prev, dup := seen[cleaned]; dup {
+				return nil, fmt.Errorf("[files]: %q and %q both map to %q", prev, key, cleaned)
+			}
+			seen[cleaned] = key
 		}
-		seen[cleaned] = key
 		files = append(files, FileMapping{Source: src, Dest: cleaned})
 	}
 
@@ -578,6 +585,22 @@ func cleanDest(dest string) (string, error) {
 	}
 	cleaned := path.Clean(dest)
 	if path.IsAbs(cleaned) || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("[files]: destination %q must be a relative path inside the package", dest)
+	}
+	return cleaned, nil
+}
+
+// cleanFileDest validates a [files] destination. A glob source's dest is a
+// directory prefix that matches are rebased under, so "." — the archive root,
+// i.e. "keep every staged path as-is" — is allowed there; a concrete source's
+// dest must name a file, so "." is rejected (a file needs a name).
+func cleanFileDest(dest string, glob bool) (string, error) {
+	if dest == "" {
+		return "", fmt.Errorf("[files]: destinations must not be empty")
+	}
+	cleaned := path.Clean(dest)
+	if path.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") ||
+		(cleaned == "." && !glob) {
 		return "", fmt.Errorf("[files]: destination %q must be a relative path inside the package", dest)
 	}
 	return cleaned, nil

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -847,29 +848,33 @@ func referencedBuildTargets(pf *PackageFile) []string {
 	return sortedNames(set)
 }
 
-// resolveFiles turns [files] sources into verified absolute paths:
-// stage references resolve under outDir/build/<target>/, plain paths
-// resolve against the project root.
+// resolveFiles turns [files] sources into verified absolute paths: stage
+// references resolve under outDir/build/<target>/, plain paths against the
+// project root. A glob source expands to every matching staged file (see
+// expandSource); the result is deduplicated over the final archive paths
+// (the authoritative collision check, since glob dests are only known once
+// expanded) and sorted by dest for deterministic, reproducible packing.
 func resolveFiles(pf *PackageFile, name, outDir, literalRoot string) ([]StagedFile, error) {
-	files := make([]StagedFile, 0, len(pf.Files))
+	var files []StagedFile
+	seen := make(map[string]string) // archive path -> source that produced it
 	for _, m := range pf.Files {
-		rel := filepath.Join(literalRoot, m.Source.Path)
+		root := literalRoot
 		if m.Source.Target != "" {
-			rel = filepath.Join(outDir, "build", m.Source.Target, m.Source.Path)
+			root = filepath.Join(outDir, "build", m.Source.Target)
 		}
-		abs, err := filepath.Abs(rel)
+		staged, err := expandSource(root, m.Source, m.Dest, name)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := os.Stat(abs); err != nil {
-			hint := ""
-			if m.Source.Target != "" {
-				hint = fmt.Sprintf(" (run %q first?)", "pekit build "+m.Source.Target)
+		for _, sf := range staged {
+			if prev, dup := seen[sf.Dest]; dup {
+				return nil, fmt.Errorf("package %s: %s and %s both map to %q",
+					name, prev, m.Source.String(), sf.Dest)
 			}
-			return nil, fmt.Errorf("package %s: source %q not found at %s%s",
-				name, m.Source, abs, hint)
+			seen[sf.Dest] = m.Source.String()
+			files = append(files, sf)
 		}
-		files = append(files, StagedFile{Source: abs, Dest: m.Dest})
 	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Dest < files[j].Dest })
 	return files, nil
 }
