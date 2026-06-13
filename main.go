@@ -193,6 +193,20 @@ func cmdPackage(args []string) error {
 		return fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
 	}
 
+	// Stage references name the build targets they consume, so packaging
+	// can rebuild them itself and never package a stale stage. Literal
+	// paths are underivable and stay the caller's freshness problem.
+	for _, targetName := range referencedBuildTargets(pf) {
+		target, ok := cfg.Commands["build"][targetName]
+		if !ok {
+			return fmt.Errorf("package %s: [files] references build target %q but pekit.toml has no [build.%s]",
+				name, targetName, targetName)
+		}
+		if err := runCommandTarget(cfg, "build", targetName, target); err != nil {
+			return err
+		}
+	}
+
 	files, err := resolveFiles(pf, name, cfg.OutDir)
 	if err != nil {
 		return err
@@ -204,6 +218,18 @@ func cmdPackage(args []string) error {
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
 	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, Files: files, OutStage: outStage})
+}
+
+// referencedBuildTargets returns the distinct build targets named by
+// stage-reference sources, sorted.
+func referencedBuildTargets(pf *PackageFile) []string {
+	set := make(map[string]bool)
+	for _, m := range pf.Files {
+		if m.Source.Target != "" {
+			set[m.Source.Target] = true
+		}
+	}
+	return sortedNames(set)
 }
 
 // resolveFiles turns [files] sources into verified absolute paths:
