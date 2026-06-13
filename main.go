@@ -23,35 +23,58 @@ func main() {
 }
 
 func run(args []string) error {
-	args, raw, found, err := extractVersionArg(args)
+	args, f, err := extractFlags(args)
 	if err != nil {
 		return err
 	}
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
-	vers, err := resolveVersions(raw, found)
+	vers, err := resolveVersions(f.version, f.hasVersion)
 	if err != nil {
 		return err
 	}
 
-	// One version (or none): dispatch directly so a child's exit code
-	// propagates unchanged. Multiple: build each, collect failures, and
-	// report a summary rather than stopping at the first.
-	if len(vers) == 1 {
+	// Plain single version (or none): dispatch directly so a child's exit
+	// code propagates unchanged.
+	if len(vers) == 1 && !f.remember {
 		return dispatch(args, vers[0])
 	}
-	labels := make([]string, len(vers))
-	for i, v := range vers {
-		labels[i] = v.Full
+
+	// Multiple, or --remember-built: build each, optionally skipping and
+	// recording against the built-ledger, collecting failures.
+	var ledger *builtLedger
+	if f.remember {
+		if !f.hasVersion {
+			return fmt.Errorf("--remember-built needs --version (nothing to skip or record otherwise)")
+		}
+		if ledger, err = loadLedger("pekit.built"); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(os.Stderr, "pekit: %s → %d versions: %s\n", raw, len(vers), strings.Join(labels, ", "))
+
 	var failed []string
+	built, skipped := 0, 0
 	for _, ver := range vers {
+		if ledger != nil && !f.bust && ledger.has(ver.Full) {
+			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", ver.Full)
+			skipped++
+			continue
+		}
 		if err := dispatch(args, ver); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
+			continue
 		}
+		if ledger != nil {
+			if err := ledger.add(ver.Full); err != nil {
+				return fmt.Errorf("recording %s in pekit.built: %w", ver.Full, err)
+			}
+		}
+		built++
+	}
+	if ledger != nil {
+		fmt.Fprintf(os.Stderr, "pekit: %d built, %d skipped, %d failed\n", built, skipped, len(failed))
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%d of %d versions failed: %s", len(failed), len(vers), strings.Join(failed, ", "))
@@ -72,28 +95,38 @@ func dispatch(args []string, ver *Version) error {
 	}
 }
 
-// extractVersionArg pulls the --version/-V (or --version=) value out of
-// args, returning the remaining args, the raw value, and whether it was
-// present. The value may be a comma-separated list (split by versionList).
-func extractVersionArg(args []string) ([]string, string, bool, error) {
+// flags are the global options parsed before the verb.
+type flags struct {
+	version    string // --version/-V value (may be a comma-list of selectors)
+	hasVersion bool
+	remember   bool // --remember-built: skip + record against pekit.built
+	bust       bool // --bust: rebuild even if the ledger says built
+}
+
+// extractFlags pulls the global flags out of args, returning the rest.
+func extractFlags(args []string) ([]string, flags, error) {
 	var rest []string
-	raw, found := "", false
+	var f flags
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--version" || a == "-V":
 			if i+1 >= len(args) {
-				return nil, "", false, fmt.Errorf("%s requires a value", a)
+				return nil, f, fmt.Errorf("%s requires a value", a)
 			}
-			raw, found = args[i+1], true
+			f.version, f.hasVersion = args[i+1], true
 			i++
 		case strings.HasPrefix(a, "--version="):
-			raw, found = strings.TrimPrefix(a, "--version="), true
+			f.version, f.hasVersion = strings.TrimPrefix(a, "--version="), true
+		case a == "--remember-built":
+			f.remember = true
+		case a == "--bust":
+			f.bust = true
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return rest, raw, found, nil
+	return rest, f, nil
 }
 
 func targetArg(args []string) (string, error) {

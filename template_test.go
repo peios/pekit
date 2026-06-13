@@ -97,20 +97,24 @@ func TestExtractVersionForms(t *testing.T) {
 		{"build", "--version", "0.34.0"},
 		{"build", "--version=0.34.0"},
 	} {
-		rest, raw, found, err := extractVersionArg(args)
+		rest, f, err := extractFlags(args)
 		if err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
-		if !found || raw != "0.34.0" {
-			t.Errorf("%v: raw=%q found=%v", args, raw, found)
+		if !f.hasVersion || f.version != "0.34.0" {
+			t.Errorf("%v: version=%q has=%v", args, f.version, f.hasVersion)
 		}
 		if len(rest) != 1 || rest[0] != "build" {
 			t.Errorf("%v: rest = %v", args, rest)
 		}
 	}
-	rest, _, found, err := extractVersionArg([]string{"build"})
-	if err != nil || found || len(rest) != 1 {
-		t.Errorf("no-flag: rest=%v found=%v err=%v", rest, found, err)
+	rest, f, err := extractFlags([]string{"build"})
+	if err != nil || f.hasVersion || len(rest) != 1 {
+		t.Errorf("no-flag: rest=%v has=%v err=%v", rest, f.hasVersion, err)
+	}
+	rest, f, err = extractFlags([]string{"package", "--version=*", "--remember-built", "--bust"})
+	if err != nil || !f.remember || !f.bust || f.version != "*" || len(rest) != 1 || rest[0] != "package" {
+		t.Errorf("flags: rest=%v f=%+v err=%v", rest, f, err)
 	}
 }
 
