@@ -23,13 +23,38 @@ func main() {
 }
 
 func run(args []string) error {
-	args, ver, err := extractVersion(args)
+	args, raw, found, err := extractVersionArg(args)
 	if err != nil {
 		return err
 	}
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	vers, err := versionList(raw, found)
+	if err != nil {
+		return err
+	}
+
+	// One version (or none): dispatch directly so a child's exit code
+	// propagates unchanged. Multiple: build each, collect failures, and
+	// report a summary rather than stopping at the first.
+	if len(vers) == 1 {
+		return dispatch(args, vers[0])
+	}
+	var failed []string
+	for _, ver := range vers {
+		if err := dispatch(args, ver); err != nil {
+			failed = append(failed, ver.Full)
+			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d versions failed: %s", len(failed), len(vers), strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+func dispatch(args []string, ver *Version) error {
 	switch args[0] {
 	case "build", "test", "install":
 		return cmdVerb(args[0], args[1:], ver)
@@ -42,34 +67,55 @@ func run(args []string) error {
 	}
 }
 
-// extractVersion pulls --version/-V (or --version=) out of args, parses
-// it, and returns the remaining args plus the version (nil if absent).
-func extractVersion(args []string) ([]string, *Version, error) {
+// extractVersionArg pulls the --version/-V (or --version=) value out of
+// args, returning the remaining args, the raw value, and whether it was
+// present. The value may be a comma-separated list (split by versionList).
+func extractVersionArg(args []string) ([]string, string, bool, error) {
 	var rest []string
-	verStr, found := "", false
+	raw, found := "", false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--version" || a == "-V":
 			if i+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s requires a value", a)
+				return nil, "", false, fmt.Errorf("%s requires a value", a)
 			}
-			verStr, found = args[i+1], true
+			raw, found = args[i+1], true
 			i++
 		case strings.HasPrefix(a, "--version="):
-			verStr, found = strings.TrimPrefix(a, "--version="), true
+			raw, found = strings.TrimPrefix(a, "--version="), true
 		default:
 			rest = append(rest, a)
 		}
 	}
+	return rest, raw, found, nil
+}
+
+// versionList parses a comma-separated --version value into versions.
+// Absent → [nil] (one run, no templating). Duplicates are dropped; order
+// is preserved.
+func versionList(raw string, found bool) ([]*Version, error) {
 	if !found {
-		return args, nil, nil
+		return []*Version{nil}, nil
 	}
-	ver, err := parseVersion(verStr)
-	if err != nil {
-		return nil, nil, err
+	var vers []*Version
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		v, err := parseVersion(part)
+		if err != nil {
+			return nil, err
+		}
+		vers = append(vers, v)
 	}
-	return rest, ver, nil
+	if len(vers) == 0 {
+		return nil, fmt.Errorf("--version was empty")
+	}
+	return vers, nil
 }
 
 func targetArg(args []string) (string, error) {

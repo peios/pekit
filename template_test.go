@@ -97,19 +97,42 @@ func TestExtractVersionForms(t *testing.T) {
 		{"build", "--version", "0.34.0"},
 		{"build", "--version=0.34.0"},
 	} {
-		rest, v, err := extractVersion(args)
+		rest, raw, found, err := extractVersionArg(args)
 		if err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
-		if v == nil || v.Full != "0.34.0" {
-			t.Errorf("%v: version = %+v", args, v)
+		if !found || raw != "0.34.0" {
+			t.Errorf("%v: raw=%q found=%v", args, raw, found)
 		}
 		if len(rest) != 1 || rest[0] != "build" {
 			t.Errorf("%v: rest = %v", args, rest)
 		}
 	}
-	rest, v, err := extractVersion([]string{"build"})
-	if err != nil || v != nil || len(rest) != 1 {
-		t.Errorf("no-flag: rest=%v v=%v err=%v", rest, v, err)
+	rest, _, found, err := extractVersionArg([]string{"build"})
+	if err != nil || found || len(rest) != 1 {
+		t.Errorf("no-flag: rest=%v found=%v err=%v", rest, found, err)
+	}
+}
+
+func TestVersionListMultiple(t *testing.T) {
+	vers, err := versionList("0.33.0, 0.34.0,0.34.0", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vers) != 2 || vers[0].Full != "0.33.0" || vers[1].Full != "0.34.0" {
+		t.Errorf("vers = %v (want [0.33.0 0.34.0], dups dropped, order kept)", vers)
+	}
+}
+
+func TestVersionListAbsentIsSingleNil(t *testing.T) {
+	vers, err := versionList("", false)
+	if err != nil || len(vers) != 1 || vers[0] != nil {
+		t.Errorf("absent: vers=%v err=%v", vers, err)
+	}
+}
+
+func TestVersionListRejectsJunkMember(t *testing.T) {
+	if _, err := versionList("0.34.0,nope", true); err == nil {
+		t.Error("want error for junk version in list")
 	}
 }
