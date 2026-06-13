@@ -220,14 +220,19 @@ func cmdPackage(args []string) error {
 	return engine(PackageJob{Pkg: pf, Name: name, Root: wd, Files: files, OutStage: outStage})
 }
 
-// referencedBuildTargets returns the distinct build targets named by
-// stage-reference sources, sorted.
+// referencedBuildTargets returns the distinct build targets to run
+// before packaging, sorted: those derived from stage-reference sources
+// unioned with the declared builds list (additive — declared targets
+// can never suppress a derived one).
 func referencedBuildTargets(pf *PackageFile) []string {
 	set := make(map[string]bool)
 	for _, m := range pf.Files {
 		if m.Source.Target != "" {
 			set[m.Source.Target] = true
 		}
+	}
+	for _, t := range pf.Builds {
+		set[t] = true
 	}
 	return sortedNames(set)
 }

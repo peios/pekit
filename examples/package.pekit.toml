@@ -1,9 +1,13 @@
 # Kitchen-sink package.pekit.toml — a pretend package exercising every
-# field the peipkg format will need (mirroring peipkg/pack.Manifest /
-# PSD-009 §3.3). DESIGN SKETCH: today pekit parses only format,
-# [package].name and [files]; everything else here is proposal.
+# field of the format (mirroring peipkg/pack.Manifest / PSD-009 §3.3).
+# Everything here parses and packs; a test keeps this file parse-clean.
 
 format = "peipkg"
+
+# Build targets to run before packaging, for literal-path sources whose
+# producer can't be derived. Additive with the targets derived from
+# stage references (which always build) — never an override.
+builds = ["main"]
 
 [package]
 name         = "jellyfind"           # optional for tar (defaults to dir name); peipkg requires it

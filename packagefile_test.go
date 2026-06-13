@@ -329,3 +329,40 @@ loregd = "*"
 		t.Errorf("want tar-cannot-express error, got: %v", err)
 	}
 }
+
+func TestBuildsUnionsWithDerived(t *testing.T) {
+	pf, err := ParsePackageFile(`
+format = "tar"
+builds = ["main", "tools"]
+
+[files]
+"cli:x" = "usr/bin/x"
+"target/release/y" = "usr/bin/y"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := referencedBuildTargets(pf)
+	want := []string{"cli", "main", "tools"}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("targets = %v, want %v (derived ∪ declared, sorted)", got, want)
+		}
+	}
+}
+
+func TestEmptyBuildsRejected(t *testing.T) {
+	_, err := ParsePackageFile(`
+format = "tar"
+builds = []
+
+[files]
+":x" = "usr/bin/x"
+`)
+	if err == nil || !strings.Contains(err.Error(), "does nothing") {
+		t.Errorf("want empty-builds error, got: %v", err)
+	}
+}

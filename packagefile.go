@@ -17,6 +17,12 @@ type PackageFile struct {
 	Format string
 	Files  []FileMapping // sorted by Dest
 
+	// Builds names build targets to run before packaging, for literal-
+	// path sources whose producer cannot be derived. ADDITIVE: unioned
+	// with the targets derived from stage references, never replacing
+	// them (an override mode could silently skip a referenced build).
+	Builds []string
+
 	// [package] identity. Name is an optional override (default: the
 	// project dir name); the rest is required or optional per-format.
 	Name         string
@@ -149,6 +155,21 @@ func ParsePackageFile(src string) (*PackageFile, error) {
 				return nil, err
 			}
 			pf.Format = s
+		case "builds":
+			vals, ok := raw[key].([]any)
+			if !ok {
+				return nil, fmt.Errorf("builds must be an array of build target names")
+			}
+			if len(vals) == 0 {
+				return nil, fmt.Errorf("builds = [] does nothing (stage-referenced targets always build); omit it")
+			}
+			for _, v := range vals {
+				s, ok := v.(string)
+				if !ok || s == "" {
+					return nil, fmt.Errorf("builds must be an array of non-empty build target names")
+				}
+				pf.Builds = append(pf.Builds, s)
+			}
 		case "package":
 			table, ok := raw[key].(map[string]any)
 			if !ok {
