@@ -31,9 +31,18 @@ func peipkgEngine(job PackageJob) (string, error) {
 		return "", fmt.Errorf("package %s: payload layout: %w", job.Name, err)
 	}
 
-	build, err := localProvenance(job.ProvenanceDir)
-	if err != nil {
-		return "", fmt.Errorf("package %s: %w", job.Name, err)
+	var build pack.BuildInfo
+	if job.Local {
+		// Dev build of a working copy — there is no pinned commit to anchor
+		// to (the tree may be dirty or not even a git repo), so stamp a
+		// visible localdev marker instead of reading git HEAD.
+		build = localdevProvenance()
+	} else {
+		b, err := localProvenance(job.ProvenanceDir)
+		if err != nil {
+			return "", fmt.Errorf("package %s: %w", job.Name, err)
+		}
+		build = b
 	}
 
 	// Farm naming convention: name_version_arch.peipkg
@@ -129,6 +138,17 @@ func localProvenance(root string) (pack.BuildInfo, error) {
 		FarmID:    "local",
 		SourceRef: ref,
 	}, nil
+}
+
+// localdevProvenance is the build info for a --local dev build: a visible
+// localdev FarmID and a wall-clock timestamp, with no commit ref — the
+// working copy it was built from is not a reproducible point.
+func localdevProvenance() pack.BuildInfo {
+	return pack.BuildInfo{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		FarmID:    "localdev",
+		SourceRef: "working-tree",
+	}
 }
 
 func gitOut(root string, args ...string) (string, error) {

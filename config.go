@@ -51,6 +51,14 @@ type Source struct {
 	// build (e.g. releases predating its packaging files) are skipped
 	// rather than attempted. Empty = no bound.
 	Versions string
+	// LocalPath, when set, is a local working copy (relative to the recipe
+	// dir) usable in place of git/rev under --local — for compiling
+	// in-development packages without a tag. The farm never passes
+	// --local, so it always uses git.
+	LocalPath string
+	// Local is a runtime flag (not parsed): --local set it, switching the
+	// source to build LocalPath in place rather than cloning git@rev.
+	Local bool
 }
 
 // LoadConfig reads, templates, and parses a pekit.toml file.
@@ -151,10 +159,11 @@ func ParseConfig(src string) (*Config, error) {
 	return cfg, nil
 }
 
-// parseSource parses a [source] block. git and rev are both required;
-// rev is taken verbatim (tag, commit, or any git-checkout-able ref) —
-// reproducibility comes from passing an immutable rev, not from pekit
-// policing it, since in practice an orchestrator injects a concrete one.
+// parseSource parses a [source] block. A source provides git (then rev is
+// required; rev is verbatim — any git-checkout-able ref) and/or localpath
+// (a working copy for --local). At least one is required; a recipe may
+// carry both (git for the farm, localpath for dev). rev is reproducible
+// only as far as an immutable ref is passed, which an orchestrator does.
 func parseSource(table map[string]any) (*Source, error) {
 	var src Source
 	for _, key := range sortedKeys(table) {
@@ -171,6 +180,12 @@ func parseSource(table map[string]any) (*Source, error) {
 				return nil, err
 			}
 			src.Rev = s
+		case "localpath":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			src.LocalPath = s
 		case "versions":
 			s, err := stringValue("source", key, table[key])
 			if err != nil {
@@ -184,11 +199,11 @@ func parseSource(table map[string]any) (*Source, error) {
 			return nil, fmt.Errorf("[source]: unknown key %q", key)
 		}
 	}
-	if src.Git == "" {
-		return nil, fmt.Errorf("[source]: missing required key %q", "git")
+	if src.Git == "" && src.LocalPath == "" {
+		return nil, fmt.Errorf("[source]: needs %q or %q", "git", "localpath")
 	}
-	if src.Rev == "" {
-		return nil, fmt.Errorf("[source]: missing required key %q", "rev")
+	if src.Git != "" && src.Rev == "" {
+		return nil, fmt.Errorf("[source]: %q requires %q", "git", "rev")
 	}
 	return &src, nil
 }

@@ -379,14 +379,35 @@ command = "make"
 	}
 }
 
-func TestSourceRequiresGitAndRev(t *testing.T) {
+func TestSourceRequiresGitOrLocalpath(t *testing.T) {
+	// rev alone (no git, no localpath): nothing to fetch from.
 	_, err := ParseConfig("outDir=\"out\"\n[source]\nrev=\"x\"\n")
-	if err == nil || !strings.Contains(err.Error(), `missing required key "git"`) {
-		t.Errorf("want missing-git error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `needs "git" or "localpath"`) {
+		t.Errorf("want git-or-localpath error, got: %v", err)
 	}
+	// git without rev: still required when git is the source.
 	_, err = ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\n")
-	if err == nil || !strings.Contains(err.Error(), `missing required key "rev"`) {
-		t.Errorf("want missing-rev error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `"git" requires "rev"`) {
+		t.Errorf("want git-requires-rev error, got: %v", err)
+	}
+}
+
+func TestSourceLocalpathParsed(t *testing.T) {
+	// localpath alone is a valid source (dev-only recipe); no rev needed.
+	cfg, err := ParseConfig("outDir=\"out\"\n[source]\nlocalpath=\"../../loregd\"\n")
+	if err != nil {
+		t.Fatalf("localpath-only source should parse: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.LocalPath != "../../loregd" {
+		t.Errorf("Source = %+v, want localpath ../../loregd", cfg.Source)
+	}
+	// git + rev + localpath together is also valid (farm + dev).
+	cfg, err = ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"v1\"\nlocalpath=\"../../x\"\n")
+	if err != nil {
+		t.Fatalf("git+rev+localpath should parse: %v", err)
+	}
+	if cfg.Source.Git != "u" || cfg.Source.Rev != "v1" || cfg.Source.LocalPath != "../../x" {
+		t.Errorf("Source = %+v", cfg.Source)
 	}
 }
 

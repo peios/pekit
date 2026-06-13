@@ -34,6 +34,14 @@ func (v *Version) lookup(key string) (string, bool) {
 	return "", false
 }
 
+// localVersion is the default version stamped on a --local build when no
+// --version is given: a valid-semver sentinel so every {{...}} variable
+// resolves (major/minor/patch = 0, prerelease = localdev), and it sorts
+// below every real release so a dev build can never supersede one.
+func localVersion() *Version {
+	return &Version{Full: "0.0.0-localdev", Major: "0", Minor: "0", Patch: "0", Prerelease: "localdev"}
+}
+
 var semverRe = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
 
 // parseVersion parses MAJOR.MINOR.PATCH[-prerelease][+buildmeta].

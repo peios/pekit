@@ -20,6 +20,9 @@ type PackageJob struct {
 	ProvenanceDir string
 	Files         []StagedFile // sorted by Dest, sources verified to exist
 	OutStage      string       // absolute path to outDir/package/<name>
+	// Local marks a --local build (working copy, no pinned commit), so the
+	// engine stamps localdev provenance instead of reading git HEAD.
+	Local bool
 }
 
 // packageEngine builds one package in a specific format, returning the

@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] | pekit <package|publish> | pekit workspace <package|publish> [--all|--latest]"
+const usage = "usage: pekit <build|test|install|clean> [target] | pekit <package|publish> [--local] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -37,6 +37,27 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+
+	// Local mode: build the [source] working copy. Source selection
+	// (--local) and version numbering (--version) are independent — so
+	// --version, if given, only restamps the artifact and never drags the
+	// build back to git. The version defaults to a sentinel that sorts
+	// below every release; the ledger is off (dev builds aren't recorded).
+	if f.local {
+		if f.remember {
+			return fmt.Errorf("--remember-built does not apply to --local (dev builds aren't recorded)")
+		}
+		ver := localVersion()
+		if f.hasVersion {
+			v, perr := parseVersion(f.version)
+			if perr != nil {
+				return fmt.Errorf("with --local, --version must be an exact version: %w", perr)
+			}
+			ver = v
+		}
+		return dispatch(args, ver, true)
+	}
+
 	// pekit.built is consulted for the work-doing verbs (build/package/
 	// publish); test/clean ignore it.
 	ledgerActive := args[0] == "build" || args[0] == "package" || args[0] == "publish"
@@ -73,7 +94,7 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
 			return nil
 		}
-		return dispatch(args, vers[0])
+		return dispatch(args, vers[0], false)
 	}
 
 	if len(vers) > 1 {
@@ -92,7 +113,7 @@ func run(args []string) error {
 			skipped++
 			continue
 		}
-		if err := dispatch(args, ver); err != nil {
+		if err := dispatch(args, ver, false); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
@@ -121,20 +142,22 @@ func run(args []string) error {
 // so this is pure orchestration over the existing verbs.
 func cmdWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pekit workspace <package|publish> [--all|--latest] [--remember-built] [--bust]")
+		return errors.New("usage: pekit workspace <package|publish> <--all|--latest|--local> [--remember-built] [--bust]")
 	}
 	verb := args[0]
 	if verb != "package" && verb != "publish" {
 		return fmt.Errorf("pekit workspace supports package and publish (got %q)", verb)
 	}
 
-	var all, latest, remember, bust bool
+	var all, latest, local, remember, bust bool
 	for _, a := range args[1:] {
 		switch a {
 		case "--all":
 			all = true
 		case "--latest":
 			latest = true
+		case "--local":
+			local = true
 		case "--remember-built":
 			remember = true
 		case "--bust":
@@ -143,8 +166,17 @@ func cmdWorkspace(args []string) error {
 			return fmt.Errorf("pekit workspace: unknown flag %q", a)
 		}
 	}
-	if all == latest {
-		return fmt.Errorf("pekit workspace %s needs exactly one of --all or --latest", verb)
+	modes := 0
+	for _, on := range []bool{all, latest, local} {
+		if on {
+			modes++
+		}
+	}
+	if modes != 1 {
+		return fmt.Errorf("pekit workspace %s needs exactly one of --all, --latest, or --local", verb)
+	}
+	if local && remember {
+		return fmt.Errorf("--remember-built does not apply to --local (dev builds aren't recorded)")
 	}
 
 	wd, err := os.Getwd()
@@ -179,6 +211,9 @@ func cmdWorkspace(args []string) error {
 	if latest {
 		mode = "latest"
 	}
+	if local {
+		mode = "local"
+	}
 	fmt.Fprintf(os.Stderr, "pekit: workspace %s (--%s): %d members: %s\n",
 		verb, mode, len(members), strings.Join(names, ", "))
 
@@ -187,6 +222,9 @@ func cmdWorkspace(args []string) error {
 		name := filepath.Base(m)
 		fmt.Fprintf(os.Stderr, "pekit: ── %s ──\n", name)
 		err := inDir(m, func() error {
+			if local {
+				return run([]string{verb, "--local"})
+			}
 			sel := "*"
 			if latest {
 				v, lerr := latestVersion()
@@ -230,14 +268,14 @@ func inDir(dir string, fn func() error) error {
 	return fn()
 }
 
-func dispatch(args []string, ver *Version) error {
+func dispatch(args []string, ver *Version, local bool) error {
 	switch args[0] {
 	case "build", "test", "install":
-		return cmdVerb(args[0], args[1:], ver)
+		return cmdVerb(args[0], args[1:], ver, local)
 	case "package":
-		return cmdPackage(args[1:], ver)
+		return cmdPackage(args[1:], ver, local)
 	case "publish":
-		return cmdPublish(args[1:], ver)
+		return cmdPublish(args[1:], ver, local)
 	case "clean":
 		return cmdClean(args[1:], ver)
 	default:
@@ -251,6 +289,7 @@ type flags struct {
 	hasVersion bool
 	remember   bool // --remember-built: skip + record against pekit.built
 	bust       bool // --bust: rebuild even if the ledger says built
+	local      bool // --local: build the [source] localpath working copy
 }
 
 // extractFlags pulls the global flags out of args, returning the rest.
@@ -272,6 +311,8 @@ func extractFlags(args []string) ([]string, flags, error) {
 			f.remember = true
 		case a == "--bust":
 			f.bust = true
+		case a == "--local":
+			f.local = true
 		default:
 			rest = append(rest, a)
 		}
@@ -290,7 +331,7 @@ func targetArg(args []string) (string, error) {
 	}
 }
 
-func cmdVerb(verb string, args []string, ver *Version) error {
+func cmdVerb(verb string, args []string, ver *Version, local bool) error {
 	name, err := targetArg(args)
 	if err != nil {
 		return err
@@ -298,6 +339,9 @@ func cmdVerb(verb string, args []string, ver *Version) error {
 
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
+		return err
+	}
+	if err := applyLocal(cfg, local); err != nil {
 		return err
 	}
 
@@ -354,8 +398,28 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 }
 
 // revScope is the filesystem-safe form of a source rev ('/' flattened).
+// Local mode has no rev, so its builds share one "localdev" scope.
 func revScope(src *Source) string {
+	if src.Local {
+		return "localdev"
+	}
 	return strings.ReplaceAll(src.Rev, "/", "_")
+}
+
+// applyLocal switches a recipe's source to local mode (build the working
+// copy in place). It is the single validation point for --local.
+func applyLocal(cfg *Config, local bool) error {
+	if !local {
+		return nil
+	}
+	if cfg.Source == nil {
+		return fmt.Errorf("--local needs a [source] with a localpath")
+	}
+	if cfg.Source.LocalPath == "" {
+		return fmt.Errorf("--local: [source] has no localpath")
+	}
+	cfg.Source.Local = true
+	return nil
 }
 
 // outBase is the staging root. In source mode everything for one rev is
@@ -380,6 +444,19 @@ func sourceCheckout(cfg *Config) string {
 // failed checkout is torn down so the next run re-clones rather than
 // reusing a half-built tree.
 func fetchSource(src *Source, dir string) (string, error) {
+	// Local mode: build the working copy in place, no clone/checkout.
+	// LocalPath is relative to the recipe dir (the current directory).
+	if src.Local {
+		abs, err := filepath.Abs(src.LocalPath)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("localpath %s: %w", src.LocalPath, err)
+		}
+		fmt.Printf("pekit: source: %s (local)\n", abs)
+		return abs, nil
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -467,11 +544,11 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string, ver *Version) error {
+func cmdPackage(args []string, ver *Version, local bool) error {
 	if len(args) != 0 {
 		return fmt.Errorf("pekit package takes no arguments (one package.pekit.toml per package)")
 	}
-	_, _, _, err := buildPackage(ver)
+	_, _, _, err := buildPackage(ver, local)
 	return err
 }
 
@@ -480,13 +557,16 @@ func cmdPackage(args []string, ver *Version) error {
 // package definition, and the workspace root it belongs to ("" if none).
 // cmdPackage discards the extras; cmdPublish ships the artifact to the
 // package's [publish] targets.
-func buildPackage(ver *Version) (string, *PackageFile, string, error) {
+func buildPackage(ver *Version, local bool) (string, *PackageFile, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", nil, "", err
 	}
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
+		return "", nil, "", err
+	}
+	if err := applyLocal(cfg, local); err != nil {
 		return "", nil, "", err
 	}
 
@@ -525,17 +605,15 @@ func buildPackage(ver *Version) (string, *PackageFile, string, error) {
 	provenanceDir, literalRoot := wd, wd
 	var srcRaw map[string]any
 	if cfg.Source != nil {
-		checkout, aerr := filepath.Abs(sourceCheckout(cfg))
-		if aerr != nil {
-			return "", nil, "", aerr
-		}
-		provenanceDir, literalRoot = checkout, checkout
-
 		// Delegate mode builds from the source and may borrow parts of its
 		// recipe, so fetch it up front (the build step reuses the checkout).
-		if _, ferr := fetchSource(cfg.Source, sourceCheckout(cfg)); ferr != nil {
+		// fetchSource resolves the actual source dir for both modes: the
+		// git checkout, or — under --local — the localpath working copy.
+		checkout, ferr := fetchSource(cfg.Source, sourceCheckout(cfg))
+		if ferr != nil {
 			return "", nil, "", ferr
 		}
+		provenanceDir, literalRoot = checkout, checkout
 
 		// pekit.toml: section-level fallback.
 		if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml"), ver); cerr == nil {
@@ -602,7 +680,7 @@ func buildPackage(ver *Version) (string, *PackageFile, string, error) {
 	}
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
-	artifact, err := engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage})
+	artifact, err := engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage, Local: local})
 	if err != nil {
 		return "", nil, wsRoot, err
 	}
@@ -612,11 +690,11 @@ func buildPackage(ver *Version) (string, *PackageFile, string, error) {
 
 // cmdPublish builds the package, then ships the artifact to each of its
 // [publish] targets (usually inherited from the workspace root).
-func cmdPublish(args []string, ver *Version) error {
+func cmdPublish(args []string, ver *Version, local bool) error {
 	if len(args) != 0 {
 		return fmt.Errorf("pekit publish takes no arguments")
 	}
-	artifact, pf, wsRoot, err := buildPackage(ver)
+	artifact, pf, wsRoot, err := buildPackage(ver, local)
 	if err != nil {
 		return err
 	}
