@@ -40,10 +40,10 @@ media-indexer = "1.0"
 [replaces]
 old-jellyfind = "< 2.0"
 
-# Per-path security-descriptor overrides (§3.3.5).
-# OPEN QUESTION: SDDL here (compiled to the binary SD by pekit via
-# libp-go's sddl package) vs raw base64 of the self-relative SD, which
-# is what peipkg/pack actually takes. SDDL shown — humans can read it.
+# Per-path security-descriptor overrides (§3.3.5), in SDDL (compiled
+# to binary SDs by peipkg/pack via libp). Absolute SID aliases only —
+# no domain context at pack time. Note SDDL has no whitespace between
+# the O:/G:/D:/S: components.
 [sdOverrides]
 "usr/bin/jellyfind-admin" = "O:SYD:(A;;FX;;;BA)"
 "var/lib/jellyfind"       = "O:SYD:(A;OICI;FA;;;SY)"
