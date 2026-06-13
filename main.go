@@ -38,24 +38,64 @@ func run(args []string) error {
 		return errors.New(usage)
 	}
 
-	// Local mode: build the [source] working copy. Source selection
-	// (--local) and version numbering (--version) are independent — so
-	// --version, if given, only restamps the artifact and never drags the
-	// build back to git. The version defaults to a sentinel that sorts
+	// Local mode: PREFER the [source] working copy, fall back to remote.
+	// Source selection (--local) and version numbering (--version) are
+	// independent — --version only restamps and never drags a local build
+	// back to git. The local version defaults to a sentinel that sorts
 	// below every release; the ledger is off (dev builds aren't recorded).
+	// If the working copy isn't present, rather than fail we build from git
+	// (the named --version, else the latest tag) with a warning — only a
+	// recipe with no git fallback errors.
 	if f.local {
 		if f.remember {
 			return fmt.Errorf("--remember-built does not apply to --local (dev builds aren't recorded)")
 		}
-		ver := localVersion()
-		if f.hasVersion {
+		src, serr := loadRecipeSource()
+		if serr != nil {
+			return serr
+		}
+		if src == nil {
+			return fmt.Errorf("--local needs a [source]")
+		}
+		exactVersion := func() (*Version, error) {
+			if !f.hasVersion {
+				return nil, nil
+			}
 			v, perr := parseVersion(f.version)
 			if perr != nil {
-				return fmt.Errorf("with --local, --version must be an exact version: %w", perr)
+				return nil, fmt.Errorf("with --local, --version must be an exact version: %w", perr)
+			}
+			return v, nil
+		}
+
+		if localUsable(src) {
+			ver, verr := exactVersion()
+			if verr != nil {
+				return verr
+			}
+			if ver == nil {
+				ver = localVersion()
+			}
+			return dispatch(args, ver, true)
+		}
+
+		// Working copy not present — fall back to remote instead of failing.
+		if src.Git == "" {
+			return fmt.Errorf("--local: %s and no git source to fall back to", localMissReason(src))
+		}
+		ver, verr := exactVersion()
+		if verr != nil {
+			return verr
+		}
+		if ver == nil {
+			v, lerr := latestVersion()
+			if lerr != nil {
+				return fmt.Errorf("--local fallback to remote: %w", lerr)
 			}
 			ver = v
 		}
-		return dispatch(args, ver, true)
+		fmt.Fprintf(os.Stderr, "pekit: warning: --local: %s; building %s from remote\n", localMissReason(src), ver.Full)
+		return dispatch(args, ver, false)
 	}
 
 	// pekit.built is consulted for the work-doing verbs (build/package/
@@ -404,6 +444,30 @@ func revScope(src *Source) string {
 		return "localdev"
 	}
 	return strings.ReplaceAll(src.Rev, "/", "_")
+}
+
+// localUsable reports whether a source's localpath names an existing
+// directory — the condition for --local to build it in place rather than
+// fall back to remote.
+func localUsable(src *Source) bool {
+	if src.LocalPath == "" {
+		return false
+	}
+	abs, err := filepath.Abs(src.LocalPath)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(abs)
+	return err == nil && info.IsDir()
+}
+
+// localMissReason explains why --local could not use a working copy, for
+// the fallback warning.
+func localMissReason(src *Source) string {
+	if src.LocalPath == "" {
+		return "recipe has no localpath"
+	}
+	return fmt.Sprintf("no working copy at %s", src.LocalPath)
 }
 
 // applyLocal switches a recipe's source to local mode (build the working

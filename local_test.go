@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,30 @@ func TestApplyLocal(t *testing.T) {
 	}
 	if !cfg.Source.Local {
 		t.Error("applyLocal did not set Source.Local")
+	}
+}
+
+func TestLocalUsable(t *testing.T) {
+	dir := t.TempDir()
+	// existing directory → usable
+	if !localUsable(&Source{LocalPath: dir}) {
+		t.Error("existing dir localpath should be usable")
+	}
+	// no localpath → not usable (triggers remote fallback)
+	if localUsable(&Source{Git: "u", Rev: "v1"}) {
+		t.Error("no localpath should not be usable")
+	}
+	// nonexistent path → not usable
+	if localUsable(&Source{LocalPath: filepath.Join(dir, "missing")}) {
+		t.Error("missing localpath should not be usable")
+	}
+	// a file (not a directory) → not usable
+	f := filepath.Join(dir, "afile")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if localUsable(&Source{LocalPath: f}) {
+		t.Error("a file localpath should not be usable (must be a dir)")
 	}
 }
 
