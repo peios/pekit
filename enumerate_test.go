@@ -105,6 +105,45 @@ func TestVersionLadder(t *testing.T) {
 	}
 }
 
+func TestParseRemoteTags(t *testing.T) {
+	// glibc-style ls-remote: two-component releases plus a three-component
+	// .9000 dev snapshot, in tab-separated "<sha>\trefs/tags/<tag>" lines.
+	ls := "sha1\trefs/tags/glibc-2.42\n" +
+		"sha2\trefs/tags/glibc-2.43\n" +
+		"sha3\trefs/tags/glibc-2.43.9000\n"
+
+	fulls := func(vs []*Version) string {
+		var out []string
+		for _, v := range vs {
+			out = append(out, v.Full)
+		}
+		return strings.Join(out, ",")
+	}
+
+	// No filter: every tag the rev template matches, snapshot included.
+	all, err := parseRemoteTags(ls, "glibc-{{version}}", "")
+	if err != nil {
+		t.Fatalf("parseRemoteTags: %v", err)
+	}
+	if got := fulls(all); got != "2.42,2.43,2.43.9000" {
+		t.Errorf("no filter = %q, want 2.42,2.43,2.43.9000", got)
+	}
+
+	// tag_regex keeps only the two-component release tags.
+	rel, err := parseRemoteTags(ls, "glibc-{{version}}", `^glibc-\d+\.\d+$`)
+	if err != nil {
+		t.Fatalf("parseRemoteTags: %v", err)
+	}
+	if got := fulls(rel); got != "2.42,2.43" {
+		t.Errorf("filtered = %q, want 2.42,2.43", got)
+	}
+
+	// An invalid tag_regex is reported, not ignored.
+	if _, err := parseRemoteTags(ls, "glibc-{{version}}", "("); err == nil {
+		t.Error("want error for invalid tag_regex")
+	}
+}
+
 func TestRevMatcherRejectsUnknownVar(t *testing.T) {
 	if _, err := revMatcher("v{{ver}}"); err == nil {
 		t.Error("want error for unknown {{ver}}")

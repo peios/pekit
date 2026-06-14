@@ -446,6 +446,23 @@ func TestSourceVersionsRejectsBadConstraint(t *testing.T) {
 	}
 }
 
+func TestSourceTagRegexParsed(t *testing.T) {
+	cfg, err := ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"glibc-{{version}}\"\ntag_regex=\"^glibc-\\\\d+\\\\.\\\\d+$\"\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Source == nil || cfg.Source.TagRegex != `^glibc-\d+\.\d+$` {
+		t.Errorf("Source.TagRegex = %+v, want ^glibc-\\d+\\.\\d+$", cfg.Source)
+	}
+}
+
+func TestSourceTagRegexRejectsBadPattern(t *testing.T) {
+	_, err := ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\nrev=\"r\"\ntag_regex=\"(\"\n")
+	if err == nil || !strings.Contains(err.Error(), "not a valid regexp") {
+		t.Errorf("want bad-regexp error, got: %v", err)
+	}
+}
+
 func TestOutBaseRevScopesSourceMode(t *testing.T) {
 	src := &Source{Git: "u", Rev: "refs/tags/v1.2"}
 	cfg := &Config{OutDir: "out", Source: src}
