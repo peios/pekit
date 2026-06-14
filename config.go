@@ -14,6 +14,12 @@ import (
 // Target is a single runnable target within a command section.
 type Target struct {
 	Command string
+	// Needs names other targets in the same section that must run before this
+	// one (acyclic). Each direct dependency's staged output dir is exported to
+	// this target's script as PEKIT_<NAME>_OUT — the name uppercased with every
+	// non-alphanumeric byte turned into '_' (see envTargetName). Shared
+	// dependencies run once per invocation.
+	Needs []string
 }
 
 // EnvVar is one [env] entry. Order matters: later values may reference
@@ -109,6 +115,9 @@ func ParseConfig(src string) (*Config, error) {
 			case "build", "test", "install", "clean":
 				targets, err := parseSection(key, table, parseTarget)
 				if err != nil {
+					return nil, err
+				}
+				if err := validateTargetDeps(key, targets); err != nil {
 					return nil, err
 				}
 				cfg.Commands[key] = targets
@@ -279,6 +288,18 @@ func parseTarget(section string, table map[string]any) (Target, error) {
 				return target, err
 			}
 			target.Command = s
+		case "needs":
+			vals, ok := table[key].([]any)
+			if !ok {
+				return target, fmt.Errorf("[%s]: needs must be an array of target names", section)
+			}
+			for _, v := range vals {
+				s, ok := v.(string)
+				if !ok || s == "" {
+					return target, fmt.Errorf("[%s]: needs must be an array of non-empty target names", section)
+				}
+				target.Needs = append(target.Needs, s)
+			}
 		default:
 			return target, fmt.Errorf("[%s]: unknown key %q", section, key)
 		}
@@ -287,6 +308,79 @@ func parseTarget(section string, table map[string]any) (Target, error) {
 		return target, fmt.Errorf("[%s]: missing required key %q", section, "command")
 	}
 	return target, nil
+}
+
+// envTargetName maps a target name to the variable component of its
+// PEKIT_<NAME>_OUT env var: uppercased, with every byte that is not a letter
+// or digit replaced by '_'. The constant PEKIT_ prefix keeps the result a
+// valid sh identifier even when the name starts with a digit.
+func envTargetName(name string) string {
+	b := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b = append(b, c-('a'-'A'))
+		case (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'):
+			b = append(b, c)
+		default:
+			b = append(b, '_')
+		}
+	}
+	return string(b)
+}
+
+// validateTargetDeps checks a section's dependency graph: every needs entry
+// names a real target, no target's direct needs collide on the PEKIT_<NAME>_OUT
+// env var they generate, and the graph is acyclic. Run once at parse time so a
+// broken graph fails fast regardless of which target is later invoked.
+func validateTargetDeps(section string, targets map[string]Target) error {
+	for _, name := range sortedNames(targets) {
+		seen := map[string]string{} // env var component -> dep that produced it
+		for _, dep := range targets[name].Needs {
+			if _, ok := targets[dep]; !ok {
+				return fmt.Errorf("[%s.%s]: needs %q, which is not a target in [%s]", section, name, dep, section)
+			}
+			ev := envTargetName(dep)
+			if prev, dup := seen[ev]; dup {
+				return fmt.Errorf("[%s.%s]: needs %q and %q both map to PEKIT_%s_OUT; rename one", section, name, prev, dep, ev)
+			}
+			seen[ev] = dep
+		}
+	}
+
+	// Cycle detection (DFS three-colouring). Sorted starts keep the reported
+	// cycle deterministic.
+	const (
+		white = iota
+		gray
+		black
+	)
+	color := map[string]int{}
+	var visit func(string) error
+	visit = func(n string) error {
+		color[n] = gray
+		for _, dep := range targets[n].Needs {
+			switch color[dep] {
+			case gray:
+				return fmt.Errorf("[%s]: dependency cycle through %q", section, dep)
+			case white:
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		color[n] = black
+		return nil
+	}
+	for _, name := range sortedNames(targets) {
+		if color[name] == white {
+			if err := visit(name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // envNameRe matches valid sh identifiers. Anything else in an export
