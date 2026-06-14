@@ -28,8 +28,29 @@ func TestParseVersionPlain(t *testing.T) {
 	}
 }
 
+func TestParseVersionPartial(t *testing.T) {
+	cases := []struct {
+		in                  string
+		major, minor, patch string
+	}{
+		{"2.43", "2", "43", ""}, // two-component release (glibc)
+		{"5", "5", "", ""},      // bare major
+		{"2.43.9000", "2", "43", "9000"},
+	}
+	for _, c := range cases {
+		v, err := parseVersion(c.in)
+		if err != nil {
+			t.Fatalf("parseVersion(%q): %v", c.in, err)
+		}
+		if v.Full != c.in || v.Major != c.major || v.Minor != c.minor || v.Patch != c.patch {
+			t.Errorf("parseVersion(%q) = %+v", c.in, v)
+		}
+	}
+}
+
 func TestParseVersionRejectsJunk(t *testing.T) {
-	for _, s := range []string{"0.34", "v0.34.0", "1.2.3.4", "x.y.z", ""} {
+	// "0.34" / "5" are now valid partial versions (see TestParseVersionPartial).
+	for _, s := range []string{"v0.34.0", "1.2.3.4", "x.y.z", "", "2.", "2..3", ".2.3"} {
 		if _, err := parseVersion(s); err == nil {
 			t.Errorf("parseVersion(%q) should error", s)
 		}
@@ -53,6 +74,28 @@ func TestRenderComponentsForUnderscoreTag(t *testing.T) {
 	got, _ := renderTemplate(`{{major}}_{{minor}}_{{patch}}`, v)
 	if got != "1_36_1" {
 		t.Errorf("got %q, want 1_36_1", got)
+	}
+}
+
+func TestRenderPartialVersion(t *testing.T) {
+	// {{version}} renders a partial version verbatim — the glibc case.
+	v, _ := parseVersion("2.43")
+	got, err := renderTemplate(`glibc-{{version}}`, v)
+	if err != nil || got != "glibc-2.43" {
+		t.Errorf("got %q err %v, want glibc-2.43", got, err)
+	}
+}
+
+func TestRenderAbsentComponentErrors(t *testing.T) {
+	// Referencing a component a partial version lacks is an error, not a
+	// silent empty render (which would yield a malformed "2.43.").
+	v, _ := parseVersion("2.43")
+	if _, err := renderTemplate(`{{major}}.{{minor}}.{{patch}}`, v); err == nil || !strings.Contains(err.Error(), "no patch component") {
+		t.Errorf("want no-patch-component error, got: %v", err)
+	}
+	bare, _ := parseVersion("5")
+	if _, err := renderTemplate(`{{major}}.{{minor}}`, bare); err == nil || !strings.Contains(err.Error(), "no minor component") {
+		t.Errorf("want no-minor-component error, got: %v", err)
 	}
 }
 
@@ -138,5 +181,18 @@ func TestResolveVersionsAbsentIsSingleNil(t *testing.T) {
 func TestResolveVersionsRejectsJunkMember(t *testing.T) {
 	if _, err := resolveVersions("0.34.0,nope", true); err == nil {
 		t.Error("want error for junk version in list")
+	}
+}
+
+func TestResolveVersionsLadderNoSourceUsesLiteral(t *testing.T) {
+	// pekit's own recipe (the test working dir) has no [source], so a
+	// trailing-zero version can't be probed upstream and is used verbatim —
+	// the offline path is preserved.
+	vers, err := resolveVersions("2.0.0", true)
+	if err != nil {
+		t.Fatalf("resolveVersions: %v", err)
+	}
+	if len(vers) != 1 || vers[0].Full != "2.0.0" {
+		t.Errorf("vers = %v, want [2.0.0]", vers)
 	}
 }

@@ -15,16 +15,18 @@ import (
 // when we INVERT a rev template into a tag matcher. The classes are
 // deliberately specific — a blanket (.+) would over-capture and let
 // junk tags through. major/minor/patch are numeric; prerelease/buildmeta
-// are semver identifier runs; version is a whole semver. Masterminds is
-// still the final arbiter (we re-parse the capture), so the regex only
-// needs to extract a faithful candidate, not fully validate it.
+// are semver identifier runs; version is a 1-to-3-component semver (so a
+// {{version}} template captures glibc's two-component "2.43" tags as well
+// as three-component ones). parseVersion is still the final arbiter (we
+// re-parse the capture), so the regex only needs to extract a faithful
+// candidate, not fully validate it.
 var revVarPattern = map[string]string{
 	"major":      `\d+`,
 	"minor":      `\d+`,
 	"patch":      `\d+`,
 	"prerelease": `[0-9A-Za-z.-]+`,
 	"buildmeta":  `[0-9A-Za-z.-]+`,
-	"version":    `\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`,
+	"version":    `\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`,
 }
 
 // revMatcher inverts a rev template (e.g. "v{{version}}",
@@ -79,7 +81,16 @@ func versionFromTag(re *regexp.Regexp, tag string) (*Version, bool) {
 	}
 	verStr, ok := caps["version"]
 	if !ok {
-		verStr = caps["major"] + "." + caps["minor"] + "." + caps["patch"]
+		// Reassemble major[.minor[.patch]], skipping components the template
+		// didn't capture, so a two-component template ({{major}}.{{minor}})
+		// yields "2.43" rather than a malformed "2.43.".
+		verStr = caps["major"]
+		if caps["minor"] != "" {
+			verStr += "." + caps["minor"]
+		}
+		if caps["patch"] != "" {
+			verStr += "." + caps["patch"]
+		}
 		if pr := caps["prerelease"]; pr != "" {
 			verStr += "-" + pr
 		}
@@ -121,20 +132,55 @@ func enumerateVersions(git, revTmpl string) ([]*Version, error) {
 	return vers, nil
 }
 
+// versionLadder is the most-specific-first list of versions an exact
+// --version may resolve to, formed by dropping trailing ZERO components:
+// "2.0.0" → 2.0.0, 2.0, 2; "2.43.0" → 2.43.0, 2.43; "2.43" → just itself.
+// The major component is never dropped, and a version carrying a prerelease
+// or buildmeta is never shortened (the label is bound to the full triple).
+// resolveVersions walks the ladder against the enumerated tags and builds the
+// first form upstream actually tags — so a recipe can ask for "2.43.0" and get
+// glibc's two-component "2.43" tag. A single-element ladder (no trailing zero)
+// is used as-is and never triggers enumeration, so an exact build stays cheap.
+func versionLadder(v *Version) []*Version {
+	ladder := []*Version{v}
+	if v.Prerelease != "" || v.Buildmeta != "" {
+		return ladder
+	}
+	comps := []string{v.Major}
+	if v.Minor != "" {
+		comps = append(comps, v.Minor)
+	}
+	if v.Patch != "" {
+		comps = append(comps, v.Patch)
+	}
+	for len(comps) > 1 && comps[len(comps)-1] == "0" {
+		comps = comps[:len(comps)-1]
+		// A prefix of a valid dotted version is always valid, so this parses.
+		if cand, err := parseVersion(strings.Join(comps, ".")); err == nil {
+			ladder = append(ladder, cand)
+		}
+	}
+	return ladder
+}
+
 // resolveVersions turns a --version value into the concrete set to build.
-// Comma separates selectors (union). A selector that is a plain version
-// is used as-is (no enumeration); one that is a constraint (>3.4.0, ^3,
-// 3.x, *) triggers a single upstream enumeration that all constraints
-// then filter. The recipe's [source].versions caps the whole result —
-// versions outside it are dropped (and logged) so a "*" sweep never trips
-// over tags the recipe can't build. Absent --version → one run with no
-// version (nil).
+// Comma separates selectors (union). A selector that is a plain version is
+// resolved against its trailing-zero ladder (see versionLadder); one that is a
+// constraint (>3.4.0, ^3, 3.x, *) triggers a single upstream enumeration that
+// all constraints then filter. Enumeration also backs any ladder with a
+// shorter form to try, so a plain version ending in zero (2.0.0, 2.43.0) is
+// matched to the form upstream tags — a plain version with nothing to drop
+// (2.43.9000, 1.2.3) is used as-is and never reaches the network. The recipe's
+// [source].versions caps the whole result — versions outside it are dropped
+// (and logged) so a "*" sweep never trips over tags the recipe can't build.
+// Absent --version → one run with no version (nil).
 func resolveVersions(raw string, found bool) ([]*Version, error) {
 	if !found {
 		return []*Version{nil}, nil
 	}
 
 	set := map[string]*Version{}
+	var ladders [][]*Version
 	var constraints []*semver.Constraints
 	for _, piece := range strings.Split(raw, ",") {
 		piece = strings.TrimSpace(piece)
@@ -142,7 +188,7 @@ func resolveVersions(raw string, found bool) ([]*Version, error) {
 			continue
 		}
 		if v, err := parseVersion(piece); err == nil {
-			set[v.Full] = v
+			ladders = append(ladders, versionLadder(v))
 			continue
 		}
 		c, err := semver.NewConstraint(piece)
@@ -160,24 +206,64 @@ func resolveVersions(raw string, found bool) ([]*Version, error) {
 		return nil, err
 	}
 
-	if len(constraints) > 0 {
+	// Enumeration is needed for constraints, and for any ladder that has a
+	// shorter form to try. A single-form ladder (plain version, nothing to
+	// drop) needs nothing from upstream.
+	needEnum := len(constraints) > 0
+	for _, l := range ladders {
+		if len(l) > 1 {
+			needEnum = true
+			break
+		}
+	}
+	byFull := map[string]*Version{}
+	var all []*Version
+	if needEnum {
 		if src == nil {
-			return nil, fmt.Errorf("--version constraints need a [source] to enumerate upstream tags")
-		}
-		all, err := enumerateVersions(src.Git, src.Rev)
-		if err != nil {
-			return nil, err
-		}
-		for _, v := range all {
-			sv, err := semver.NewVersion(v.Full)
-			if err != nil {
-				continue
+			if len(constraints) > 0 {
+				return nil, fmt.Errorf("--version constraints need a [source] to enumerate upstream tags")
 			}
-			for _, c := range constraints {
-				if c.Check(sv) {
-					set[v.Full] = v
+			// Ladders but no source to probe against: each falls back to its
+			// literal below, exactly as a plain exact version did before.
+		} else {
+			if all, err = enumerateVersions(src.Git, src.Rev); err != nil {
+				return nil, err
+			}
+			for _, v := range all {
+				byFull[v.Full] = v
+			}
+		}
+	}
+
+	// Plain versions: take the most specific ladder form that an enumerated
+	// tag matches; with no enumeration the literal is used verbatim.
+	for _, l := range ladders {
+		resolved := l[0]
+		if len(l) > 1 && len(byFull) > 0 {
+			for _, cand := range l {
+				if m, ok := byFull[cand.Full]; ok {
+					resolved = m
 					break
 				}
+			}
+			if resolved.Full != l[0].Full {
+				fmt.Fprintf(os.Stderr, "pekit: %s has no upstream tag; matched %s by dropping trailing zeros\n",
+					l[0].Full, resolved.Full)
+			}
+		}
+		set[resolved.Full] = resolved
+	}
+
+	// Constraints filter the enumeration.
+	for _, v := range all {
+		sv, err := semver.NewVersion(v.Full)
+		if err != nil {
+			continue
+		}
+		for _, c := range constraints {
+			if c.Check(sv) {
+				set[v.Full] = v
+				break
 			}
 		}
 	}
