@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // matchTag is a test helper: invert the template and try one tag.
 func matchTag(t *testing.T, tmpl, tag string) (string, bool) {
@@ -25,7 +28,8 @@ func TestInvertVersionTemplate(t *testing.T) {
 		{"v0.34.0", "0.34.0", true},
 		{"v1.2.3-rc1", "1.2.3-rc1", true},
 		{"v1.2.3+build5", "1.2.3+build5", true},
-		{"v1.2", "", false},       // 2-component: not semver, skipped
+		{"v2.43", "2.43", true},   // 2-component (glibc): now captured
+		{"v5", "5", true},         // bare major: now captured
 		{"v1.2.3.4", "", false},   // 4-component: anchored regex rejects
 		{"nightly", "", false},    // no match
 		{"prev1.0.0x", "", false}, // anchoring prevents substring match
@@ -70,6 +74,34 @@ func TestInvertEscapesLiterals(t *testing.T) {
 	// "release-{{version}}" (the '-' is literal).
 	if _, ok := matchTag(t, "release-{{version}}", "releaseX2.0.0"); ok {
 		t.Error("literal '-' should not match 'X'")
+	}
+}
+
+func TestVersionLadder(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"2.0.0", []string{"2.0.0", "2.0", "2"}},
+		{"2.43.0", []string{"2.43.0", "2.43"}},
+		{"2.43", []string{"2.43"}},           // nothing to drop
+		{"2.43.9000", []string{"2.43.9000"}}, // non-zero patch: no drop
+		{"1.0", []string{"1.0", "1"}},
+		{"0.0.0", []string{"0.0.0", "0.0", "0"}}, // major is never dropped
+		{"1.2.0-rc1", []string{"1.2.0-rc1"}},     // prerelease pins the triple
+	}
+	for _, c := range cases {
+		v, err := parseVersion(c.in)
+		if err != nil {
+			t.Fatalf("parseVersion(%q): %v", c.in, err)
+		}
+		var got []string
+		for _, cand := range versionLadder(v) {
+			got = append(got, cand.Full)
+		}
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("versionLadder(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 
