@@ -17,6 +17,13 @@ type PackageFile struct {
 	Format string
 	Files  []FileMapping // sorted by Dest
 
+	// Exclude are [files].exclude source patterns: staged files matching any
+	// of them are dropped after a glob expands but before packing, so a broad
+	// "usr/bin/**" can ship everything except a handful of named tools. Same
+	// target:path syntax as [files] keys; globs allowed. Matched against the
+	// source path (stage-relative), not the rebased dest.
+	Exclude []SourceRef
+
 	// Builds names build targets to run before packaging, for literal-
 	// path sources whose producer cannot be derived. ADDITIVE: unioned
 	// with the targets derived from stage references, never replacing
@@ -300,11 +307,12 @@ func parsePackageRaw(raw map[string]any) (*PackageFile, error) {
 			if !ok {
 				return nil, fmt.Errorf("[files] must be a table")
 			}
-			files, err := parseFiles(table)
+			files, excludes, err := parseFiles(table)
 			if err != nil {
 				return nil, err
 			}
 			pf.Files = files
+			pf.Exclude = excludes
 		case "publish":
 			table, ok := raw[key].(map[string]any)
 			if !ok {
@@ -523,23 +531,38 @@ func tableSlice(section string, v any) ([]map[string]any, error) {
 	}
 }
 
-func parseFiles(table map[string]any) ([]FileMapping, error) {
+func parseFiles(table map[string]any) ([]FileMapping, []SourceRef, error) {
 	var files []FileMapping
+	var excludes []SourceRef
 	seen := make(map[string]string) // concrete dest -> source key, for duplicate detection
 
 	for _, key := range sortedKeys(table) {
+		// "exclude" with an array value is the reserved filter key, not a
+		// source mapping. A string value means a source literally named
+		// "exclude", which still maps normally — so the reservation never
+		// shadows a real file.
+		if key == "exclude" {
+			if arr, isArr := table[key].([]any); isArr {
+				ex, err := parseExclude(arr)
+				if err != nil {
+					return nil, nil, err
+				}
+				excludes = ex
+				continue
+			}
+		}
 		dest, ok := table[key].(string)
 		if !ok {
-			return nil, fmt.Errorf("[files]: %q must map to a destination string", key)
+			return nil, nil, fmt.Errorf("[files]: %q must map to a destination string", key)
 		}
 		src, err := parseSourceRef(key)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		glob := hasGlobMeta(src.Path)
 		cleaned, err := cleanFileDest(dest, glob)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// A glob's dest is a directory prefix; the archive paths it produces
 		// are only known after expansion against the stage, so its collisions
@@ -547,7 +570,7 @@ func parseFiles(table map[string]any) ([]FileMapping, error) {
 		// up front, before any build has run.
 		if !glob {
 			if prev, dup := seen[cleaned]; dup {
-				return nil, fmt.Errorf("[files]: %q and %q both map to %q", prev, key, cleaned)
+				return nil, nil, fmt.Errorf("[files]: %q and %q both map to %q", prev, key, cleaned)
 			}
 			seen[cleaned] = key
 		}
@@ -555,7 +578,26 @@ func parseFiles(table map[string]any) ([]FileMapping, error) {
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Dest < files[j].Dest })
-	return files, nil
+	return files, excludes, nil
+}
+
+// parseExclude parses [files].exclude: an array of source patterns (the same
+// target:path syntax as [files] keys) naming staged files to drop before
+// packing. Globs are allowed, so ":usr/bin/*trace" excludes a whole family.
+func parseExclude(arr []any) ([]SourceRef, error) {
+	var out []SourceRef
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok || s == "" {
+			return nil, fmt.Errorf("[files]: exclude must be an array of non-empty source patterns")
+		}
+		ref, err := parseSourceRef(s)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, nil
 }
 
 func parseSourceRef(key string) (SourceRef, error) {

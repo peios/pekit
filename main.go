@@ -1080,22 +1080,49 @@ func referencedBuildTargets(pf *PackageFile) []string {
 func resolveFiles(pf *PackageFile, name, outDir, literalRoot string) ([]StagedFile, error) {
 	var files []StagedFile
 	seen := make(map[string]string) // archive path -> source that produced it
+	fired := make([]bool, len(pf.Exclude))
 	for _, m := range pf.Files {
 		root := literalRoot
 		if m.Source.Target != "" {
 			root = filepath.Join(outDir, "build", m.Source.Target)
+		}
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, err
 		}
 		staged, err := expandSource(root, m.Source, m.Dest, name)
 		if err != nil {
 			return nil, err
 		}
 		for _, sf := range staged {
+			// Drop staged files that match an [files].exclude pattern. The
+			// match is on the source path (stage-relative), so it lines up
+			// with the source-style ":usr/bin/..." patterns even when the
+			// mapping rebases its dest elsewhere.
+			if len(pf.Exclude) > 0 {
+				rel, rerr := filepath.Rel(rootAbs, sf.Source)
+				if rerr != nil {
+					return nil, rerr
+				}
+				if i := excludedBy(pf.Exclude, m.Source.Target, filepath.ToSlash(rel)); i >= 0 {
+					fired[i] = true
+					continue
+				}
+			}
 			if prev, dup := seen[sf.Dest]; dup {
 				return nil, fmt.Errorf("package %s: %s and %s both map to %q",
 					name, prev, m.Source.String(), sf.Dest)
 			}
 			seen[sf.Dest] = m.Source.String()
 			files = append(files, sf)
+		}
+	}
+	// An exclude that drops nothing is usually a stale or mistyped pattern
+	// (e.g. an upstream renamed a tool). Warn rather than fail, so one recipe
+	// still builds cleanly across versions with slightly different layouts.
+	for i, ex := range pf.Exclude {
+		if !fired[i] {
+			fmt.Fprintf(os.Stderr, "pekit: warning: package %s: exclude %q matched no staged files\n", name, ex.String())
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Dest < files[j].Dest })
