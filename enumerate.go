@@ -106,24 +106,43 @@ func versionFromTag(re *regexp.Regexp, tag string) (*Version, bool) {
 }
 
 // enumerateVersions lists the upstream tags and returns those that match
-// the rev template, parsed and de-duplicated. Network call (ls-remote).
-func enumerateVersions(git, revTmpl string) ([]*Version, error) {
+// the rev template (and tag_regex, if set), parsed and de-duplicated.
+// Network call (ls-remote); the parsing/filtering is parseRemoteTags.
+func enumerateVersions(src *Source) ([]*Version, error) {
+	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", src.Git).Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing tags of %s: %w", src.Git, err)
+	}
+	return parseRemoteTags(string(out), src.Rev, src.TagRegex)
+}
+
+// parseRemoteTags turns `git ls-remote --tags` output into the matching
+// versions: a tag must match the rev template's shape and, when tagRegex is
+// non-empty, that regexp too. De-duplicated by version, ls-remote order
+// preserved. Split out from enumerateVersions so the matching and the
+// tag_regex filter are testable without a remote.
+func parseRemoteTags(lsRemote, revTmpl, tagRegex string) ([]*Version, error) {
 	re, err := revMatcher(revTmpl)
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", git).Output()
-	if err != nil {
-		return nil, fmt.Errorf("listing tags of %s: %w", git, err)
+	var tagRe *regexp.Regexp
+	if tagRegex != "" {
+		if tagRe, err = regexp.Compile(tagRegex); err != nil {
+			return nil, fmt.Errorf("[source].tag_regex %q: %w", tagRegex, err)
+		}
 	}
 	var vers []*Version
 	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(lsRemote), "\n") {
 		_, ref, ok := strings.Cut(line, "\t")
 		if !ok {
 			continue
 		}
 		tag := strings.TrimPrefix(ref, "refs/tags/")
+		if tagRe != nil && !tagRe.MatchString(tag) {
+			continue
+		}
 		if v, ok := versionFromTag(re, tag); ok && !seen[v.Full] {
 			seen[v.Full] = true
 			vers = append(vers, v)
@@ -226,7 +245,7 @@ func resolveVersions(raw string, found bool) ([]*Version, error) {
 			// Ladders but no source to probe against: each falls back to its
 			// literal below, exactly as a plain exact version did before.
 		} else {
-			if all, err = enumerateVersions(src.Git, src.Rev); err != nil {
+			if all, err = enumerateVersions(src); err != nil {
 				return nil, err
 			}
 			for _, v := range all {

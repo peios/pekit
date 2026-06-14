@@ -51,6 +51,15 @@ type Source struct {
 	// build (e.g. releases predating its packaging files) are skipped
 	// rather than attempted. Empty = no bound.
 	Versions string
+	// TagRegex, when set, is a regexp an upstream tag must match to be
+	// enumerated — a discovery filter beyond the rev template's shape, for
+	// excluding tags a semver bound can't. glibc's three-component ".9000"
+	// dev snapshots sort below the next release, so Versions can't drop them
+	// generically; tag_regex = '^glibc-\d+\.\d+$' keeps only the
+	// two-component release tags. It filters enumeration (constraints, "*",
+	// --latest, the trailing-zero ladder); an explicit exact --version
+	// bypasses enumeration and so is taken at its word. Empty = no filter.
+	TagRegex string
 	// LocalPath, when set, is a local working copy (relative to the recipe
 	// dir) usable in place of git/rev under --local — for compiling
 	// in-development packages without a tag. The farm never passes
@@ -195,6 +204,15 @@ func parseSource(table map[string]any) (*Source, error) {
 				return nil, fmt.Errorf("[source]: versions %q is not a valid semver constraint: %w", s, err)
 			}
 			src.Versions = s
+		case "tag_regex":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			if _, err := regexp.Compile(s); err != nil {
+				return nil, fmt.Errorf("[source]: tag_regex %q is not a valid regexp: %w", s, err)
+			}
+			src.TagRegex = s
 		default:
 			return nil, fmt.Errorf("[source]: unknown key %q", key)
 		}

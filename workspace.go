@@ -113,7 +113,7 @@ func latestVersion() (*Version, error) {
 	if src == nil {
 		return nil, fmt.Errorf("--latest needs a [source] to enumerate upstream tags")
 	}
-	all, err := enumerateVersions(src.Git, src.Rev)
+	all, err := enumerateVersions(src)
 	if err != nil {
 		return nil, err
 	}
