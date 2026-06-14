@@ -354,7 +354,7 @@ type flags struct {
 	remember   bool // --remember-built: skip + record against pekit.built
 	bust       bool // --bust: rebuild even if the ledger says built
 	local      bool // --local: build the [source] localpath working copy
-	noBuild    bool // --no-build: package the staged tree, skip implied builds
+	noBuild    bool // --no-build: reuse already-staged builds; build only what is missing
 }
 
 // extractFlags pulls the global flags out of args, returning the rest.
@@ -422,12 +422,66 @@ func cmdVerb(verb string, args []string, ver *Version, local bool) error {
 	if !ok {
 		return fmt.Errorf("pekit.toml has no [%s] section", verb)
 	}
-	target, ok := targets[name]
-	if !ok {
+	if _, ok := targets[name]; !ok {
 		return fmt.Errorf("no %s target %q (available: %s)",
 			verb, name, strings.Join(sortedNames(targets), ", "))
 	}
-	return runCommandTarget(cfg, verb, name, target)
+	return runTarget(cfg, verb, name, nil, false)
+}
+
+// buildOrder returns root and its transitive dependencies in run order
+// (dependencies first, each appearing once). The graph is validated acyclic at
+// parse time, so this never loops; root must exist in targets.
+func buildOrder(targets map[string]Target, root string) []string {
+	var order []string
+	visited := map[string]bool{}
+	var visit func(string)
+	visit = func(n string) {
+		if visited[n] {
+			return
+		}
+		visited[n] = true
+		for _, dep := range targets[n].Needs {
+			visit(dep)
+		}
+		order = append(order, n)
+	}
+	visit(root)
+	return order
+}
+
+// runTarget runs target `name` in section `verb` after its dependencies, in
+// dependency order. ran tracks targets already handled this invocation so a
+// dependency shared by several targets runs once; pass nil for a one-shot run
+// (buildOrder still dedups within the single graph walk).
+//
+// When skipStaged is set (--no-build), a target whose stage dir already exists
+// is reused as-is instead of rebuilt; a target that has never been built is
+// still built. So --no-build is purely a "don't rebuild" switch — on a clean
+// tree it builds everything, on a warm one it builds only what is missing.
+func runTarget(cfg *Config, verb, name string, ran map[string]bool, skipStaged bool) error {
+	targets := cfg.Commands[verb]
+	for _, t := range buildOrder(targets, name) {
+		if ran[t] {
+			continue
+		}
+		if skipStaged {
+			if _, err := os.Stat(filepath.Join(outBase(cfg), verb, t)); err == nil {
+				fmt.Printf("pekit: %s %s: reusing staged output (--no-build)\n", verb, t)
+				if ran != nil {
+					ran[t] = true
+				}
+				continue
+			}
+		}
+		if err := runCommandTarget(cfg, verb, t, targets[t]); err != nil {
+			return err
+		}
+		if ran != nil {
+			ran[t] = true
+		}
+	}
+	return nil
 }
 
 func runCommandTarget(cfg *Config, verb, name string, target Target) error {
@@ -458,6 +512,18 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 		}
 		fmt.Printf("pekit: out: %s\n", stageDir)
 		cmd.Env = append(os.Environ(), "PEKIT_OUT="+stageDir)
+		// Each declared dependency's stage is exported as PEKIT_<NAME>_OUT.
+		// runTarget has already built them, so the dirs exist.
+		for _, dep := range target.Needs {
+			depStage, derr := filepath.Abs(filepath.Join(outBase(cfg), verb, dep))
+			if derr != nil {
+				return derr
+			}
+			cmd.Env = append(cmd.Env, "PEKIT_"+envTargetName(dep)+"_OUT="+depStage)
+		}
+		if len(target.Needs) > 0 {
+			fmt.Printf("pekit: needs: %s\n", strings.Join(target.Needs, ", "))
+		}
 		if err := cmd.Run(); err != nil {
 			return err
 		}
@@ -686,7 +752,7 @@ type buildContext struct {
 	literalRoot   string         // root for plain (non-stage) [files] sources
 	baseRaw       map[string]any // shared fill-only base; may be nil
 	local         bool
-	noBuild       bool            // --no-build: pack the staged tree as-is
+	noBuild       bool            // --no-build: reuse staged builds, build only missing
 	ran           map[string]bool // build targets already run this invocation
 }
 
@@ -893,29 +959,17 @@ func packOne(bc *buildContext, prefixRaw map[string]any, selName string) (string
 	// one source tree (glibc → libc, libc-dev, locales) build it once, not
 	// once each. Literal paths are underivable and stay the caller's problem.
 	for _, targetName := range referencedBuildTargets(pf) {
-		if bc.noBuild {
-			// --no-build: trust the staged tree, but fail loudly if the
-			// referenced target was never built — better than silently
-			// packaging an empty or partial image.
-			stage := filepath.Join(outBase(bc.cfg), "build", targetName)
-			if _, serr := os.Stat(stage); serr != nil {
-				return "", "", nil, fmt.Errorf("package %s: --no-build but build target %q has no staged output at %s (build it once without --no-build first)",
-					name, targetName, stage)
-			}
-			continue
-		}
-		if bc.ran[targetName] {
-			continue
-		}
-		target, ok := bc.cfg.Commands["build"][targetName]
-		if !ok {
+		if _, ok := bc.cfg.Commands["build"][targetName]; !ok {
 			return "", "", nil, fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
 				name, targetName, targetName)
 		}
-		if err := runCommandTarget(bc.cfg, "build", targetName, target); err != nil {
+		// runTarget builds the target and its dependencies, each at most once
+		// across this invocation (so packages sharing a target — or its deps —
+		// build it just once). Under --no-build it reuses whatever is already
+		// staged and builds only the targets that are missing.
+		if err := runTarget(bc.cfg, "build", targetName, bc.ran, bc.noBuild); err != nil {
 			return "", "", nil, err
 		}
-		bc.ran[targetName] = true
 	}
 
 	files, err := resolveFiles(pf, name, outBase(bc.cfg), bc.literalRoot)
