@@ -7,11 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] | pekit <package|publish> [--local] | pekit workspace <package|publish> <--all|--latest|--local>"
+const usage = "usage: pekit <build|test|install|clean> [target] | pekit <package|publish> [name] [--local] [--no-build] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -37,6 +38,12 @@ func run(args []string) error {
 	}
 	if len(args) == 0 {
 		return errors.New(usage)
+	}
+
+	// --no-build trusts the already-staged build tree, so it only means
+	// anything to the verbs that stage-and-pack.
+	if f.noBuild && args[0] != "package" && args[0] != "publish" {
+		return fmt.Errorf("--no-build only applies to package and publish")
 	}
 
 	// Local mode: PREFER the [source] working copy, fall back to remote.
@@ -77,7 +84,7 @@ func run(args []string) error {
 			if ver == nil {
 				ver = localVersion()
 			}
-			return dispatch(args, ver, true)
+			return dispatch(args, ver, true, f.noBuild)
 		}
 
 		// Working copy not present — fall back to remote instead of failing.
@@ -96,7 +103,7 @@ func run(args []string) error {
 			ver = v
 		}
 		fmt.Fprintf(os.Stderr, "pekit: warning: --local: %s; building %s from remote\n", localMissReason(src), ver.Full)
-		return dispatch(args, ver, false)
+		return dispatch(args, ver, false, f.noBuild)
 	}
 
 	// pekit.built is consulted for the work-doing verbs (build/package/
@@ -135,7 +142,7 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
 			return nil
 		}
-		return dispatch(args, vers[0], false)
+		return dispatch(args, vers[0], false, f.noBuild)
 	}
 
 	if len(vers) > 1 {
@@ -154,7 +161,7 @@ func run(args []string) error {
 			skipped++
 			continue
 		}
-		if err := dispatch(args, ver, false); err != nil {
+		if err := dispatch(args, ver, false, f.noBuild); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
@@ -325,14 +332,14 @@ func inDir(dir string, fn func() error) error {
 	return fn()
 }
 
-func dispatch(args []string, ver *Version, local bool) error {
+func dispatch(args []string, ver *Version, local, noBuild bool) error {
 	switch args[0] {
 	case "build", "test", "install":
 		return cmdVerb(args[0], args[1:], ver, local)
 	case "package":
-		return cmdPackage(args[1:], ver, local)
+		return cmdPackage(args[1:], ver, local, noBuild)
 	case "publish":
-		return cmdPublish(args[1:], ver, local)
+		return cmdPublish(args[1:], ver, local, noBuild)
 	case "clean":
 		return cmdClean(args[1:], ver)
 	default:
@@ -347,6 +354,7 @@ type flags struct {
 	remember   bool // --remember-built: skip + record against pekit.built
 	bust       bool // --bust: rebuild even if the ledger says built
 	local      bool // --local: build the [source] localpath working copy
+	noBuild    bool // --no-build: package the staged tree, skip implied builds
 }
 
 // extractFlags pulls the global flags out of args, returning the rest.
@@ -370,7 +378,15 @@ func extractFlags(args []string) ([]string, flags, error) {
 			f.bust = true
 		case a == "--local":
 			f.local = true
+		case a == "--no-build":
+			f.noBuild = true
 		default:
+			// An unrecognised --flag is a mistake, not a positional: catch it
+			// here so it can't be silently swallowed as a target or package
+			// name (which produced a baffling "no such package" error).
+			if strings.HasPrefix(a, "-") {
+				return nil, f, fmt.Errorf("unknown flag %q\n%s", a, usage)
+			}
 			rest = append(rest, a)
 		}
 	}
@@ -625,38 +641,142 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string, ver *Version, local bool) error {
-	if len(args) != 0 {
-		return fmt.Errorf("pekit package takes no arguments (one package.pekit.toml per package)")
+func cmdPackage(args []string, ver *Version, local, noBuild bool) error {
+	sel, err := packageSelector(args)
+	if err != nil {
+		return err
 	}
-	_, _, _, err := buildPackage(ver, local)
+	_, _, err = buildPackages(sel, ver, local, noBuild)
 	return err
 }
 
-// buildPackage runs the full package flow for one recipe in the current
-// directory and returns the written artifact, the effective (merged)
-// package definition, and the workspace root it belongs to ("" if none).
-// cmdPackage discards the extras; cmdPublish ships the artifact to the
-// package's [publish] targets.
-func buildPackage(ver *Version, local bool) (string, *PackageFile, string, error) {
+// packageSelector pulls the optional package-name argument out of a
+// package/publish invocation: none selects every package the recipe defines,
+// one names a single package, more is a usage error.
+func packageSelector(args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return "", nil
+	case 1:
+		return args[0], nil
+	default:
+		return "", fmt.Errorf("usage: pekit <package|publish> [name]")
+	}
+}
+
+// packResult is one packaged artifact: the effective package name, the path
+// written, and the merged definition it was built from (so publish can ship
+// it to the package's own [publish] targets).
+type packResult struct {
+	Name     string
+	Artifact string
+	Pkg      *PackageFile
+}
+
+// buildContext is the once-per-invocation state every package a recipe emits
+// shares: the loaded build config, the fetched source tree, and the merged
+// fill-only base table (workspace root < source < the recipe's own unprefixed
+// package.pekit.toml). prepareBuild assembles it; packOne consumes it once per
+// package, overlaying that package's prefixed file on top of baseRaw.
+type buildContext struct {
+	cfg           *Config
+	wd            string
+	wsRoot        string         // workspace root, or "" if not in a workspace
+	provenanceDir string         // git tree identifying what built the packages
+	literalRoot   string         // root for plain (non-stage) [files] sources
+	baseRaw       map[string]any // shared fill-only base; may be nil
+	local         bool
+	noBuild       bool            // --no-build: pack the staged tree as-is
+	ran           map[string]bool // build targets already run this invocation
+}
+
+// buildPackages prepares the shared build once, then packs each selected
+// package: sel names one, or "" means all. Members are the prefixed
+// <name>.package.pekit.toml files in the recipe dir; with none present the
+// bare package.pekit.toml is the sole package (the original single-package
+// behaviour). Returns one result per package (for publish) and the workspace
+// root the recipe belongs to ("" if none).
+func buildPackages(sel string, ver *Version, local, noBuild bool) ([]packResult, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
+	members, err := discoverPackages(wd)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Resolve the selection to a list of (name, prefixed-table) jobs before
+	// doing any build work, so a bad name fails before fetching a source.
+	type job struct {
+		name string         // prefix selector ("" for the standalone base)
+		raw  map[string]any // the prefixed file's table (nil for standalone)
+	}
+	var jobs []job
+	if len(members) == 0 {
+		if sel != "" {
+			return nil, "", fmt.Errorf("pekit package %q: this recipe defines no named packages (it has a single package.pekit.toml)", sel)
+		}
+		jobs = []job{{}}
+	} else {
+		chosen := members
+		if sel != "" {
+			if !slices.Contains(members, sel) {
+				return nil, "", fmt.Errorf("pekit package %q: no such package (available: %s)", sel, strings.Join(members, ", "))
+			}
+			chosen = []string{sel}
+		}
+		for _, m := range chosen {
+			raw, _, derr := decodePackageFile(m+".package.pekit.toml", ver)
+			if derr != nil {
+				return nil, "", derr
+			}
+			jobs = append(jobs, job{name: m, raw: raw})
+		}
+	}
+
+	bc, err := prepareBuild(wd, ver, local)
+	if err != nil {
+		return nil, "", err
+	}
+	bc.noBuild = noBuild
+	if len(jobs) > 1 {
+		fmt.Fprintf(os.Stderr, "pekit: packaging %d packages: %s\n", len(jobs), strings.Join(members, ", "))
+	}
+
+	var results []packResult
+	for _, j := range jobs {
+		artifact, name, pf, perr := packOne(bc, j.raw, j.name)
+		if perr != nil {
+			return nil, "", perr
+		}
+		results = append(results, packResult{Name: name, Artifact: artifact, Pkg: pf})
+	}
+	return results, bc.wsRoot, nil
+}
+
+// prepareBuild assembles the buildContext: load the recipe, apply --local,
+// fetch the [source] tree (delegate mode, with section-level fallback), and
+// merge the fill-only base package table (workspace root < source < the
+// recipe's own package.pekit.toml). The expensive parts — source fetch, and
+// later the build steps — happen once and are shared by every package the
+// recipe emits.
+func prepareBuild(wd string, ver *Version, local bool) (*buildContext, error) {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
-		return "", nil, "", err
+		return nil, err
 	}
 	if err := applyLocal(cfg, local); err != nil {
-		return "", nil, "", err
+		return nil, err
 	}
 
 	// The recipe's own package.pekit.toml, kept as a raw table so a partial
 	// override can be merged field-by-field below (a struct can't tell
-	// "field unset" from "field empty").
+	// "field unset" from "field empty"). When prefixed members exist this is
+	// their shared base; with none it is the sole package itself.
 	recipeRaw, _, err := decodePackageFile("package.pekit.toml", ver)
 	if err != nil {
-		return "", nil, "", err
+		return nil, err
 	}
 	_, hasBuild := cfg.Commands["build"]
 
@@ -666,12 +786,12 @@ func buildPackage(ver *Version, local bool) (string, *PackageFile, string, error
 	// ancestor package.pekit.toml is never inherited.
 	wsRoot, inWorkspace, err := findWorkspaceRoot(wd)
 	if err != nil {
-		return "", nil, "", err
+		return nil, err
 	}
 	var rootRaw map[string]any
 	if inWorkspace {
 		if rootRaw, _, err = decodePackageFile(filepath.Join(wsRoot, "package.pekit.toml"), ver); err != nil {
-			return "", nil, "", err
+			return nil, err
 		}
 	} else {
 		wsRoot = ""
@@ -692,7 +812,7 @@ func buildPackage(ver *Version, local bool) (string, *PackageFile, string, error
 		// git checkout, or — under --local — the localpath working copy.
 		checkout, ferr := fetchSource(cfg.Source, sourceCheckout(cfg))
 		if ferr != nil {
-			return "", nil, "", ferr
+			return nil, ferr
 		}
 		provenanceDir, literalRoot = checkout, checkout
 
@@ -710,77 +830,159 @@ func buildPackage(ver *Version, local bool) (string, *PackageFile, string, error
 		}
 
 		if srcRaw, _, err = decodePackageFile(filepath.Join(checkout, "package.pekit.toml"), ver); err != nil {
-			return "", nil, "", err
+			return nil, err
 		}
 	}
 
-	// Precedence (low to high): workspace root < source < leaf recipe.
-	merged := mergePackageRaw(recipeRaw, mergePackageRaw(srcRaw, rootRaw))
+	return &buildContext{
+		cfg:           cfg,
+		wd:            wd,
+		wsRoot:        wsRoot,
+		provenanceDir: provenanceDir,
+		literalRoot:   literalRoot,
+		// Precedence (low to high): workspace root < source < recipe base.
+		// A package's own prefixed file is overlaid on top of this in packOne.
+		baseRaw: mergePackageRaw(recipeRaw, mergePackageRaw(srcRaw, rootRaw)),
+		local:   local,
+		ran:     map[string]bool{},
+	}, nil
+}
+
+// packOne packs a single package: overlay its prefixed file (prefixRaw, nil
+// for the standalone base) on the shared base, parse, run the build targets
+// its [files] imply (each at most once per invocation), then stage and pack.
+// selName is the prefix that selected it ("" = the standalone package).
+// Returns the artifact path and the effective package name.
+func packOne(bc *buildContext, prefixRaw map[string]any, selName string) (string, string, *PackageFile, error) {
+	merged := mergePackageRaw(prefixRaw, bc.baseRaw)
 	if merged == nil {
-		return "", nil, wsRoot, fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
+		return "", "", nil, fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
 	}
 	pf, err := parsePackageRaw(merged)
 	if err != nil {
-		return "", nil, wsRoot, fmt.Errorf("package.pekit.toml: %w", err)
+		return "", "", nil, fmt.Errorf("package.pekit.toml: %w", err)
 	}
 
-	name := pf.Name
-	if name == "" {
-		name = defaultName(cfg.Source, wd)
+	// A member's name is its filename prefix — selector and artifact name are
+	// one and the same — unless the member file itself sets [package] name (an
+	// inherited base name never leaks across members, which would collide
+	// them). The standalone package keeps the [package] name / dir default.
+	name := selName
+	if selName != "" {
+		if override := rawPackageName(prefixRaw); override != "" {
+			name = override
+		}
+	} else {
+		name = pf.Name
+		if name == "" {
+			name = defaultName(bc.cfg.Source, bc.wd)
+		}
 	}
 
 	engine, err := engineFor(pf.Format)
 	if err != nil {
-		return "", nil, wsRoot, fmt.Errorf("package %s: %w", name, err)
+		return "", "", nil, fmt.Errorf("package %s: %w", name, err)
 	}
-	if cfg.OutDir == "" {
-		return "", nil, wsRoot, fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
+	if bc.cfg.OutDir == "" {
+		return "", "", nil, fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
 	}
 
-	// Stage references name the build targets they consume, so packaging
-	// can rebuild them itself and never package a stale stage. Literal
-	// paths are underivable and stay the caller's freshness problem.
+	// Stage references name the build targets they consume, so packaging can
+	// rebuild them itself and never package a stale stage. Run each before
+	// packaging, but at most once per invocation — several packages slicing
+	// one source tree (glibc → libc, libc-dev, locales) build it once, not
+	// once each. Literal paths are underivable and stay the caller's problem.
 	for _, targetName := range referencedBuildTargets(pf) {
-		target, ok := cfg.Commands["build"][targetName]
+		if bc.noBuild {
+			// --no-build: trust the staged tree, but fail loudly if the
+			// referenced target was never built — better than silently
+			// packaging an empty or partial image.
+			stage := filepath.Join(outBase(bc.cfg), "build", targetName)
+			if _, serr := os.Stat(stage); serr != nil {
+				return "", "", nil, fmt.Errorf("package %s: --no-build but build target %q has no staged output at %s (build it once without --no-build first)",
+					name, targetName, stage)
+			}
+			continue
+		}
+		if bc.ran[targetName] {
+			continue
+		}
+		target, ok := bc.cfg.Commands["build"][targetName]
 		if !ok {
-			return "", nil, wsRoot, fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
+			return "", "", nil, fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
 				name, targetName, targetName)
 		}
-		if err := runCommandTarget(cfg, "build", targetName, target); err != nil {
-			return "", nil, wsRoot, err
+		if err := runCommandTarget(bc.cfg, "build", targetName, target); err != nil {
+			return "", "", nil, err
 		}
+		bc.ran[targetName] = true
 	}
 
-	files, err := resolveFiles(pf, name, outBase(cfg), literalRoot)
+	files, err := resolveFiles(pf, name, outBase(bc.cfg), bc.literalRoot)
 	if err != nil {
-		return "", nil, wsRoot, err
+		return "", "", nil, err
 	}
-	outStage, err := prepareOutDir(outBase(cfg), "package", name, cfg.ClearOut)
+	outStage, err := prepareOutDir(outBase(bc.cfg), "package", name, bc.cfg.ClearOut)
 	if err != nil {
-		return "", nil, wsRoot, err
+		return "", "", nil, err
 	}
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
-	artifact, err := engine(PackageJob{Pkg: pf, Name: name, Root: wd, ProvenanceDir: provenanceDir, Files: files, OutStage: outStage, Local: local})
+	artifact, err := engine(PackageJob{Pkg: pf, Name: name, Root: bc.wd, ProvenanceDir: bc.provenanceDir, Files: files, OutStage: outStage, Local: bc.local})
 	if err != nil {
-		return "", nil, wsRoot, err
+		return "", "", nil, err
 	}
 	fmt.Printf("pekit: wrote %s\n", artifact)
-	return artifact, pf, wsRoot, nil
+	return artifact, name, pf, nil
 }
 
-// cmdPublish builds the package, then ships the artifact to each of its
-// [publish] targets (usually inherited from the workspace root).
-func cmdPublish(args []string, ver *Version, local bool) error {
-	if len(args) != 0 {
-		return fmt.Errorf("pekit publish takes no arguments")
+// discoverPackages returns the recipe's prefixed package members — every
+// "<name>.package.pekit.toml" in dir — sorted by name. The bare
+// "package.pekit.toml" is the shared base, not a member, so it is excluded.
+// Members live only in the recipe dir: a source or workspace-root file
+// contributes its unprefixed base to every member, not members of its own.
+func discoverPackages(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
 	}
-	artifact, pf, wsRoot, err := buildPackage(ver, local)
+	const suffix = ".package.pekit.toml"
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if prefix, ok := strings.CutSuffix(e.Name(), suffix); ok && prefix != "" {
+			names = append(names, prefix)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// rawPackageName reads [package] name from an undecoded package table, or ""
+// if unset — used to tell a member that overrides its own name from one that
+// would merely inherit a name from the shared base.
+func rawPackageName(raw map[string]any) string {
+	pkg, ok := raw["package"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := pkg["name"].(string)
+	return name
+}
+
+// cmdPublish builds the selected package(s), then ships each artifact to its
+// own [publish] targets (usually inherited from the workspace root). A bare
+// `pekit publish` publishes every package the recipe defines.
+func cmdPublish(args []string, ver *Version, local, noBuild bool) error {
+	sel, err := packageSelector(args)
 	if err != nil {
 		return err
 	}
-	if len(pf.Publish) == 0 {
-		return fmt.Errorf("no [publish] targets (add [[publish.<type>]] to package.pekit.toml or the workspace root)")
+	results, wsRoot, err := buildPackages(sel, ver, local, noBuild)
+	if err != nil {
+		return err
 	}
 	// localdir paths are workspace-root-relative; without a workspace they
 	// fall back to the recipe dir.
@@ -790,14 +992,19 @@ func cmdPublish(args []string, ver *Version, local bool) error {
 			return err
 		}
 	}
-	for _, t := range pf.Publish {
-		switch t.Type {
-		case "localdir":
-			if err := publishLocalDir(artifact, filepath.Join(base, t.Path)); err != nil {
-				return fmt.Errorf("publish localdir: %w", err)
+	for _, r := range results {
+		if len(r.Pkg.Publish) == 0 {
+			return fmt.Errorf("package %s: no [publish] targets (add [[publish.<type>]] to package.pekit.toml or the workspace root)", r.Name)
+		}
+		for _, t := range r.Pkg.Publish {
+			switch t.Type {
+			case "localdir":
+				if err := publishLocalDir(r.Artifact, filepath.Join(base, t.Path)); err != nil {
+					return fmt.Errorf("publish localdir: %w", err)
+				}
+			default:
+				return fmt.Errorf("publish: unsupported target type %q", t.Type)
 			}
-		default:
-			return fmt.Errorf("publish: unsupported target type %q", t.Type)
 		}
 	}
 	return nil
