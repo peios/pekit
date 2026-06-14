@@ -18,6 +18,24 @@ func hasGlobMeta(p string) bool {
 	return strings.ContainsAny(p, "*?[{")
 }
 
+// excludedBy returns the index of the first exclude pattern that matches a
+// staged source, or -1 if none. target is the staged file's build target ("" for
+// a literal source) and relPath is its source path relative to that stage,
+// slash-separated. An exclude matches when its target is the same and its path
+// pattern (doublestar, so plain paths match exactly and "*"/"**" expand)
+// matches relPath — the source side, mirroring the ":usr/bin/..." syntax.
+func excludedBy(excludes []SourceRef, target, relPath string) int {
+	for i, ex := range excludes {
+		if ex.Target != target {
+			continue
+		}
+		if ok, err := doublestar.Match(ex.Path, relPath); err == nil && ok {
+			return i
+		}
+	}
+	return -1
+}
+
 // expandSource resolves one [files] mapping (src -> dest) against root — the
 // on-disk directory the source is relative to: a build target's stage
 // (outDir/build/<target>), or the project/source root for a literal path.
