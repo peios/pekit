@@ -123,7 +123,7 @@ func TestNoBuildReusesStagedElseBuilds(t *testing.T) {
 	if err := os.RemoveAll(stage); err != nil {
 		t.Fatal(err)
 	}
-	if err := runTarget(cfg, "build", "gen", nil, true); err == nil {
+	if err := runTarget(cfg, "build", "gen", nil, noBuildSet{active: true, all: true}); err == nil {
 		t.Error("--no-build must build a target that was never staged")
 	}
 
@@ -131,7 +131,7 @@ func TestNoBuildReusesStagedElseBuilds(t *testing.T) {
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := runTarget(cfg, "build", "gen", nil, true); err != nil {
+	if err := runTarget(cfg, "build", "gen", nil, noBuildSet{active: true, all: true}); err != nil {
 		t.Errorf("--no-build must reuse a staged target, got %v", err)
 	}
 
@@ -139,8 +139,60 @@ func TestNoBuildReusesStagedElseBuilds(t *testing.T) {
 	if err := os.MkdirAll(stage, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := runTarget(cfg, "build", "gen", nil, false); err == nil {
+	if err := runTarget(cfg, "build", "gen", nil, noBuildSet{}); err == nil {
 		t.Error("without --no-build a staged target must still rebuild")
+	}
+}
+
+// TestNoBuildSelectiveReusesOnlyNamed: --no-build=names reuses only the named
+// staged targets and rebuilds the rest. "keep" is staged and named (reused);
+// "fresh" is staged but NOT named, so it must rebuild. Both commands "exit 1"
+// fail loudly if run, so a nil result means the whole chain was reused and an
+// error means a non-named target rebuilt.
+func TestNoBuildSelectiveReusesOnlyNamed(t *testing.T) {
+	cfg := &Config{
+		OutDir:   "out",
+		ClearOut: true,
+		Commands: map[string]map[string]Target{
+			"build": {
+				"keep":  {Command: "exit 1"},
+				"fresh": {Command: "exit 1", Needs: []string{"keep"}},
+			},
+		},
+	}
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(filepath.Join("out", "build", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join("out", "build", "fresh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel := noBuildSet{active: true, names: map[string]bool{"keep": true}}
+
+	// "fresh" is staged but not named → it rebuilds (command runs, fails),
+	// even though its dependency "keep" is reused.
+	if err := runTarget(cfg, "build", "fresh", nil, sel); err == nil {
+		t.Error("--no-build=keep must still rebuild the un-named 'fresh' target")
+	}
+
+	// "keep" alone is named and staged → reused (command not run).
+	if err := runTarget(cfg, "build", "keep", nil, sel); err != nil {
+		t.Errorf("--no-build=keep must reuse the staged 'keep' target, got %v", err)
+	}
+}
+
+// TestNoBuildUnknownTargetErrors: a --no-build=name that isn't a real target is
+// a typo and must error rather than silently rebuild everything.
+func TestNoBuildUnknownTargetErrors(t *testing.T) {
+	cfg := &Config{
+		OutDir:   "out",
+		Commands: map[string]map[string]Target{"build": {"gen": {Command: "true"}}},
+	}
+	t.Chdir(t.TempDir())
+	sel := noBuildSet{active: true, names: map[string]bool{"nope": true}}
+	err := runTarget(cfg, "build", "gen", nil, sel)
+	if err == nil || !strings.Contains(err.Error(), "no build target") {
+		t.Fatalf("err = %v, want an unknown-target error", err)
 	}
 }
 

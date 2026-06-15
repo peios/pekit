@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] | pekit <package|publish> [name] [--local] [--no-build] | pekit workspace <package|publish> <--all|--latest|--local>"
+const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -48,9 +48,10 @@ func run(args []string) error {
 	}
 
 	// --no-build trusts the already-staged build tree, so it only means
-	// anything to the verbs that stage-and-pack.
-	if f.noBuild && args[0] != "package" && args[0] != "publish" {
-		return fmt.Errorf("--no-build only applies to package and publish")
+	// anything to the verbs that run build targets: build itself and the
+	// stage-and-pack verbs (package/publish).
+	if f.noBuild.active && args[0] != "build" && args[0] != "package" && args[0] != "publish" {
+		return fmt.Errorf("--no-build only applies to build, package and publish")
 	}
 
 	// Local mode: PREFER the [source] working copy, fall back to remote.
@@ -339,10 +340,10 @@ func inDir(dir string, fn func() error) error {
 	return fn()
 }
 
-func dispatch(args []string, ver *Version, local, noBuild bool) error {
+func dispatch(args []string, ver *Version, local bool, noBuild noBuildSet) error {
 	switch args[0] {
 	case "build", "test", "install":
-		return cmdVerb(args[0], args[1:], ver, local)
+		return cmdVerb(args[0], args[1:], ver, local, noBuild)
 	case "package":
 		return cmdPackage(args[1:], ver, local, noBuild)
 	case "publish":
@@ -360,8 +361,44 @@ type flags struct {
 	hasVersion bool
 	remember   bool // --remember-built: skip + record against pekit.built
 	bust       bool // --bust: rebuild even if the ledger says built
-	local      bool // --local: build the [source] localpath working copy
-	noBuild    bool // --no-build: reuse already-staged builds; build only what is missing
+	local      bool       // --local: build the [source] localpath working copy
+	noBuild    noBuildSet // --no-build[=t1,...]: reuse already-staged builds
+}
+
+// noBuildSet records which build targets --no-build should reuse if they are
+// already staged, instead of rebuilding them:
+//
+//	active=false            --no-build absent: rebuild everything.
+//	active=true, all=true    bare --no-build: reuse every staged target.
+//	active=true, all=false   --no-build=a,b: reuse only the named targets,
+//	                         rebuild the rest.
+//
+// A target is only ever reused when its stage dir already exists; a selected-
+// but-unstaged target is still built, mirroring bare --no-build's "build only
+// what is missing" rule.
+type noBuildSet struct {
+	active bool
+	all    bool
+	names  map[string]bool
+}
+
+// skip reports whether target should be reused-if-staged rather than rebuilt.
+func (n noBuildSet) skip(target string) bool {
+	return n.active && (n.all || n.names[target])
+}
+
+// parseNoBuild parses the value of --no-build=a,b,c into a target selection.
+// An empty value (--no-build=) is rejected: bare --no-build reuses everything.
+func parseNoBuild(val string) (noBuildSet, error) {
+	names := map[string]bool{}
+	for _, part := range strings.Split(val, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return noBuildSet{}, fmt.Errorf("--no-build=: empty target name (use bare --no-build to reuse all staged builds)")
+		}
+		names[name] = true
+	}
+	return noBuildSet{active: true, names: names}, nil
 }
 
 // extractFlags pulls the global flags out of args, returning the rest.
@@ -386,7 +423,13 @@ func extractFlags(args []string) ([]string, flags, error) {
 		case a == "--local":
 			f.local = true
 		case a == "--no-build":
-			f.noBuild = true
+			f.noBuild = noBuildSet{active: true, all: true}
+		case strings.HasPrefix(a, "--no-build="):
+			set, perr := parseNoBuild(strings.TrimPrefix(a, "--no-build="))
+			if perr != nil {
+				return nil, f, perr
+			}
+			f.noBuild = set
 		default:
 			// An unrecognised --flag is a mistake, not a positional: catch it
 			// here so it can't be silently swallowed as a target or package
@@ -411,7 +454,7 @@ func targetArg(args []string) (string, error) {
 	}
 }
 
-func cmdVerb(verb string, args []string, ver *Version, local bool) error {
+func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBuildSet) error {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
@@ -435,7 +478,7 @@ func cmdVerb(verb string, args []string, ver *Version, local bool) error {
 	// once across the whole fan-out, not once per target.
 	ran := map[string]bool{}
 	for _, name := range names {
-		if err := runTarget(cfg, verb, name, ran, false); err != nil {
+		if err := runTarget(cfg, verb, name, ran, noBuild); err != nil {
 			return err
 		}
 	}
@@ -492,17 +535,34 @@ func buildOrder(targets map[string]Target, root string) []string {
 // dependency shared by several targets runs once; pass nil for a one-shot run
 // (buildOrder still dedups within the single graph walk).
 //
-// When skipStaged is set (--no-build), a target whose stage dir already exists
-// is reused as-is instead of rebuilt; a target that has never been built is
-// still built. So --no-build is purely a "don't rebuild" switch — on a clean
-// tree it builds everything, on a warm one it builds only what is missing.
-func runTarget(cfg *Config, verb, name string, ran map[string]bool, skipStaged bool) error {
+// When noBuild selects a target (bare --no-build selects all), a target whose
+// stage dir already exists is reused as-is instead of rebuilt; a target that
+// has never been built is still built. So --no-build is purely a "don't
+// rebuild" switch — on a clean tree it builds everything, on a warm one it
+// builds only what is missing (or, with --no-build=names, what is missing plus
+// everything not named).
+func runTarget(cfg *Config, verb, name string, ran map[string]bool, noBuild noBuildSet) error {
 	targets := cfg.Commands[verb]
+	// A --no-build=names selection must name real targets, so a typo surfaces
+	// as an error instead of silently rebuilding everything.
+	if noBuild.active && !noBuild.all {
+		var missing []string
+		for n := range noBuild.names {
+			if _, ok := targets[n]; !ok {
+				missing = append(missing, n)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			return fmt.Errorf("--no-build: no %s target %s (available: %s)",
+				verb, strings.Join(missing, ", "), strings.Join(sortedNames(targets), ", "))
+		}
+	}
 	for _, t := range buildOrder(targets, name) {
 		if ran[t] {
 			continue
 		}
-		if skipStaged {
+		if noBuild.skip(t) {
 			if _, err := os.Stat(filepath.Join(outBase(cfg), verb, t)); err == nil {
 				fmt.Printf("pekit: %s %s: reusing staged output (--no-build)\n", verb, t)
 				if ran != nil {
@@ -789,7 +849,7 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string, ver *Version, local, noBuild bool) error {
+func cmdPackage(args []string, ver *Version, local bool, noBuild noBuildSet) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
@@ -834,7 +894,7 @@ type buildContext struct {
 	literalRoot   string         // root for plain (non-stage) [files] sources
 	baseRaw       map[string]any // shared fill-only base; may be nil
 	local         bool
-	noBuild       bool            // --no-build: reuse staged builds, build only missing
+	noBuild       noBuildSet      // --no-build[=t1,...]: reuse staged builds
 	ran           map[string]bool // build targets already run this invocation
 }
 
@@ -844,7 +904,7 @@ type buildContext struct {
 // bare package.pekit.toml is the sole package (the original single-package
 // behaviour). Returns one result per package (for publish) and the workspace
 // root the recipe belongs to ("" if none).
-func buildPackages(sel string, ver *Version, local, noBuild bool) ([]packResult, string, error) {
+func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet) ([]packResult, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return nil, "", err
@@ -1219,7 +1279,7 @@ func rawPackageName(raw map[string]any) string {
 // cmdPublish builds the selected package(s), then ships each artifact to its
 // own [publish] targets (usually inherited from the workspace root). A bare
 // `pekit publish` publishes every package the recipe defines.
-func cmdPublish(args []string, ver *Version, local, noBuild bool) error {
+func cmdPublish(args []string, ver *Version, local bool, noBuild noBuildSet) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
