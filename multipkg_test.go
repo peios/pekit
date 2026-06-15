@@ -71,11 +71,28 @@ func TestExtractFlagsNoBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractFlags: %v", err)
 	}
-	if !f.noBuild {
-		t.Error("--no-build not parsed")
+	if !f.noBuild.active || !f.noBuild.all {
+		t.Error("bare --no-build should select all targets")
 	}
 	if len(rest) != 1 || rest[0] != "package" {
 		t.Errorf("rest = %v, want [package] (the flag is consumed, not positional)", rest)
+	}
+
+	// --no-build=a,b selects only the named targets.
+	_, f, err = extractFlags([]string{"build", "--no-build=upstream, gen"})
+	if err != nil {
+		t.Fatalf("extractFlags: %v", err)
+	}
+	if !f.noBuild.active || f.noBuild.all {
+		t.Error("--no-build=names should be active but not all")
+	}
+	if !f.noBuild.names["upstream"] || !f.noBuild.names["gen"] {
+		t.Errorf("--no-build=names parsed %v, want {upstream, gen}", f.noBuild.names)
+	}
+
+	// --no-build= (empty value) is an error.
+	if _, _, err := extractFlags([]string{"build", "--no-build="}); err == nil {
+		t.Error("--no-build= with an empty value should error")
 	}
 }
 
@@ -115,7 +132,7 @@ func TestBuildPackagesUnknownName(t *testing.T) {
 		}
 	}
 	t.Chdir(dir)
-	_, _, err := buildPackages("locales", nil, false, false)
+	_, _, err := buildPackages("locales", nil, false, noBuildSet{})
 	if err == nil || !strings.Contains(err.Error(), "no such package") {
 		t.Fatalf("err = %v, want a 'no such package' error", err)
 	}
@@ -133,7 +150,7 @@ func TestBuildPackagesNoNamedPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	_, _, err := buildPackages("libc", nil, false, false)
+	_, _, err := buildPackages("libc", nil, false, noBuildSet{})
 	if err == nil || !strings.Contains(err.Error(), "no named packages") {
 		t.Fatalf("err = %v, want a 'no named packages' error", err)
 	}

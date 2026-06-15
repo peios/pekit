@@ -176,7 +176,7 @@ name = "locale"
 `)
 	t.Chdir(dir)
 
-	results, _, err := buildPackages("", nil, false, false)
+	results, _, err := buildPackages("", nil, false, noBuildSet{})
 	if err != nil {
 		t.Fatalf("buildPackages: %v", err)
 	}
@@ -230,7 +230,7 @@ command = "true"
 `)
 	t.Chdir(dir)
 
-	_, _, err := buildPackages("", nil, false, false)
+	_, _, err := buildPackages("", nil, false, noBuildSet{})
 	if err == nil || !strings.Contains(err.Error(), "no [multipack] section") {
 		t.Fatalf("err = %v, want a 'no [multipack] section' error", err)
 	}
@@ -411,7 +411,7 @@ name = "locale"
 `)
 	t.Chdir(dir)
 
-	results, _, err := buildPackages("", nil, false, false)
+	results, _, err := buildPackages("", nil, false, noBuildSet{})
 	if err != nil {
 		t.Fatalf("buildPackages: %v", err)
 	}
