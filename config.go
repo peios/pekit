@@ -51,6 +51,17 @@ type Config struct {
 type Source struct {
 	Git string
 	Rev string
+	// URL, when set, is a tarball/file download (templated with {{version}})
+	// instead of a git clone — for upstreams that publish release archives
+	// rather than tags (gmp, most GNU projects). Mutually exclusive with git.
+	// Enumeration lists the URL's parent directory and matches the filename
+	// template (see enumerateURLVersions); Versions/TagRegex still apply.
+	URL string
+	// Extract unpacks a downloaded URL archive (tar.*, tgz, zip) into the
+	// source dir; the build then runs in the unpacked tree (its single
+	// top-level dir, if there is exactly one). Only valid with URL; without
+	// it the file is downloaded into the source dir as-is.
+	Extract bool
 	// Versions, when set, is a semver constraint bounding which upstream
 	// versions this recipe builds. The resolved --version set (including
 	// an enumerated "*") is intersected with it, so tags the recipe can't
@@ -65,7 +76,14 @@ type Source struct {
 	// two-component release tags. It filters enumeration (constraints, "*",
 	// --latest, the trailing-zero ladder); an explicit exact --version
 	// bypasses enumeration and so is taken at its word. Empty = no filter.
+	// Applies to a git source only (a url source filters with FileRegex).
 	TagRegex string
+	// FileRegex is the url-source analogue of TagRegex: a regexp a directory
+	// listing entry must match to be enumerated, beyond the url filename
+	// template's shape. file_regex = '^gmp-\d+\.\d+\.\d+\.tar\.xz$' keeps only
+	// three-component gmp release tarballs, excluding betas or other archives
+	// the bare template would also match. Empty = no filter.
+	FileRegex string
 	// LocalPath, when set, is a local working copy (relative to the recipe
 	// dir) usable in place of git/rev under --local — for compiling
 	// in-development packages without a tag. The farm never passes
@@ -198,6 +216,18 @@ func parseSource(table map[string]any) (*Source, error) {
 				return nil, err
 			}
 			src.Rev = s
+		case "url":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			src.URL = s
+		case "extract":
+			b, ok := table[key].(bool)
+			if !ok {
+				return nil, fmt.Errorf("[source]: extract must be a boolean")
+			}
+			src.Extract = b
 		case "localpath":
 			s, err := stringValue("source", key, table[key])
 			if err != nil {
@@ -222,15 +252,39 @@ func parseSource(table map[string]any) (*Source, error) {
 				return nil, fmt.Errorf("[source]: tag_regex %q is not a valid regexp: %w", s, err)
 			}
 			src.TagRegex = s
+		case "file_regex":
+			s, err := stringValue("source", key, table[key])
+			if err != nil {
+				return nil, err
+			}
+			if _, err := regexp.Compile(s); err != nil {
+				return nil, fmt.Errorf("[source]: file_regex %q is not a valid regexp: %w", s, err)
+			}
+			src.FileRegex = s
 		default:
 			return nil, fmt.Errorf("[source]: unknown key %q", key)
 		}
 	}
-	if src.Git == "" && src.LocalPath == "" {
-		return nil, fmt.Errorf("[source]: needs %q or %q", "git", "localpath")
+	if src.Git == "" && src.URL == "" && src.LocalPath == "" {
+		return nil, fmt.Errorf("[source]: needs %q, %q or %q", "git", "url", "localpath")
+	}
+	if src.Git != "" && src.URL != "" {
+		return nil, fmt.Errorf("[source]: %q and %q are mutually exclusive (git clone vs. download)", "git", "url")
 	}
 	if src.Git != "" && src.Rev == "" {
 		return nil, fmt.Errorf("[source]: %q requires %q", "git", "rev")
+	}
+	if src.URL != "" && src.Rev != "" {
+		return nil, fmt.Errorf("[source]: %q does not apply to a %q source", "rev", "url")
+	}
+	if src.Extract && src.URL == "" {
+		return nil, fmt.Errorf("[source]: %q only applies to a %q source", "extract", "url")
+	}
+	if src.FileRegex != "" && src.URL == "" {
+		return nil, fmt.Errorf("[source]: %q only applies to a %q source (a git source filters with %q)", "file_regex", "url", "tag_regex")
+	}
+	if src.TagRegex != "" && src.URL != "" {
+		return nil, fmt.Errorf("[source]: %q does not apply to a %q source (use %q)", "tag_regex", "url", "file_regex")
 	}
 	return &src, nil
 }

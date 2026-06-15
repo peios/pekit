@@ -380,10 +380,10 @@ command = "make"
 }
 
 func TestSourceRequiresGitOrLocalpath(t *testing.T) {
-	// rev alone (no git, no localpath): nothing to fetch from.
+	// rev alone (no git, no url, no localpath): nothing to fetch from.
 	_, err := ParseConfig("outDir=\"out\"\n[source]\nrev=\"x\"\n")
-	if err == nil || !strings.Contains(err.Error(), `needs "git" or "localpath"`) {
-		t.Errorf("want git-or-localpath error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `needs "git", "url" or "localpath"`) {
+		t.Errorf("want git-url-or-localpath error, got: %v", err)
 	}
 	// git without rev: still required when git is the source.
 	_, err = ParseConfig("outDir=\"out\"\n[source]\ngit=\"u\"\n")
