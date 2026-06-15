@@ -159,7 +159,10 @@ func decodePackageFile(path string, ver *Version) (map[string]any, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
-	rendered, err := renderTemplate(string(data), ver)
+	// Defer {{multipack}}: a [multipack] recipe binds it once per enum value
+	// after this pass (see multipack.go). Leaving it intact here means a
+	// version-less multipack recipe renders without --version.
+	rendered, err := renderTemplate(string(data), ver, "multipack")
 	if err != nil {
 		return nil, false, fmt.Errorf("%s: %w", path, err)
 	}

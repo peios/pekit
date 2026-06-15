@@ -68,10 +68,26 @@ var templateVar = regexp.MustCompile(`\{\{\s*([^}]*?)\s*\}\}`)
 // renderTemplate substitutes {{var}} placeholders from v across the whole
 // text. An unknown variable is an error (catches typos); any placeholder
 // at all when v is nil (no --version given) is an error too.
-func renderTemplate(text string, v *Version) (string, error) {
+//
+// Names in deferred are left verbatim (re-emitted as their literal {{...}})
+// rather than substituted or rejected, reserving them for a later pass.
+// Package files defer "multipack" so the per-enum-value expansion (see
+// multipack.go) can bind it after this version pass; pekit.toml passes
+// nothing, so {{multipack}} there stays an unknown-variable error.
+func renderTemplate(text string, v *Version, deferred ...string) (string, error) {
+	var defset map[string]bool
+	if len(deferred) > 0 {
+		defset = make(map[string]bool, len(deferred))
+		for _, d := range deferred {
+			defset[d] = true
+		}
+	}
 	var rerr error
 	out := templateVar.ReplaceAllStringFunc(text, func(match string) string {
 		key := templateVar.FindStringSubmatch(match)[1]
+		if defset[key] {
+			return match // left for a later rendering pass
+		}
 		if v == nil {
 			rerr = fmt.Errorf("template %q needs --version MAJOR.MINOR.PATCH", match)
 			return match

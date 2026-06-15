@@ -812,11 +812,11 @@ func buildPackages(sel string, ver *Version, local, noBuild bool) ([]packResult,
 
 	var results []packResult
 	for _, j := range jobs {
-		artifact, name, pf, perr := packOne(bc, j.raw, j.name)
+		sub, perr := packOne(bc, j.raw, j.name)
 		if perr != nil {
 			return nil, "", perr
 		}
-		results = append(results, packResult{Name: name, Artifact: artifact, Pkg: pf})
+		results = append(results, sub...)
 	}
 	return results, bc.wsRoot, nil
 }
@@ -914,53 +914,153 @@ func prepareBuild(wd string, ver *Version, local bool) (*buildContext, error) {
 	}, nil
 }
 
-// packOne packs a single package: overlay its prefixed file (prefixRaw, nil
-// for the standalone base) on the shared base, parse, run the build targets
-// its [files] imply (each at most once per invocation), then stage and pack.
-// selName is the prefix that selected it ("" = the standalone package).
-// Returns the artifact path and the effective package name.
-func packOne(bc *buildContext, prefixRaw map[string]any, selName string) (string, string, *PackageFile, error) {
+// packOne packs the package(s) one job produces: overlay its prefixed file
+// (prefixRaw, nil for the standalone base) on the shared base, then pack. A
+// plain file yields one result; a [multipack] file fans out into one result
+// per enum value (see expandMultipack). selName is the prefix that selected
+// the job ("" = the standalone package).
+func packOne(bc *buildContext, prefixRaw map[string]any, selName string) ([]packResult, error) {
 	merged := mergePackageRaw(prefixRaw, bc.baseRaw)
 	if merged == nil {
-		return "", "", nil, fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
+		return nil, fmt.Errorf("no package.pekit.toml found (recipe has none; [source] upstream provides none)")
+	}
+
+	mp, err := parseMultipack(merged)
+	if err != nil {
+		return nil, err
+	}
+	if mp != nil {
+		return expandMultipack(bc, merged, mp, prefixRaw, selName)
+	}
+
+	// No [multipack]: a stray {{multipack}} would survive into a path, so
+	// catch it rather than ship the literal placeholder.
+	if containsMultipackVar(merged) {
+		return nil, fmt.Errorf("package.pekit.toml uses {{multipack}} but defines no [multipack] section")
 	}
 	pf, err := parsePackageRaw(merged)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("package.pekit.toml: %w", err)
+		return nil, fmt.Errorf("package.pekit.toml: %w", err)
+	}
+	name := resolveName(bc, pf, prefixRaw, selName, "")
+	res, err := packInstance(bc, pf, name)
+	if err != nil {
+		return nil, err
+	}
+	return []packResult{res}, nil
+}
+
+// resolveMultipackValues yields the enum's values. A literal enum returns them
+// as-is; a derived enum.files enum builds its source target (so the stage to
+// glob exists — once, via bc.ran, shared with packaging) and enumerates it.
+func resolveMultipackValues(bc *buildContext, mp *Multipack) ([]string, error) {
+	if mp.Files == nil {
+		return mp.Values, nil
+	}
+	src := mp.Files.Source
+	root := bc.literalRoot
+	if src.Target != "" {
+		if _, ok := bc.cfg.Commands["build"][src.Target]; !ok {
+			return nil, fmt.Errorf("[multipack]: enum.files path references build target %q but no [build.%s] in recipe or source",
+				src.Target, src.Target)
+		}
+		if err := runTarget(bc.cfg, "build", src.Target, bc.ran, bc.noBuild); err != nil {
+			return nil, err
+		}
+		root = filepath.Join(outBase(bc.cfg), "build", src.Target)
+	}
+	values, err := enumerateMultipackValues(root, src, mp.Files.Regex)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "pekit: multipack: %s → %d values: %s\n", src, len(values), strings.Join(values, ", "))
+	return values, nil
+}
+
+// expandMultipack renders one package instance per enum value: bind
+// {{multipack}}, drop the [multipack] directive, parse, and name it (base + the
+// rendered suffix). Names must be distinct across the enum, so a suffix (or a
+// {{multipack}}-bearing [package] name) is required to keep the packages apart.
+// Rendering, parsing, and the distinctness check all run up front, so a bad
+// recipe fails before any build work; the build targets the instances share
+// then run once, via bc.ran.
+func expandMultipack(bc *buildContext, merged map[string]any, mp *Multipack, prefixRaw map[string]any, selName string) ([]packResult, error) {
+	values, err := resolveMultipackValues(bc, mp)
+	if err != nil {
+		return nil, err
+	}
+	base := withoutKey(merged, "multipack")
+
+	type instance struct {
+		pf   *PackageFile
+		name string
+	}
+	insts := make([]instance, 0, len(values))
+	byName := make(map[string]string) // package name -> the enum value that produced it
+	for _, val := range values {
+		rendered, err := renderMultipackValue(base, val)
+		if err != nil {
+			return nil, err
+		}
+		pf, err := parsePackageRaw(rendered.(map[string]any))
+		if err != nil {
+			return nil, fmt.Errorf("package.pekit.toml (multipack %q): %w", val, err)
+		}
+		name := resolveName(bc, pf, prefixRaw, selName, substituteMultipack(mp.Suffix, val))
+		if prev, dup := byName[name]; dup {
+			return nil, fmt.Errorf("[multipack]: values %q and %q both produce package name %q; give a suffix that varies with {{multipack}}", prev, val, name)
+		}
+		byName[name] = val
+		insts = append(insts, instance{pf: pf, name: name})
 	}
 
-	// A member's name is its filename prefix — selector and artifact name are
-	// one and the same — unless the member file itself sets [package] name (an
-	// inherited base name never leaks across members, which would collide
-	// them). The standalone package keeps the [package] name / dir default.
-	name := selName
+	results := make([]packResult, 0, len(insts))
+	for _, in := range insts {
+		res, err := packInstance(bc, in.pf, in.name)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
+// resolveName computes a package's name before suffixing. A member's name is
+// its filename prefix — selector and artifact name are one — unless the member
+// file itself sets [package] name (an inherited base name never leaks across
+// members, which would collide them). The standalone package keeps the
+// [package] name / dir default. suffix (multipack's, else "") is appended.
+func resolveName(bc *buildContext, pf *PackageFile, prefixRaw map[string]any, selName, suffix string) string {
+	base := selName
 	if selName != "" {
-		if override := rawPackageName(prefixRaw); override != "" {
-			name = override
+		if rawPackageName(prefixRaw) != "" {
+			base = pf.Name // member overrides its own name (already rendered)
 		}
 	} else {
-		name = pf.Name
-		if name == "" {
-			name = defaultName(bc.cfg.Source, bc.wd)
+		base = pf.Name
+		if base == "" {
+			base = defaultName(bc.cfg.Source, bc.wd)
 		}
 	}
+	return base + suffix
+}
 
+// packInstance runs the build targets one parsed package implies (each at most
+// once per invocation — several packages slicing one source tree build it
+// once, not once each), then stages and packs it. Literal-path sources are
+// underivable and stay the caller's problem.
+func packInstance(bc *buildContext, pf *PackageFile, name string) (packResult, error) {
 	engine, err := engineFor(pf.Format)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("package %s: %w", name, err)
+		return packResult{}, fmt.Errorf("package %s: %w", name, err)
 	}
 	if bc.cfg.OutDir == "" {
-		return "", "", nil, fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
+		return packResult{}, fmt.Errorf("package %s: packaging requires outDir in pekit.toml", name)
 	}
 
-	// Stage references name the build targets they consume, so packaging can
-	// rebuild them itself and never package a stale stage. Run each before
-	// packaging, but at most once per invocation — several packages slicing
-	// one source tree (glibc → libc, libc-dev, locales) build it once, not
-	// once each. Literal paths are underivable and stay the caller's problem.
 	for _, targetName := range referencedBuildTargets(pf) {
 		if _, ok := bc.cfg.Commands["build"][targetName]; !ok {
-			return "", "", nil, fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
+			return packResult{}, fmt.Errorf("package %s: [files] references build target %q but no [build.%s] in recipe or source",
 				name, targetName, targetName)
 		}
 		// runTarget builds the target and its dependencies, each at most once
@@ -968,26 +1068,26 @@ func packOne(bc *buildContext, prefixRaw map[string]any, selName string) (string
 		// build it just once). Under --no-build it reuses whatever is already
 		// staged and builds only the targets that are missing.
 		if err := runTarget(bc.cfg, "build", targetName, bc.ran, bc.noBuild); err != nil {
-			return "", "", nil, err
+			return packResult{}, err
 		}
 	}
 
 	files, err := resolveFiles(pf, name, outBase(bc.cfg), bc.literalRoot)
 	if err != nil {
-		return "", "", nil, err
+		return packResult{}, err
 	}
 	outStage, err := prepareOutDir(outBase(bc.cfg), "package", name, bc.cfg.ClearOut)
 	if err != nil {
-		return "", "", nil, err
+		return packResult{}, err
 	}
 
 	fmt.Printf("pekit: package %s (format %s, %d files)\n", name, pf.Format, len(files))
 	artifact, err := engine(PackageJob{Pkg: pf, Name: name, Root: bc.wd, ProvenanceDir: bc.provenanceDir, Files: files, OutStage: outStage, Local: bc.local})
 	if err != nil {
-		return "", "", nil, err
+		return packResult{}, err
 	}
 	fmt.Printf("pekit: wrote %s\n", artifact)
-	return artifact, name, pf, nil
+	return packResult{Name: name, Artifact: artifact, Pkg: pf}, nil
 }
 
 // discoverPackages returns the recipe's prefixed package members — every
