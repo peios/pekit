@@ -47,11 +47,12 @@ func run(args []string) error {
 		return errors.New(usage)
 	}
 
-	// --no-build trusts the already-staged build tree, so it only means
-	// anything to the verbs that run build targets: build itself and the
-	// stage-and-pack verbs (package/publish).
-	if f.noBuild.active && args[0] != "build" && args[0] != "package" && args[0] != "publish" {
-		return fmt.Errorf("--no-build only applies to build, package and publish")
+	// --no-build trusts the already-staged build tree, so it means something to
+	// every verb that runs build targets — build itself, the stage-and-pack
+	// verbs (package/publish), and test/install (their needs are build targets).
+	// Only clean never builds anything.
+	if f.noBuild.active && args[0] == "clean" {
+		return fmt.Errorf("--no-build does not apply to clean")
 	}
 
 	// Local mode: PREFER the [source] working copy, fall back to remote.
@@ -530,48 +531,75 @@ func buildOrder(targets map[string]Target, root string) []string {
 	return order
 }
 
-// runTarget runs target `name` in section `verb` after its dependencies, in
-// dependency order. ran tracks targets already handled this invocation so a
-// dependency shared by several targets runs once; pass nil for a one-shot run
-// (buildOrder still dedups within the single graph walk).
+// runTarget runs target `name` in section `verb`. A target's dependencies
+// (`needs`) are always BUILD targets, regardless of `verb`: a build target's
+// build subgraph is run in order; a test/install/clean target first has its
+// needed build targets staged, then runs its own command with each direct
+// need exposed as PEKIT_<NAME>_OUT. ran tracks build targets already handled
+// this invocation so a build shared by several targets runs once; pass nil for
+// a one-shot run.
 //
-// When noBuild selects a target (bare --no-build selects all), a target whose
-// stage dir already exists is reused as-is instead of rebuilt; a target that
-// has never been built is still built. So --no-build is purely a "don't
-// rebuild" switch — on a clean tree it builds everything, on a warm one it
-// builds only what is missing (or, with --no-build=names, what is missing plus
-// everything not named).
+// When noBuild selects a build target (bare --no-build selects all), a target
+// whose stage dir already exists is reused instead of rebuilt; one that was
+// never built is still built. --no-build names always refer to build targets.
 func runTarget(cfg *Config, verb, name string, ran map[string]bool, noBuild noBuildSet) error {
-	targets := cfg.Commands[verb]
-	// A --no-build=names selection must name real targets, so a typo surfaces
-	// as an error instead of silently rebuilding everything.
-	if noBuild.active && !noBuild.all {
-		var missing []string
-		for n := range noBuild.names {
-			if _, ok := targets[n]; !ok {
-				missing = append(missing, n)
-			}
-		}
-		if len(missing) > 0 {
-			sort.Strings(missing)
-			return fmt.Errorf("--no-build: no %s target %s (available: %s)",
-				verb, strings.Join(missing, ", "), strings.Join(sortedNames(targets), ", "))
+	if err := validateNoBuildNames(cfg, noBuild); err != nil {
+		return err
+	}
+	if verb == "build" {
+		return runBuildSubgraph(cfg, name, ran, noBuild)
+	}
+	// test/install/clean: stage the build targets this one needs, then run it.
+	target := cfg.Commands[verb][name]
+	for _, dep := range target.Needs {
+		if err := runBuildSubgraph(cfg, dep, ran, noBuild); err != nil {
+			return err
 		}
 	}
+	return runCommandTarget(cfg, verb, name, target)
+}
+
+// validateNoBuildNames rejects a --no-build=names selection that names anything
+// that isn't a build target, so a typo surfaces instead of silently rebuilding.
+// (--no-build always refers to build targets, since builds are the only staged,
+// reusable outputs.)
+func validateNoBuildNames(cfg *Config, noBuild noBuildSet) error {
+	if !noBuild.active || noBuild.all {
+		return nil
+	}
+	build := cfg.Commands["build"]
+	var missing []string
+	for n := range noBuild.names {
+		if _, ok := build[n]; !ok {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("--no-build: no build target %s (available: %s)",
+			strings.Join(missing, ", "), strings.Join(sortedNames(build), ", "))
+	}
+	return nil
+}
+
+// runBuildSubgraph runs build target `name` and its transitive build needs in
+// dependency order, honoring the ran-dedup and --no-build reuse rules.
+func runBuildSubgraph(cfg *Config, name string, ran map[string]bool, noBuild noBuildSet) error {
+	targets := cfg.Commands["build"]
 	for _, t := range buildOrder(targets, name) {
 		if ran[t] {
 			continue
 		}
 		if noBuild.skip(t) {
-			if _, err := os.Stat(filepath.Join(outBase(cfg), verb, t)); err == nil {
-				fmt.Printf("pekit: %s %s: reusing staged output (--no-build)\n", verb, t)
+			if _, err := os.Stat(filepath.Join(outBase(cfg), "build", t)); err == nil {
+				fmt.Printf("pekit: build %s: reusing staged output (--no-build)\n", t)
 				if ran != nil {
 					ran[t] = true
 				}
 				continue
 			}
 		}
-		if err := runCommandTarget(cfg, verb, t, targets[t]); err != nil {
+		if err := runCommandTarget(cfg, "build", t, targets[t]); err != nil {
 			return err
 		}
 		if ran != nil {
@@ -594,7 +622,24 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
 
+	// Dependencies are always build targets; expose each direct need's staged
+	// output dir as PEKIT_<NAME>_OUT — in every section, so a test or install
+	// command can consume what it was built against. runTarget staged them
+	// first (under out/.../build/<dep>), so the dirs exist.
+	for _, dep := range target.Needs {
+		depStage, derr := filepath.Abs(filepath.Join(outBase(cfg), "build", dep))
+		if derr != nil {
+			return derr
+		}
+		cmd.Env = append(cmd.Env, "PEKIT_"+envTargetName(dep)+"_OUT="+depStage)
+	}
+	if len(target.Needs) > 0 {
+		fmt.Printf("pekit: needs: %s\n", strings.Join(target.Needs, ", "))
+	}
+
+	// Only build targets check out the source and stage into PEKIT_OUT.
 	if verb == "build" && cfg.OutDir != "" {
 		if cfg.Source != nil {
 			srcDir, err := fetchSource(cfg.Source, sourceCheckout(cfg))
@@ -608,19 +653,7 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 			return err
 		}
 		fmt.Printf("pekit: out: %s\n", stageDir)
-		cmd.Env = append(os.Environ(), "PEKIT_OUT="+stageDir)
-		// Each declared dependency's stage is exported as PEKIT_<NAME>_OUT.
-		// runTarget has already built them, so the dirs exist.
-		for _, dep := range target.Needs {
-			depStage, derr := filepath.Abs(filepath.Join(outBase(cfg), verb, dep))
-			if derr != nil {
-				return derr
-			}
-			cmd.Env = append(cmd.Env, "PEKIT_"+envTargetName(dep)+"_OUT="+depStage)
-		}
-		if len(target.Needs) > 0 {
-			fmt.Printf("pekit: needs: %s\n", strings.Join(target.Needs, ", "))
-		}
+		cmd.Env = append(cmd.Env, "PEKIT_OUT="+stageDir)
 		if err := cmd.Run(); err != nil {
 			return err
 		}

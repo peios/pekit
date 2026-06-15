@@ -14,11 +14,13 @@ import (
 // Target is a single runnable target within a command section.
 type Target struct {
 	Command string
-	// Needs names other targets in the same section that must run before this
-	// one (acyclic). Each direct dependency's staged output dir is exported to
-	// this target's script as PEKIT_<NAME>_OUT — the name uppercased with every
-	// non-alphanumeric byte turned into '_' (see envTargetName). Shared
-	// dependencies run once per invocation.
+	// Needs names build targets that must be staged before this one runs —
+	// always [build] targets, regardless of the section this target is declared
+	// in (a [test]/[install] target depends on builds, never on sibling tests
+	// or installs). The build subgraph is acyclic. Each direct dependency's
+	// staged output dir is exported to this target's script as PEKIT_<NAME>_OUT
+	// — the name uppercased with every non-alphanumeric byte turned into '_'
+	// (see envTargetName). Shared dependencies run once per invocation.
 	Needs []string
 }
 
@@ -135,9 +137,6 @@ func ParseConfig(src string) (*Config, error) {
 				if err != nil {
 					return nil, err
 				}
-				if err := validateTargetDeps(key, targets); err != nil {
-					return nil, err
-				}
 				cfg.Commands[key] = targets
 			case "package":
 				return nil, fmt.Errorf("[package] has moved to package.pekit.toml")
@@ -191,6 +190,11 @@ func ParseConfig(src string) (*Config, error) {
 	}
 	if cfg.Source != nil && cfg.OutDir == "" {
 		return nil, fmt.Errorf("[source] requires outDir to be set (the checkout lands under it)")
+	}
+	// needs always names a build target (in any section), so dependency
+	// validation runs once, after every section is parsed.
+	if err := validateDeps(cfg); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -384,27 +388,44 @@ func envTargetName(name string) string {
 	return string(b)
 }
 
-// validateTargetDeps checks a section's dependency graph: every needs entry
-// names a real target, no target's direct needs collide on the PEKIT_<NAME>_OUT
-// env var they generate, and the graph is acyclic. Run once at parse time so a
-// broken graph fails fast regardless of which target is later invoked.
-func validateTargetDeps(section string, targets map[string]Target) error {
-	for _, name := range sortedNames(targets) {
-		seen := map[string]string{} // env var component -> dep that produced it
-		for _, dep := range targets[name].Needs {
-			if _, ok := targets[dep]; !ok {
-				return fmt.Errorf("[%s.%s]: needs %q, which is not a target in [%s]", section, name, dep, section)
+// validateDeps checks every section's dependency graph after all sections are
+// parsed. A `needs` entry always names a build target — regardless of the
+// section it is declared in — so existence is checked against [build]. The
+// PEKIT_<NAME>_OUT collision check applies to every section, since each exports
+// its direct needs' staged outputs into the command env. Cycles are only
+// possible within [build] (test/install/clean needs point outward into build,
+// and build nodes are never depended on from outside), so cycle detection runs
+// on the build section alone.
+func validateDeps(cfg *Config) error {
+	build := cfg.Commands["build"]
+	// Fixed section order keeps a reported error deterministic.
+	for _, section := range []string{"build", "test", "install", "clean"} {
+		targets, ok := cfg.Commands[section]
+		if !ok {
+			continue
+		}
+		for _, name := range sortedNames(targets) {
+			seen := map[string]string{} // env var component -> dep that produced it
+			for _, dep := range targets[name].Needs {
+				if _, ok := build[dep]; !ok {
+					return fmt.Errorf("[%s.%s]: needs %q, which is not a build target", section, name, dep)
+				}
+				ev := envTargetName(dep)
+				if prev, dup := seen[ev]; dup {
+					return fmt.Errorf("[%s.%s]: needs %q and %q both map to PEKIT_%s_OUT; rename one", section, name, prev, dep, ev)
+				}
+				seen[ev] = dep
 			}
-			ev := envTargetName(dep)
-			if prev, dup := seen[ev]; dup {
-				return fmt.Errorf("[%s.%s]: needs %q and %q both map to PEKIT_%s_OUT; rename one", section, name, prev, dep, ev)
-			}
-			seen[ev] = dep
 		}
 	}
+	return validateBuildCycles(build)
+}
 
-	// Cycle detection (DFS three-colouring). Sorted starts keep the reported
-	// cycle deterministic.
+// validateBuildCycles fails on a dependency cycle among build targets. needs
+// edges only ever point into [build], so [build] is the only section that can
+// contain one.
+func validateBuildCycles(targets map[string]Target) error {
+	// DFS three-colouring. Sorted starts keep the reported cycle deterministic.
 	const (
 		white = iota
 		gray
@@ -417,7 +438,7 @@ func validateTargetDeps(section string, targets map[string]Target) error {
 		for _, dep := range targets[n].Needs {
 			switch color[dep] {
 			case gray:
-				return fmt.Errorf("[%s]: dependency cycle through %q", section, dep)
+				return fmt.Errorf("[build]: dependency cycle through %q", dep)
 			case white:
 				if err := visit(dep); err != nil {
 					return err
