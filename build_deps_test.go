@@ -43,7 +43,7 @@ func TestValidateDepsMissing(t *testing.T) {
 needs = ["gen"]
 command = "x"
 `)
-	if err == nil || !strings.Contains(err.Error(), "not a target") {
+	if err == nil || !strings.Contains(err.Error(), "not a build target") {
 		t.Fatalf("err = %v, want a missing-target error", err)
 	}
 }
@@ -193,6 +193,38 @@ func TestNoBuildUnknownTargetErrors(t *testing.T) {
 	err := runTarget(cfg, "build", "gen", nil, sel)
 	if err == nil || !strings.Contains(err.Error(), "no build target") {
 		t.Fatalf("err = %v, want an unknown-target error", err)
+	}
+}
+
+// TestNeedsAcrossSectionsResolveToBuild: a test/install target may depend on a
+// build target (the cross-section case), but its needs must name BUILD targets,
+// never sibling test/install targets.
+func TestNeedsAcrossSectionsResolveToBuild(t *testing.T) {
+	// A test target depending on a build target is valid.
+	if _, err := ParseConfig(`outDir = "out"
+
+[build.kunit]
+command = "make kunit"
+
+[test.kunit]
+needs = ["kunit"]
+command = "run-kunit $PEKIT_KUNIT_OUT"
+`); err != nil {
+		t.Fatalf("a test depending on a build target should be valid: %v", err)
+	}
+
+	// A test target needing another TEST target is not — needs are build-only.
+	_, err := ParseConfig(`outDir = "out"
+
+[test.smoke]
+command = "smoke"
+
+[test.e2e]
+needs = ["smoke"]
+command = "e2e"
+`)
+	if err == nil || !strings.Contains(err.Error(), "not a build target") {
+		t.Fatalf("err = %v, want 'not a build target' (needs may not name a test target)", err)
 	}
 }
 
