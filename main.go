@@ -32,6 +32,13 @@ func run(args []string) error {
 		return cmdWorkspace(args[1:])
 	}
 
+	// A remote-recipe argument (github.com/owner/repo, a git URL) clones the
+	// recipe and re-runs the verb inside the checkout. Detected on the raw args
+	// so the verb and its flags can be re-dispatched unchanged.
+	if rest, spec, ok := extractRemoteSpec(args); ok {
+		return runRemote(spec, rest)
+	}
+
 	args, f, err := extractFlags(args)
 	if err != nil {
 		return err
