@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -105,10 +106,14 @@ func versionFromTag(re *regexp.Regexp, tag string) (*Version, bool) {
 	return v, true
 }
 
-// enumerateVersions lists the upstream tags and returns those that match
-// the rev template (and tag_regex, if set), parsed and de-duplicated.
-// Network call (ls-remote); the parsing/filtering is parseRemoteTags.
+// enumerateVersions returns the upstream versions matching the recipe's
+// template (and tag_regex, if set), parsed and de-duplicated. A git source
+// lists tags (ls-remote); a url source lists the download's parent directory
+// and matches the filename template. Network call either way.
 func enumerateVersions(src *Source) ([]*Version, error) {
+	if src.URL != "" {
+		return enumerateURLVersions(src)
+	}
 	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", src.Git).Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing tags of %s: %w", src.Git, err)
@@ -116,39 +121,113 @@ func enumerateVersions(src *Source) ([]*Version, error) {
 	return parseRemoteTags(string(out), src.Rev, src.TagRegex)
 }
 
-// parseRemoteTags turns `git ls-remote --tags` output into the matching
-// versions: a tag must match the rev template's shape and, when tagRegex is
-// non-empty, that regexp too. De-duplicated by version, ls-remote order
-// preserved. Split out from enumerateVersions so the matching and the
-// tag_regex filter are testable without a remote.
+// parseRemoteTags turns `git ls-remote --tags` output into matching versions:
+// it strips the refs/tags/ prefix off each ref and hands the tags to
+// matchVersions. Split out so the matching is testable without a remote.
 func parseRemoteTags(lsRemote, revTmpl, tagRegex string) ([]*Version, error) {
-	re, err := revMatcher(revTmpl)
+	var tags []string
+	for _, line := range strings.Split(strings.TrimSpace(lsRemote), "\n") {
+		if _, ref, ok := strings.Cut(line, "\t"); ok {
+			tags = append(tags, strings.TrimPrefix(ref, "refs/tags/"))
+		}
+	}
+	return matchVersions(tags, revTmpl, tagRegex, "tag_regex")
+}
+
+// matchVersions keeps the candidate strings (tags or listing entries) that
+// match the template's shape and, when filterRe is non-empty, that regexp too,
+// parsing each to a Version. De-duplicated by version, input order preserved.
+// filterLabel names the field filterRe came from ("tag_regex"/"file_regex"),
+// for the error if it doesn't compile.
+func matchVersions(candidates []string, tmpl, filterRe, filterLabel string) ([]*Version, error) {
+	re, err := revMatcher(tmpl)
 	if err != nil {
 		return nil, err
 	}
-	var tagRe *regexp.Regexp
-	if tagRegex != "" {
-		if tagRe, err = regexp.Compile(tagRegex); err != nil {
-			return nil, fmt.Errorf("[source].tag_regex %q: %w", tagRegex, err)
+	var filter *regexp.Regexp
+	if filterRe != "" {
+		if filter, err = regexp.Compile(filterRe); err != nil {
+			return nil, fmt.Errorf("[source].%s %q: %w", filterLabel, filterRe, err)
 		}
 	}
 	var vers []*Version
 	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(lsRemote), "\n") {
-		_, ref, ok := strings.Cut(line, "\t")
-		if !ok {
+	for _, c := range candidates {
+		if filter != nil && !filter.MatchString(c) {
 			continue
 		}
-		tag := strings.TrimPrefix(ref, "refs/tags/")
-		if tagRe != nil && !tagRe.MatchString(tag) {
-			continue
-		}
-		if v, ok := versionFromTag(re, tag); ok && !seen[v.Full] {
+		if v, ok := versionFromTag(re, c); ok && !seen[v.Full] {
 			seen[v.Full] = true
 			vers = append(vers, v)
 		}
 	}
 	return vers, nil
+}
+
+// enumerateURLVersions lists a url source's parent directory and matches its
+// entries against the filename template, so a recipe pointing at
+// "https://ftp.gnu.org/gnu/gmp/gmp-{{version}}.tar.xz" discovers every
+// published gmp release. The HTTP fetch is httpGetString; matching reuses the
+// same template inversion as git tags.
+func enumerateURLVersions(src *Source) ([]*Version, error) {
+	dirURL, segment, err := splitURLTemplate(src.URL)
+	if err != nil {
+		return nil, err
+	}
+	body, err := httpGetString(dirURL)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", dirURL, err)
+	}
+	return matchVersions(listingCandidates(body), segment, src.FileRegex, "file_regex")
+}
+
+// splitURLTemplate splits a url template into the directory url to list and the
+// path segment within it whose shape encodes the version. The directory is
+// everything up to the last '/' before the first {{...}}; the segment is the
+// first path component after it (the one carrying the variable). So
+// ".../gnu/gmp/gmp-{{version}}.tar.xz" lists ".../gnu/gmp/" and matches entries
+// against "gmp-{{version}}.tar.xz"; ".../v{{version}}/src.tar.gz" lists the
+// parent and matches directory entries against "v{{version}}".
+func splitURLTemplate(tmpl string) (dirURL, segment string, err error) {
+	loc := templateVar.FindStringIndex(tmpl)
+	if loc == nil {
+		return "", "", fmt.Errorf("url %q has no {{...}} template, so versions can't be enumerated", tmpl)
+	}
+	slash := strings.LastIndex(tmpl[:loc[0]], "/")
+	if slash < 0 {
+		return "", "", fmt.Errorf("url %q has no directory to list before the version", tmpl)
+	}
+	dirURL = tmpl[:slash+1]
+	segment = tmpl[slash+1:]
+	if i := strings.Index(segment, "/"); i >= 0 {
+		segment = segment[:i] // the version lives in this first component
+	}
+	return dirURL, segment, nil
+}
+
+var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["']?([^"'>\s]+)`)
+
+// listingCandidates extracts entry names from an HTML directory listing: the
+// basename of every href, trailing slash (a subdirectory) and any query or
+// fragment stripped, de-duplicated. The anchored template match downstream
+// discards unrelated links (the parent dir, sort columns, files of other
+// shapes), so this only needs to surface plausible names.
+func listingCandidates(body string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range hrefRe.FindAllStringSubmatch(body, -1) {
+		href := m[1]
+		if i := strings.IndexAny(href, "?#"); i >= 0 {
+			href = href[:i]
+		}
+		name := path.Base(strings.TrimSuffix(href, "/"))
+		if name == "" || name == "." || name == ".." || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // versionLadder is the most-specific-first list of versions an exact

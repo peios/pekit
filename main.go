@@ -88,8 +88,8 @@ func run(args []string) error {
 		}
 
 		// Working copy not present — fall back to remote instead of failing.
-		if src.Git == "" {
-			return fmt.Errorf("--local: %s and no git source to fall back to", localMissReason(src))
+		if src.Git == "" && src.URL == "" {
+			return fmt.Errorf("--local: %s and no remote source to fall back to", localMissReason(src))
 		}
 		ver, verr := exactVersion()
 		if verr != nil {
@@ -542,6 +542,9 @@ func revScope(src *Source) string {
 	if src.Local {
 		return "localdev"
 	}
+	if src.URL != "" {
+		return urlScope(src.URL)
+	}
 	return strings.ReplaceAll(src.Rev, "/", "_")
 }
 
@@ -604,7 +607,7 @@ func sourceCheckout(cfg *Config) string {
 // fetchSource ensures the pinned source is checked out at dir and returns
 // its absolute path. An existing checkout is reused (immutable rev →
 // valid; a mutable ref may go stale — pekit clean forces a re-fetch). A
-// failed checkout is torn down so the next run re-clones rather than
+// failed checkout is torn down so the next run re-fetches rather than
 // reusing a half-built tree.
 func fetchSource(src *Source, dir string) (string, error) {
 	// Local mode: build the working copy in place, no clone/checkout.
@@ -620,6 +623,11 @@ func fetchSource(src *Source, dir string) (string, error) {
 		fmt.Printf("pekit: source: %s (local)\n", abs)
 		return abs, nil
 	}
+	// URL mode: download (and optionally extract) the release archive rather
+	// than cloning git.
+	if src.URL != "" {
+		return fetchURL(src, dir)
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -631,15 +639,52 @@ func fetchSource(src *Source, dir string) (string, error) {
 		return "", err
 	}
 	fmt.Printf("pekit: source: %s @ %s\n", src.Git, src.Rev)
-	if err := runGit("", "clone", "--quiet", src.Git, abs); err != nil {
+	// Shallow first: fetch only the pinned rev at depth 1, so for the tag/branch
+	// revs every recipe uses we transfer a single commit instead of the whole
+	// upstream history (GCC's is multi-GB). A bare-SHA rev a server won't serve
+	// shallowly (no uploadpack.allowReachableSHA1InWant) falls back to a full
+	// clone.
+	if err := shallowFetch(src, abs); err != nil {
 		os.RemoveAll(abs)
-		return "", fmt.Errorf("cloning %s: %w", src.Git, err)
-	}
-	if err := runGit(abs, "checkout", "--quiet", "--detach", src.Rev); err != nil {
-		os.RemoveAll(abs)
-		return "", fmt.Errorf("checking out %s: %w", src.Rev, err)
+		if cerr := fullClone(src, abs); cerr != nil {
+			os.RemoveAll(abs)
+			return "", cerr
+		}
 	}
 	return abs, nil
+}
+
+// shallowFetch makes a depth-1 checkout of src.Rev in abs (which must not yet
+// exist). It resolves any ref a server serves by name — tags and branches, the
+// only rev forms our recipes use — transferring a single commit instead of the
+// whole history. A rev the server only serves as a reachable SHA fails here, and
+// the caller falls back to fullClone.
+func shallowFetch(src *Source, abs string) error {
+	if err := runGit("", "init", "--quiet", abs); err != nil {
+		return fmt.Errorf("git init %s: %w", abs, err)
+	}
+	if err := runGit(abs, "remote", "add", "origin", src.Git); err != nil {
+		return fmt.Errorf("adding remote %s: %w", src.Git, err)
+	}
+	if err := runGit(abs, "fetch", "--quiet", "--depth", "1", "origin", src.Rev); err != nil {
+		return fmt.Errorf("shallow-fetching %s @ %s: %w", src.Git, src.Rev, err)
+	}
+	if err := runGit(abs, "checkout", "--quiet", "--detach", "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("checking out %s: %w", src.Rev, err)
+	}
+	return nil
+}
+
+// fullClone is the fallback for revs that can't be fetched shallowly: clone the
+// whole repository into abs, then check the rev out by name.
+func fullClone(src *Source, abs string) error {
+	if err := runGit("", "clone", "--quiet", src.Git, abs); err != nil {
+		return fmt.Errorf("cloning %s: %w", src.Git, err)
+	}
+	if err := runGit(abs, "checkout", "--quiet", "--detach", src.Rev); err != nil {
+		return fmt.Errorf("checking out %s: %w", src.Rev, err)
+	}
+	return nil
 }
 
 func runGit(dir string, args ...string) error {
@@ -880,7 +925,15 @@ func prepareBuild(wd string, ver *Version, local bool) (*buildContext, error) {
 		if ferr != nil {
 			return nil, ferr
 		}
-		provenanceDir, literalRoot = checkout, checkout
+		// Literal [files] sources resolve inside the fetched tree. Provenance
+		// anchors to the upstream git tree for a git source, but a url source
+		// has no upstream commit — anchor it to the recipe dir (its own repo,
+		// if committed) instead of the non-git extracted tarball.
+		literalRoot = checkout
+		provenanceDir = checkout
+		if cfg.Source.URL != "" {
+			provenanceDir = wd
+		}
 
 		// pekit.toml: section-level fallback.
 		if srcCfg, cerr := LoadConfig(filepath.Join(checkout, "pekit.toml"), ver); cerr == nil {
