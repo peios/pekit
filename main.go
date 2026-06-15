@@ -412,11 +412,6 @@ func targetArg(args []string) (string, error) {
 }
 
 func cmdVerb(verb string, args []string, ver *Version, local bool) error {
-	name, err := targetArg(args)
-	if err != nil {
-		return err
-	}
-
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
@@ -429,11 +424,46 @@ func cmdVerb(verb string, args []string, ver *Version, local bool) error {
 	if !ok {
 		return fmt.Errorf("pekit.toml has no [%s] section", verb)
 	}
-	if _, ok := targets[name]; !ok {
-		return fmt.Errorf("no %s target %q (available: %s)",
-			verb, name, strings.Join(sortedNames(targets), ", "))
+	names, err := verbTargets(verb, args, targets)
+	if err != nil {
+		return err
 	}
-	return runTarget(cfg, verb, name, nil, false)
+	if len(names) > 1 {
+		fmt.Fprintf(os.Stderr, "pekit: %s: %d targets: %s\n", verb, len(names), strings.Join(names, ", "))
+	}
+	// Shared ran set: a dependency several targets declare via needs builds
+	// once across the whole fan-out, not once per target.
+	ran := map[string]bool{}
+	for _, name := range names {
+		if err := runTarget(cfg, verb, name, ran, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verbTargets resolves which targets a build/test/install invocation runs. A
+// named argument selects exactly that target. With no argument it is the bare
+// "main" target when the section has one (the single-[verb] form), otherwise
+// every named target in sorted order — so a recipe with only [install.cli] and
+// [install.server] installs both on a bare `pekit install`, mirroring how a
+// bare `pekit package` builds every package.
+func verbTargets(verb string, args []string, targets map[string]Target) ([]string, error) {
+	switch len(args) {
+	case 0:
+		if _, ok := targets["main"]; ok {
+			return []string{"main"}, nil
+		}
+		return sortedNames(targets), nil
+	case 1:
+		if _, ok := targets[args[0]]; !ok {
+			return nil, fmt.Errorf("no %s target %q (available: %s)",
+				verb, args[0], strings.Join(sortedNames(targets), ", "))
+		}
+		return []string{args[0]}, nil
+	default:
+		return nil, errors.New(usage)
+	}
 }
 
 // buildOrder returns root and its transitive dependencies in run order
