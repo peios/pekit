@@ -85,6 +85,37 @@ func TestDiscoverPackagesDuplicate(t *testing.T) {
 	}
 }
 
+func TestRecipePackageFileFallback(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "package.pekit.toml")
+
+	// No base anywhere → returns the root path (decodePackageFile treats it as
+	// absent), preserving the no-base behaviour.
+	if got := recipePackageFile(dir); got != root {
+		t.Errorf("no base: got %s, want %s", got, root)
+	}
+
+	// Base only in packages.pekit/ → found there.
+	sub := filepath.Join(dir, "packages.pekit", "package.pekit.toml")
+	if err := os.MkdirAll(filepath.Dir(sub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sub, []byte("format=\"tar\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := recipePackageFile(dir); got != sub {
+		t.Errorf("subdir base: got %s, want %s", got, sub)
+	}
+
+	// A root base wins over the subdir.
+	if err := os.WriteFile(root, []byte("format=\"tar\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := recipePackageFile(dir); got != root {
+		t.Errorf("root base should win: got %s, want %s", got, root)
+	}
+}
+
 func TestDiscoverPackagesNone(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "package.pekit.toml"), []byte("format=\"tar\"\n"), 0o644); err != nil {

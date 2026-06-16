@@ -1122,7 +1122,7 @@ func prepareBuild(wd string, ver *Version, local bool, env string, keyring map[s
 	// override can be merged field-by-field below (a struct can't tell
 	// "field unset" from "field empty"). When prefixed members exist this is
 	// their shared base; with none it is the sole package itself.
-	recipeRaw, _, err := decodePackageFile("package.pekit.toml", ver)
+	recipeRaw, _, err := decodePackageFile(recipePackageFile(wd), ver)
 	if err != nil {
 		return nil, err
 	}
@@ -1439,6 +1439,26 @@ func discoverPackages(dir string) ([]packageMember, error) {
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].name < members[j].name })
 	return members, nil
+}
+
+// recipePackageFile returns the path to the recipe's bare package.pekit.toml —
+// the shared base / standalone package. It prefers the recipe root, then falls
+// back to a package.pekit/ or packages.pekit/ subdirectory, so a recipe can
+// keep its base file there alongside its members. When none exists it returns
+// the root path (which decodePackageFile treats as "absent"), leaving the
+// no-base behaviour unchanged.
+func recipePackageFile(dir string) string {
+	root := filepath.Join(dir, "package.pekit.toml")
+	candidates := []string{root}
+	for _, sub := range packageDirs {
+		candidates = append(candidates, filepath.Join(dir, sub, "package.pekit.toml"))
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return root
 }
 
 // memberNames is the selector names of discovered members, in order.
