@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+// TestWorkspaceKeyringAndEnv: a workspace fan-out resolves --keyring=<file>
+// once at the root and injects it into every member's build, and passes --env
+// through. Two sourceless members built with --all.
+func TestWorkspaceKeyringAndEnv(t *testing.T) {
+	ws := t.TempDir()
+	w := func(p, s string) {
+		full := filepath.Join(ws, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w("workspace.pekit.toml", "include = \"./*\"\n")
+	w("prod.keyring.pekit.toml", "[tcb]\npub = \"DEADBEEF\"\n")
+	for _, m := range []string{"m1", "m2"} {
+		w(m+"/pekit.toml", "outDir = \"out\"\n[build.main]\ncommand = \"echo pub=$PEKIT_KEYRING_TCB_PUB > $PEKIT_OUT/x\"\n")
+		w(m+"/package.pekit.toml", "format = \"tar\"\n[package]\nname = \""+m+"\"\n[files]\n\":x\" = \"usr/x\"\n")
+	}
+
+	t.Chdir(ws)
+	if err := cmdWorkspace([]string{"package", "--all", "--keyring=prod"}); err != nil {
+		t.Fatalf("cmdWorkspace: %v", err)
+	}
+	// The root keyring file reached every member's build.
+	for _, m := range []string{"m1", "m2"} {
+		data, err := os.ReadFile(filepath.Join(ws, m, "out", "build", "main", "x"))
+		if err != nil {
+			t.Fatalf("%s build output: %v", m, err)
+		}
+		if strings.TrimSpace(string(data)) != "pub=DEADBEEF" {
+			t.Errorf("%s got %q, want pub=DEADBEEF", m, strings.TrimSpace(string(data)))
+		}
+	}
+}
+
 func TestParseWorkspace(t *testing.T) {
 	ws, err := ParseWorkspace(`include = "./*"`)
 	if err != nil {
