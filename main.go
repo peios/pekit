@@ -598,9 +598,15 @@ func validateNoBuildNames(cfg *Config, noBuild noBuildSet) error {
 // dependency order, honoring the ran-dedup and --no-build reuse rules.
 func runBuildSubgraph(cfg *Config, name string, ran map[string]bool, noBuild noBuildSet) error {
 	targets := cfg.Commands["build"]
-	for _, t := range buildOrder(targets, name) {
+	// Walk top-down so a reused target prunes its dependency subtree: a target's
+	// `needs` exist only to build it, so if it is reused (--no-build + already
+	// staged) there is no reason to build its dependencies. We only descend into
+	// the needs of a target we are actually going to build. The build graph is
+	// validated acyclic at parse time, so this recursion always terminates.
+	var ensure func(string) error
+	ensure = func(t string) error {
 		if ran[t] {
-			continue
+			return nil
 		}
 		if noBuild.skip(t) {
 			if _, err := os.Stat(filepath.Join(outBase(cfg), "build", t)); err == nil {
@@ -608,7 +614,13 @@ func runBuildSubgraph(cfg *Config, name string, ran map[string]bool, noBuild noB
 				if ran != nil {
 					ran[t] = true
 				}
-				continue
+				return nil // reused → prune its dependency subtree
+			}
+		}
+		// Building t: its dependencies must be staged first.
+		for _, dep := range targets[t].Needs {
+			if err := ensure(dep); err != nil {
+				return err
 			}
 		}
 		if err := runCommandTarget(cfg, "build", t, targets[t]); err != nil {
@@ -617,8 +629,9 @@ func runBuildSubgraph(cfg *Config, name string, ran map[string]bool, noBuild noB
 		if ran != nil {
 			ran[t] = true
 		}
+		return nil
 	}
-	return nil
+	return ensure(name)
 }
 
 func runCommandTarget(cfg *Config, verb, name string, target Target) error {

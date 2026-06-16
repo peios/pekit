@@ -228,6 +228,36 @@ command = "e2e"
 	}
 }
 
+// TestNoBuildPrunesDepsOfReusedTarget: reusing a target must prune its whole
+// dependency subtree — those deps exist only to build it. Chain a<-b<-c; c is
+// staged and named in --no-build. Running test target `t` (needs build c) must
+// reuse c and NOT rebuild a or b (their commands "exit 1" and fail loudly if
+// run). This is the `pekit test kunit --no-build=kunit` case.
+func TestNoBuildPrunesDepsOfReusedTarget(t *testing.T) {
+	cfg := &Config{
+		OutDir:   "out",
+		ClearOut: true,
+		Commands: map[string]map[string]Target{
+			"build": {
+				"a": {Command: "exit 1"},
+				"b": {Command: "exit 1", Needs: []string{"a"}},
+				"c": {Command: "exit 1", Needs: []string{"b"}},
+			},
+			"test": {
+				"t": {Command: "true", Needs: []string{"c"}},
+			},
+		},
+	}
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(filepath.Join("out", "build", "c"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel := noBuildSet{active: true, names: map[string]bool{"c": true}}
+	if err := runTarget(cfg, "test", "t", nil, sel); err != nil {
+		t.Fatalf("reusing c must prune a and b, but something rebuilt: %v", err)
+	}
+}
+
 func TestBuildOrder(t *testing.T) {
 	// Diamond: d needs b and c, both need a. a must run first and only once.
 	targets := map[string]Target{
