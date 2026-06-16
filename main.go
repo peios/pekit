@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] | pekit workspace <package|publish> <--all|--latest|--local>"
+const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -93,7 +93,7 @@ func run(args []string) error {
 			if ver == nil {
 				ver = localVersion()
 			}
-			return dispatch(args, ver, true, f.noBuild)
+			return dispatch(args, ver, true, f.noBuild, f.env)
 		}
 
 		// Working copy not present — fall back to remote instead of failing.
@@ -112,7 +112,7 @@ func run(args []string) error {
 			ver = v
 		}
 		fmt.Fprintf(os.Stderr, "pekit: warning: --local: %s; building %s from remote\n", localMissReason(src), ver.Full)
-		return dispatch(args, ver, false, f.noBuild)
+		return dispatch(args, ver, false, f.noBuild, f.env)
 	}
 
 	// pekit.built is consulted for the work-doing verbs (build/package/
@@ -151,7 +151,7 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
 			return nil
 		}
-		return dispatch(args, vers[0], false, f.noBuild)
+		return dispatch(args, vers[0], false, f.noBuild, f.env)
 	}
 
 	if len(vers) > 1 {
@@ -170,7 +170,7 @@ func run(args []string) error {
 			skipped++
 			continue
 		}
-		if err := dispatch(args, ver, false, f.noBuild); err != nil {
+		if err := dispatch(args, ver, false, f.noBuild, f.env); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
@@ -341,14 +341,14 @@ func inDir(dir string, fn func() error) error {
 	return fn()
 }
 
-func dispatch(args []string, ver *Version, local bool, noBuild noBuildSet) error {
+func dispatch(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
 	switch args[0] {
 	case "build", "test", "install":
-		return cmdVerb(args[0], args[1:], ver, local, noBuild)
+		return cmdVerb(args[0], args[1:], ver, local, noBuild, env)
 	case "package":
-		return cmdPackage(args[1:], ver, local, noBuild)
+		return cmdPackage(args[1:], ver, local, noBuild, env)
 	case "publish":
-		return cmdPublish(args[1:], ver, local, noBuild)
+		return cmdPublish(args[1:], ver, local, noBuild, env)
 	case "clean":
 		return cmdClean(args[1:], ver)
 	default:
@@ -364,6 +364,7 @@ type flags struct {
 	bust       bool // --bust: rebuild even if the ledger says built
 	local      bool       // --local: build the [source] localpath working copy
 	noBuild    noBuildSet // --no-build[=t1,...]: reuse already-staged builds
+	env        string     // --env [main|none|<name>]: command-wrap selection (default main)
 }
 
 // noBuildSet records which build targets --no-build should reuse if they are
@@ -405,7 +406,7 @@ func parseNoBuild(val string) (noBuildSet, error) {
 // extractFlags pulls the global flags out of args, returning the rest.
 func extractFlags(args []string) ([]string, flags, error) {
 	var rest []string
-	var f flags
+	f := flags{env: "main"} // --env defaults to main (apply env.pekit.toml if present)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -431,6 +432,14 @@ func extractFlags(args []string) ([]string, flags, error) {
 				return nil, f, perr
 			}
 			f.noBuild = set
+		case a == "--env":
+			if i+1 >= len(args) {
+				return nil, f, fmt.Errorf("%s requires a value", a)
+			}
+			f.env = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--env="):
+			f.env = strings.TrimPrefix(a, "--env=")
 		default:
 			// An unrecognised --flag is a mistake, not a positional: catch it
 			// here so it can't be silently swallowed as a target or package
@@ -455,12 +464,15 @@ func targetArg(args []string) (string, error) {
 	}
 }
 
-func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBuildSet) error {
+func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
 	}
 	if err := applyLocal(cfg, local); err != nil {
+		return err
+	}
+	if err := applyEnv(cfg, env); err != nil {
 		return err
 	}
 
@@ -610,19 +622,31 @@ func runBuildSubgraph(cfg *Config, name string, ran map[string]bool, noBuild noB
 }
 
 func runCommandTarget(cfg *Config, verb, name string, target Target) error {
-	script := target.Command
-	if len(cfg.Env) > 0 {
-		script = envPrelude(cfg.Env) + script
-		fmt.Printf("pekit: env: %s\n", strings.Join(envNames(cfg.Env), ", "))
+	// Build a SELF-CONTAINED script: the PEKIT_* and [env] values are baked in
+	// as `export` lines (not just process env) so they survive into a wrapped
+	// environment — a docker container or a nix-shell --pure scrubs the inherited
+	// env, but exports inside the script text always take effect. The same
+	// script then runs directly (unwrapped) or quoted inside cfg.Wrap.
+	var b strings.Builder
+	var workdir, stageDir string
+
+	// Source checkout + PEKIT_OUT staging are build-only.
+	if verb == "build" && cfg.OutDir != "" {
+		if cfg.Source != nil {
+			srcDir, err := fetchSource(cfg.Source, sourceCheckout(cfg))
+			if err != nil {
+				return err
+			}
+			workdir = srcDir
+		}
+		var err error
+		stageDir, err = prepareOutDir(outBase(cfg), verb, name, cfg.ClearOut)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("pekit: out: %s\n", stageDir)
+		fmt.Fprintf(&b, "export PEKIT_OUT=%s\n", shellQuote(stageDir))
 	}
-	fmt.Printf("pekit: %s %s: %s\n", verb, name, target.Command)
-	// -eu so multi-line commands stop at the first failure instead of
-	// barrelling on (e.g. staging a stale binary after a failed compile).
-	cmd := exec.Command("sh", "-euc", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
 
 	// Dependencies are always build targets; expose each direct need's staged
 	// output dir as PEKIT_<NAME>_OUT — in every section, so a test or install
@@ -633,37 +657,55 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 		if derr != nil {
 			return derr
 		}
-		cmd.Env = append(cmd.Env, "PEKIT_"+envTargetName(dep)+"_OUT="+depStage)
+		fmt.Fprintf(&b, "export PEKIT_%s_OUT=%s\n", envTargetName(dep), shellQuote(depStage))
 	}
 	if len(target.Needs) > 0 {
 		fmt.Printf("pekit: needs: %s\n", strings.Join(target.Needs, ", "))
 	}
 
-	// Only build targets check out the source and stage into PEKIT_OUT.
-	if verb == "build" && cfg.OutDir != "" {
-		if cfg.Source != nil {
-			srcDir, err := fetchSource(cfg.Source, sourceCheckout(cfg))
-			if err != nil {
-				return err
-			}
-			cmd.Dir = srcDir
-		}
-		stageDir, err := prepareOutDir(outBase(cfg), verb, name, cfg.ClearOut)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("pekit: out: %s\n", stageDir)
-		cmd.Env = append(cmd.Env, "PEKIT_OUT="+stageDir)
-		if err := cmd.Run(); err != nil {
-			return err
-		}
-		if isEmptyDir(stageDir) {
-			fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
-		}
-		return nil
+	if len(cfg.Env) > 0 {
+		b.WriteString(envPrelude(cfg.Env))
+		fmt.Printf("pekit: env: %s\n", strings.Join(envNames(cfg.Env), ", "))
+	}
+	b.WriteString(target.Command)
+	inner := b.String()
+
+	fmt.Printf("pekit: %s %s: %s\n", verb, name, target.Command)
+
+	// Wrap: substitute the self-contained script (shell-quoted as one argument)
+	// into the env's [wrap] template; without a wrap, run the script directly.
+	script := inner
+	if cfg.Wrap != "" {
+		script = strings.ReplaceAll(cfg.Wrap, "{{command}}", shellQuote(inner))
+		fmt.Printf("pekit: wrap: %s\n", cfg.Wrap)
 	}
 
-	return cmd.Run()
+	// -eu so multi-line commands stop at the first failure instead of
+	// barrelling on (e.g. staging a stale binary after a failed compile).
+	cmd := exec.Command("sh", "-euc", script)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
+
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if stageDir != "" && isEmptyDir(stageDir) {
+		fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
+	}
+	return nil
+}
+
+// shellQuote wraps s in single quotes for POSIX sh, escaping embedded single
+// quotes via the '\'' idiom — so an arbitrary (possibly multi-line) script can
+// be passed as a single argument to a wrapper like `nix-shell --run` or
+// `docker run … sh -euc`.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // revScope is the filesystem-safe form of a source rev ('/' flattened).
@@ -882,12 +924,12 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string, ver *Version, local bool, noBuild noBuildSet) error {
+func cmdPackage(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
 	}
-	_, _, err = buildPackages(sel, ver, local, noBuild)
+	_, _, err = buildPackages(sel, ver, local, noBuild, env)
 	return err
 }
 
@@ -937,7 +979,7 @@ type buildContext struct {
 // bare package.pekit.toml is the sole package (the original single-package
 // behaviour). Returns one result per package (for publish) and the workspace
 // root the recipe belongs to ("" if none).
-func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet) ([]packResult, string, error) {
+func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env string) ([]packResult, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return nil, "", err
@@ -976,7 +1018,7 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet) ([]
 		}
 	}
 
-	bc, err := prepareBuild(wd, ver, local)
+	bc, err := prepareBuild(wd, ver, local, env)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1002,12 +1044,15 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet) ([]
 // recipe's own package.pekit.toml). The expensive parts — source fetch, and
 // later the build steps — happen once and are shared by every package the
 // recipe emits.
-func prepareBuild(wd string, ver *Version, local bool) (*buildContext, error) {
+func prepareBuild(wd string, ver *Version, local bool, env string) (*buildContext, error) {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return nil, err
 	}
 	if err := applyLocal(cfg, local); err != nil {
+		return nil, err
+	}
+	if err := applyEnv(cfg, env); err != nil {
 		return nil, err
 	}
 
@@ -1312,12 +1357,12 @@ func rawPackageName(raw map[string]any) string {
 // cmdPublish builds the selected package(s), then ships each artifact to its
 // own [publish] targets (usually inherited from the workspace root). A bare
 // `pekit publish` publishes every package the recipe defines.
-func cmdPublish(args []string, ver *Version, local bool, noBuild noBuildSet) error {
+func cmdPublish(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
 	}
-	results, wsRoot, err := buildPackages(sel, ver, local, noBuild)
+	results, wsRoot, err := buildPackages(sel, ver, local, noBuild, env)
 	if err != nil {
 		return err
 	}
