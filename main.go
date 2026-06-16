@@ -1064,17 +1064,18 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env
 	} else {
 		chosen := members
 		if sel != "" {
-			if !slices.Contains(members, sel) {
-				return nil, "", fmt.Errorf("pekit package %q: no such package (available: %s)", sel, strings.Join(members, ", "))
+			i := slices.IndexFunc(members, func(m packageMember) bool { return m.name == sel })
+			if i < 0 {
+				return nil, "", fmt.Errorf("pekit package %q: no such package (available: %s)", sel, strings.Join(memberNames(members), ", "))
 			}
-			chosen = []string{sel}
+			chosen = members[i : i+1]
 		}
 		for _, m := range chosen {
-			raw, _, derr := decodePackageFile(m+".package.pekit.toml", ver)
+			raw, _, derr := decodePackageFile(m.path, ver)
 			if derr != nil {
 				return nil, "", derr
 			}
-			jobs = append(jobs, job{name: m, raw: raw})
+			jobs = append(jobs, job{name: m.name, raw: raw})
 		}
 	}
 
@@ -1084,7 +1085,7 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env
 	}
 	bc.noBuild = noBuild
 	if len(jobs) > 1 {
-		fmt.Fprintf(os.Stderr, "pekit: packaging %d packages: %s\n", len(jobs), strings.Join(members, ", "))
+		fmt.Fprintf(os.Stderr, "pekit: packaging %d packages: %s\n", len(jobs), strings.Join(memberNames(members), ", "))
 	}
 
 	var results []packResult
@@ -1379,28 +1380,74 @@ func packInstance(bc *buildContext, pf *PackageFile, name string) (packResult, e
 	return packResult{Name: name, Artifact: artifact, Pkg: pf}, nil
 }
 
+// packageDirs are optional subdirectories beside the recipe that may also hold
+// <name>.package.pekit.toml members, so a recipe with many packages can keep
+// them out of the recipe root.
+var packageDirs = []string{"package.pekit", "packages.pekit"}
+
+const packageSuffix = ".package.pekit.toml"
+
+// packageMember is one discovered prefixed package: its selector name and the
+// file it lives in.
+type packageMember struct {
+	name string
+	path string
+}
+
 // discoverPackages returns the recipe's prefixed package members — every
-// "<name>.package.pekit.toml" in dir — sorted by name. The bare
-// "package.pekit.toml" is the shared base, not a member, so it is excluded.
-// Members live only in the recipe dir: a source or workspace-root file
-// contributes its unprefixed base to every member, not members of its own.
-func discoverPackages(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+// "<name>.package.pekit.toml" in the recipe dir and in the optional
+// package.pekit/ or packages.pekit/ subdirectories — sorted by name. The bare
+// "package.pekit.toml" is the shared base, not a member, so it is excluded. A
+// name found in more than one location is an error. Members live only here: a
+// source or workspace-root file contributes its unprefixed base to every
+// member, not members of its own.
+func discoverPackages(dir string) ([]packageMember, error) {
+	seen := map[string]string{} // name -> path, for collision detection
+	var members []packageMember
+	scan := func(d string) error {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // an absent package(s).pekit dir is fine
+			}
+			return err
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			prefix, ok := strings.CutSuffix(e.Name(), packageSuffix)
+			if !ok || prefix == "" {
+				continue
+			}
+			p := filepath.Join(d, e.Name())
+			if prev, dup := seen[prefix]; dup {
+				return fmt.Errorf("duplicate package %q: %s and %s", prefix, prev, p)
+			}
+			seen[prefix] = p
+			members = append(members, packageMember{name: prefix, path: p})
+		}
+		return nil
+	}
+	if err := scan(dir); err != nil {
 		return nil, err
 	}
-	const suffix = ".package.pekit.toml"
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if prefix, ok := strings.CutSuffix(e.Name(), suffix); ok && prefix != "" {
-			names = append(names, prefix)
+	for _, sub := range packageDirs {
+		if err := scan(filepath.Join(dir, sub)); err != nil {
+			return nil, err
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Slice(members, func(i, j int) bool { return members[i].name < members[j].name })
+	return members, nil
+}
+
+// memberNames is the selector names of discovered members, in order.
+func memberNames(members []packageMember) []string {
+	names := make([]string, len(members))
+	for i, m := range members {
+		names[i] = m.name
+	}
+	return names
 }
 
 // rawPackageName reads [package] name from an undecoded package table, or ""

@@ -30,8 +30,58 @@ func TestDiscoverPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverPackages: %v", err)
 	}
-	if strings.Join(got, ",") != "libc,locales" {
-		t.Errorf("members = %v, want [libc locales]", got)
+	if strings.Join(memberNames(got), ",") != "libc,locales" {
+		t.Errorf("members = %v, want [libc locales]", memberNames(got))
+	}
+}
+
+func TestDiscoverPackagesSubdir(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(p string) {
+		full := filepath.Join(dir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("format=\"tar\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Members come from the recipe dir AND the package(s).pekit subdirs.
+	mk("libc.package.pekit.toml")               // recipe root
+	mk("package.pekit/zlib.package.pekit.toml") // package.pekit/
+	mk("packages.pekit/gmp.package.pekit.toml") // packages.pekit/
+	mk("package.pekit/package.pekit.toml")      // bare base in subdir, excluded
+
+	got, err := discoverPackages(dir)
+	if err != nil {
+		t.Fatalf("discoverPackages: %v", err)
+	}
+	if strings.Join(memberNames(got), ",") != "gmp,libc,zlib" {
+		t.Errorf("members = %v, want [gmp libc zlib]", memberNames(got))
+	}
+	// Each member's path points at where it was found.
+	for _, m := range got {
+		if m.name == "zlib" && filepath.Base(filepath.Dir(m.path)) != "package.pekit" {
+			t.Errorf("zlib path = %s, want it under package.pekit/", m.path)
+		}
+	}
+}
+
+func TestDiscoverPackagesDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(p string) {
+		full := filepath.Join(dir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("format=\"tar\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("libc.package.pekit.toml")
+	mk("packages.pekit/libc.package.pekit.toml")
+	if _, err := discoverPackages(dir); err == nil || !strings.Contains(err.Error(), "duplicate package") {
+		t.Fatalf("err = %v, want a duplicate-package error", err)
 	}
 }
 
