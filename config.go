@@ -53,6 +53,12 @@ type Config struct {
 	// no wrapping (--env none, or no env file under the default --env main).
 	// Set by applyEnv, not parsed from pekit.toml.
 	Wrap string
+	// Keyring holds injected values from --keyring.<name>=<value>, keyed by the
+	// env var name they are exported as (PEKIT_KEYRING_<NAME>). Each is baked
+	// into every command's script as an export (like PEKIT_OUT) so it survives a
+	// wrapped environment. pekit treats values as opaque — a path, a literal,
+	// whatever; the command decides. Not parsed from pekit.toml.
+	Keyring map[string]string
 }
 
 // Source is a [source] block: upstream the build checks out before

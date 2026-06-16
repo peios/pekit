@@ -43,8 +43,14 @@ func extractRemoteSpec(args []string) (rest []string, spec string, ok bool) {
 		return args, "", false
 	}
 	for i := 1; i < len(args); i++ {
-		if args[i] == "--version" || args[i] == "-V" {
-			i++ // skip the flag's value
+		if args[i] == "--version" || args[i] == "-V" || args[i] == "--env" {
+			i++ // value-taking flag in space form: skip its value too
+			continue
+		}
+		// Any other flag is not a remote spec. Skipping all flags keeps a flag
+		// value that happens to look pathy (e.g. --keyring.tcb.priv=/a/b) from
+		// being misread as a recipe repo.
+		if strings.HasPrefix(args[i], "-") {
 			continue
 		}
 		if isRemoteSpec(args[i]) {
