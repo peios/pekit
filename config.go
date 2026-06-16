@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	semver "github.com/Masterminds/semver/v3"
@@ -45,6 +46,13 @@ type Config struct {
 	// Source, when set, is upstream source the build fetches and builds
 	// in instead of the project directory; nil = the cwd is the source.
 	Source *Source
+	// Wrap, when non-empty, is the [wrap] command template from the selected
+	// env file (env.pekit.toml / <name>.env.pekit.toml). It contains the
+	// placeholder {{command}}; each target's self-contained script is
+	// shell-quoted and substituted in, and the result is what runs. Empty =
+	// no wrapping (--env none, or no env file under the default --env main).
+	// Set by applyEnv, not parsed from pekit.toml.
+	Wrap string
 }
 
 // Source is a [source] block: upstream the build checks out before
@@ -111,6 +119,77 @@ func LoadConfig(path string, ver *Version) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// applyEnv resolves the --env selection into cfg.Wrap. envValue is "none"
+// (no wrap), "main" (env.pekit.toml, beside the recipe), or any other name
+// (<name>.env.pekit.toml). A missing file under the default "main" is a no-op;
+// a missing file for an explicitly-named env is an error.
+func applyEnv(cfg *Config, envValue string) error {
+	wrap, err := loadWrap(envValue)
+	if err != nil {
+		return err
+	}
+	cfg.Wrap = wrap
+	return nil
+}
+
+// loadWrap reads the [wrap] command template for the given --env value from the
+// env file beside the recipe.
+func loadWrap(envValue string) (string, error) {
+	if envValue == "none" {
+		return "", nil
+	}
+	path := "env.pekit.toml"
+	mainDefault := envValue == "main"
+	if !mainDefault {
+		path = envValue + ".env.pekit.toml"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// "main" is the default; a recipe with no env file just runs unwrapped.
+		// An explicitly-named env that is missing is a mistake.
+		if os.IsNotExist(err) && mainDefault {
+			return "", nil
+		}
+		return "", fmt.Errorf("--env %s: %w", envValue, err)
+	}
+	return parseWrap(path, string(data))
+}
+
+// parseWrap parses an env file. Its only supported content is a [wrap] section
+// with a command template that must contain {{command}}.
+func parseWrap(path, src string) (string, error) {
+	var raw map[string]any
+	if _, err := toml.Decode(src, &raw); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	for k := range raw {
+		if k != "wrap" {
+			return "", fmt.Errorf("%s: unknown section %q (only [wrap] is supported)", path, k)
+		}
+	}
+	wrapRaw, ok := raw["wrap"]
+	if !ok {
+		return "", fmt.Errorf("%s: missing [wrap] section", path)
+	}
+	wrapTable, ok := wrapRaw.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("%s: [wrap] must be a table", path)
+	}
+	for k := range wrapTable {
+		if k != "command" {
+			return "", fmt.Errorf("%s: [wrap] has unknown key %q (only command is supported)", path, k)
+		}
+	}
+	command, ok := wrapTable["command"].(string)
+	if !ok || command == "" {
+		return "", fmt.Errorf("%s: [wrap] command must be a non-empty string", path)
+	}
+	if !strings.Contains(command, "{{command}}") {
+		return "", fmt.Errorf("%s: [wrap] command must contain {{command}} (else it discards the wrapped command)", path)
+	}
+	return command, nil
 }
 
 // ParseConfig parses pekit.toml source. Every section comes in exactly one
