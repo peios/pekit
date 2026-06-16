@@ -132,7 +132,7 @@ func TestBuildPackagesUnknownName(t *testing.T) {
 		}
 	}
 	t.Chdir(dir)
-	_, _, err := buildPackages("locales", nil, false, noBuildSet{}, "none")
+	_, _, err := buildPackages("locales", nil, false, noBuildSet{}, "none", nil)
 	if err == nil || !strings.Contains(err.Error(), "no such package") {
 		t.Fatalf("err = %v, want a 'no such package' error", err)
 	}
@@ -150,7 +150,7 @@ func TestBuildPackagesNoNamedPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	_, _, err := buildPackages("libc", nil, false, noBuildSet{}, "none")
+	_, _, err := buildPackages("libc", nil, false, noBuildSet{}, "none", nil)
 	if err == nil || !strings.Contains(err.Error(), "no named packages") {
 		t.Fatalf("err = %v, want a 'no named packages' error", err)
 	}

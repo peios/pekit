@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] | pekit workspace <package|publish> <--all|--latest|--local>"
+const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] [--keyring.k=v ...] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] [--keyring.k=v ...] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -93,7 +93,7 @@ func run(args []string) error {
 			if ver == nil {
 				ver = localVersion()
 			}
-			return dispatch(args, ver, true, f.noBuild, f.env)
+			return dispatch(args, ver, true, f.noBuild, f.env, f.keyring)
 		}
 
 		// Working copy not present — fall back to remote instead of failing.
@@ -112,7 +112,7 @@ func run(args []string) error {
 			ver = v
 		}
 		fmt.Fprintf(os.Stderr, "pekit: warning: --local: %s; building %s from remote\n", localMissReason(src), ver.Full)
-		return dispatch(args, ver, false, f.noBuild, f.env)
+		return dispatch(args, ver, false, f.noBuild, f.env, f.keyring)
 	}
 
 	// pekit.built is consulted for the work-doing verbs (build/package/
@@ -151,7 +151,7 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
 			return nil
 		}
-		return dispatch(args, vers[0], false, f.noBuild, f.env)
+		return dispatch(args, vers[0], false, f.noBuild, f.env, f.keyring)
 	}
 
 	if len(vers) > 1 {
@@ -170,7 +170,7 @@ func run(args []string) error {
 			skipped++
 			continue
 		}
-		if err := dispatch(args, ver, false, f.noBuild, f.env); err != nil {
+		if err := dispatch(args, ver, false, f.noBuild, f.env, f.keyring); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
@@ -341,14 +341,14 @@ func inDir(dir string, fn func() error) error {
 	return fn()
 }
 
-func dispatch(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
+func dispatch(args []string, ver *Version, local bool, noBuild noBuildSet, env string, keyring map[string]string) error {
 	switch args[0] {
 	case "build", "test", "install":
-		return cmdVerb(args[0], args[1:], ver, local, noBuild, env)
+		return cmdVerb(args[0], args[1:], ver, local, noBuild, env, keyring)
 	case "package":
-		return cmdPackage(args[1:], ver, local, noBuild, env)
+		return cmdPackage(args[1:], ver, local, noBuild, env, keyring)
 	case "publish":
-		return cmdPublish(args[1:], ver, local, noBuild, env)
+		return cmdPublish(args[1:], ver, local, noBuild, env, keyring)
 	case "clean":
 		return cmdClean(args[1:], ver)
 	default:
@@ -365,6 +365,7 @@ type flags struct {
 	local      bool       // --local: build the [source] localpath working copy
 	noBuild    noBuildSet // --no-build[=t1,...]: reuse already-staged builds
 	env        string     // --env [main|none|<name>]: command-wrap selection (default main)
+	keyring    map[string]string // --keyring.<name>=<value>: injected env vars (PEKIT_KEYRING_<NAME>)
 }
 
 // noBuildSet records which build targets --no-build should reuse if they are
@@ -440,6 +441,22 @@ func extractFlags(args []string) ([]string, flags, error) {
 			i++
 		case strings.HasPrefix(a, "--env="):
 			f.env = strings.TrimPrefix(a, "--env=")
+		case strings.HasPrefix(a, "--keyring."):
+			// --keyring.<dotted.name>=<value> → exported as PEKIT_KEYRING_<NAME>
+			// (uppercased, non-alphanumerics to '_'). The value is opaque.
+			rest := strings.TrimPrefix(a, "--keyring.")
+			eq := strings.IndexByte(rest, '=')
+			if eq < 0 {
+				return nil, f, fmt.Errorf("%s requires a value (--keyring.<name>=<value>)", a)
+			}
+			path, value := rest[:eq], rest[eq+1:]
+			if path == "" {
+				return nil, f, fmt.Errorf("--keyring. requires a name (--keyring.<name>=<value>)")
+			}
+			if f.keyring == nil {
+				f.keyring = map[string]string{}
+			}
+			f.keyring["PEKIT_KEYRING_"+envTargetName(path)] = value
 		default:
 			// An unrecognised --flag is a mistake, not a positional: catch it
 			// here so it can't be silently swallowed as a target or package
@@ -464,7 +481,7 @@ func targetArg(args []string) (string, error) {
 	}
 }
 
-func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
+func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBuildSet, env string, keyring map[string]string) error {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return err
@@ -475,6 +492,7 @@ func cmdVerb(verb string, args []string, ver *Version, local bool, noBuild noBui
 	if err := applyEnv(cfg, env); err != nil {
 		return err
 	}
+	cfg.Keyring = keyring
 
 	targets, ok := cfg.Commands[verb]
 	if !ok {
@@ -674,6 +692,21 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	}
 	if len(target.Needs) > 0 {
 		fmt.Printf("pekit: needs: %s\n", strings.Join(target.Needs, ", "))
+	}
+
+	// Injected keyring values (--keyring.<name>=<value>) are exported like
+	// PEKIT_OUT — baked in so they survive a wrapped environment. The names are
+	// logged; the values are opaque and never printed.
+	if len(cfg.Keyring) > 0 {
+		names := make([]string, 0, len(cfg.Keyring))
+		for k := range cfg.Keyring {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			fmt.Fprintf(&b, "export %s=%s\n", k, shellQuote(cfg.Keyring[k]))
+		}
+		fmt.Printf("pekit: keyring: %s\n", strings.Join(names, ", "))
 	}
 
 	if len(cfg.Env) > 0 {
@@ -937,12 +970,12 @@ func envNames(env []EnvVar) []string {
 	return names
 }
 
-func cmdPackage(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
+func cmdPackage(args []string, ver *Version, local bool, noBuild noBuildSet, env string, keyring map[string]string) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
 	}
-	_, _, err = buildPackages(sel, ver, local, noBuild, env)
+	_, _, err = buildPackages(sel, ver, local, noBuild, env, keyring)
 	return err
 }
 
@@ -992,7 +1025,7 @@ type buildContext struct {
 // bare package.pekit.toml is the sole package (the original single-package
 // behaviour). Returns one result per package (for publish) and the workspace
 // root the recipe belongs to ("" if none).
-func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env string) ([]packResult, string, error) {
+func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env string, keyring map[string]string) ([]packResult, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return nil, "", err
@@ -1031,7 +1064,7 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env
 		}
 	}
 
-	bc, err := prepareBuild(wd, ver, local, env)
+	bc, err := prepareBuild(wd, ver, local, env, keyring)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1057,7 +1090,7 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env
 // recipe's own package.pekit.toml). The expensive parts — source fetch, and
 // later the build steps — happen once and are shared by every package the
 // recipe emits.
-func prepareBuild(wd string, ver *Version, local bool, env string) (*buildContext, error) {
+func prepareBuild(wd string, ver *Version, local bool, env string, keyring map[string]string) (*buildContext, error) {
 	cfg, err := LoadConfig("pekit.toml", ver)
 	if err != nil {
 		return nil, err
@@ -1068,6 +1101,7 @@ func prepareBuild(wd string, ver *Version, local bool, env string) (*buildContex
 	if err := applyEnv(cfg, env); err != nil {
 		return nil, err
 	}
+	cfg.Keyring = keyring
 
 	// The recipe's own package.pekit.toml, kept as a raw table so a partial
 	// override can be merged field-by-field below (a struct can't tell
@@ -1370,12 +1404,12 @@ func rawPackageName(raw map[string]any) string {
 // cmdPublish builds the selected package(s), then ships each artifact to its
 // own [publish] targets (usually inherited from the workspace root). A bare
 // `pekit publish` publishes every package the recipe defines.
-func cmdPublish(args []string, ver *Version, local bool, noBuild noBuildSet, env string) error {
+func cmdPublish(args []string, ver *Version, local bool, noBuild noBuildSet, env string, keyring map[string]string) error {
 	sel, err := packageSelector(args)
 	if err != nil {
 		return err
 	}
-	results, wsRoot, err := buildPackages(sel, ver, local, noBuild, env)
+	results, wsRoot, err := buildPackages(sel, ver, local, noBuild, env, keyring)
 	if err != nil {
 		return err
 	}
