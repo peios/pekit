@@ -127,12 +127,17 @@ func LoadConfig(path string, ver *Version) (*Config, error) {
 	return cfg, nil
 }
 
-// applyEnv resolves the --env selection into cfg.Wrap. envValue is "none"
-// (no wrap), "main" (env.pekit.toml, beside the recipe), or any other name
-// (<name>.env.pekit.toml). A missing file under the default "main" is a no-op;
-// a missing file for an explicitly-named env is an error.
-func applyEnv(cfg *Config, envValue string) error {
-	wrap, err := loadWrap(envValue)
+// applyEnv resolves the --env selection into cfg.Wrap, searching dirs in
+// precedence order (recipe dir first, then — in delegate mode — the fetched
+// source tree). envValue is "none" (no wrap), "main" (env.pekit.toml), or any
+// other name (<name>.env.pekit.toml). A missing file under the default "main"
+// is a no-op; a missing explicitly-named env (in every dir) is an error. With
+// no dirs given, the current directory is searched.
+func applyEnv(cfg *Config, envValue string, dirs ...string) error {
+	if len(dirs) == 0 {
+		dirs = []string{"."}
+	}
+	wrap, err := resolveWrap(envValue, dirs...)
 	if err != nil {
 		return err
 	}
@@ -140,27 +145,49 @@ func applyEnv(cfg *Config, envValue string) error {
 	return nil
 }
 
-// loadWrap reads the [wrap] command template for the given --env value from the
-// env file beside the recipe.
-func loadWrap(envValue string) (string, error) {
+// resolveWrap finds the [wrap] command template for envValue by searching dirs
+// in order; the first that has the env file wins.
+func resolveWrap(envValue string, dirs ...string) (string, error) {
 	if envValue == "none" {
 		return "", nil
 	}
-	path := "env.pekit.toml"
-	mainDefault := envValue == "main"
-	if !mainDefault {
-		path = envValue + ".env.pekit.toml"
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// "main" is the default; a recipe with no env file just runs unwrapped.
-		// An explicitly-named env that is missing is a mistake.
-		if os.IsNotExist(err) && mainDefault {
-			return "", nil
+	for _, dir := range dirs {
+		wrap, found, err := loadWrapIn(dir, envValue)
+		if err != nil {
+			return "", err
 		}
-		return "", fmt.Errorf("--env %s: %w", envValue, err)
+		if found {
+			return wrap, nil
+		}
 	}
-	return parseWrap(path, string(data))
+	// "main" is the default; no env file anywhere just runs unwrapped. An
+	// explicitly-named env that is missing everywhere is a mistake.
+	if envValue == "main" {
+		return "", nil
+	}
+	return "", fmt.Errorf("--env %s: no %s.env.pekit.toml found", envValue, envValue)
+}
+
+// loadWrapIn reads the env file for envValue from dir. found is whether the file
+// exists; a parse error propagates (with found true).
+func loadWrapIn(dir, envValue string) (wrap string, found bool, err error) {
+	name := "env.pekit.toml"
+	if envValue != "main" {
+		name = envValue + ".env.pekit.toml"
+	}
+	path := filepath.Join(dir, name)
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return "", false, nil
+		}
+		return "", false, rerr
+	}
+	w, perr := parseWrap(path, string(data))
+	if perr != nil {
+		return "", true, perr
+	}
+	return w, true, nil
 }
 
 // parseWrap parses an env file. Its only supported content is a [wrap] section
