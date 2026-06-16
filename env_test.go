@@ -156,6 +156,62 @@ func TestWrapBakesPekitOutThroughScrubbedEnv(t *testing.T) {
 	}
 }
 
+// TestPekitRootExportedToCommand: PEKIT_ROOT (= absolute outBase) is exported
+// into the command, so a build can reference it.
+func TestPekitRootExportedToCommand(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cfg := &Config{
+		OutDir:   "out",
+		ClearOut: true,
+		Commands: map[string]map[string]Target{
+			"build": {"main": {Command: `echo "$PEKIT_ROOT" > "$PEKIT_OUT/r"`}},
+		},
+	}
+	if err := runTarget(cfg, "build", "main", nil, noBuildSet{}); err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("out", "build", "main", "r"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.Abs("out")
+	if strings.TrimSpace(string(data)) != want {
+		t.Errorf("PEKIT_ROOT = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+}
+
+// TestPekitRootInWrapOuterEnv is the core of the feature: PEKIT_ROOT is visible
+// to the [wrap] template *itself* (its outer environment), not just inside the
+// wrapped script — so a wrap can `-v "$PEKIT_ROOT":...`. The wrap references
+// $PEKIT_ROOT before invoking the command; under sh -u an unset value would
+// error, so a clean run proves the outer env carries it.
+func TestPekitRootInWrapOuterEnv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cfg := &Config{
+		OutDir:   "out",
+		ClearOut: true,
+		Wrap:     `mkdir -p "$PEKIT_ROOT/wrapmark" && sh -euc {{command}}`,
+		Commands: map[string]map[string]Target{
+			"build": {"main": {Command: "true"}},
+		},
+	}
+	if err := runTarget(cfg, "build", "main", nil, noBuildSet{}); err != nil {
+		t.Fatalf("wrap referencing $PEKIT_ROOT failed: %v", err)
+	}
+	mark, _ := filepath.Abs(filepath.Join("out", "wrapmark"))
+	if st, err := os.Stat(mark); err != nil || !st.IsDir() {
+		t.Errorf("the wrap did not see $PEKIT_ROOT in its outer env: %v", err)
+	}
+}
+
+// TestPekitRootReservedInEnv: a user [env] cannot shadow PEKIT_ROOT.
+func TestPekitRootReservedInEnv(t *testing.T) {
+	_, err := ParseConfig("[env]\nPEKIT_ROOT = \"x\"\n")
+	if err == nil || !strings.Contains(err.Error(), "PEKIT_ROOT") {
+		t.Fatalf("err = %v, want a PEKIT_ROOT-reserved error", err)
+	}
+}
+
 // TestWrapHandlesSingleQuotedCommand: a command containing single quotes (e.g.
 // glibc's `echo 'rootsbindir=…'`) must run correctly when shell-quoted into the
 // wrap template.

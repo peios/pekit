@@ -741,6 +741,22 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	var b strings.Builder
 	var workdir, stageDir string
 
+	// PEKIT_ROOT is the per-build root (outBase): it contains both the source
+	// checkout and every build/<stage> output for this invocation. Exported for
+	// all verbs (not just build) so a [wrap] can bind-mount the whole build tree
+	// — in delegate mode CWD is the source checkout while outputs live in a
+	// sibling dir, so $PWD alone misses them. Unlike the inner exports, it must
+	// also reach the wrap's *outer* environment (see cmd.Env below).
+	var root string
+	if cfg.OutDir != "" {
+		var aerr error
+		if root, aerr = filepath.Abs(outBase(cfg)); aerr != nil {
+			return aerr
+		}
+		fmt.Printf("pekit: root: %s\n", root)
+		fmt.Fprintf(&b, "export PEKIT_ROOT=%s\n", shellQuote(root))
+	}
+
 	// Source checkout + PEKIT_OUT staging are build-only.
 	if verb == "build" && cfg.OutDir != "" {
 		if cfg.Source != nil {
@@ -813,6 +829,12 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
+	// PEKIT_ROOT also goes in the wrap's OUTER env so the [wrap] template itself
+	// (e.g. docker run -v "$PEKIT_ROOT":"$PEKIT_ROOT") can reference it — the
+	// inner exports above are invisible to the wrap command.
+	if root != "" {
+		cmd.Env = append(cmd.Env, "PEKIT_ROOT="+root)
+	}
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
