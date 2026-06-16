@@ -55,8 +55,13 @@ func run(args []string) error {
 	}
 
 	// Resolve --keyring=<file> / --keyring.<a.b>=<v> into the injected env map
-	// once, from the invocation directory (where the keyring files live).
-	kr, err := resolveKeyring(f.keyring)
+	// once, searching the current dir then the workspace root (so a workspace-
+	// level keyring file is found from any member).
+	kdirs, err := keyringDirs()
+	if err != nil {
+		return err
+	}
+	kr, err := resolveKeyring(f.keyring, kdirs...)
 	if err != nil {
 		return err
 	}
@@ -252,7 +257,11 @@ func cmdWorkspace(args []string) error {
 	if err != nil {
 		return err
 	}
-	keyring, err := resolveKeyring(kf.keyring)
+	kdirs, err := keyringDirs()
+	if err != nil {
+		return err
+	}
+	keyring, err := resolveKeyring(kf.keyring, kdirs...)
 	if err != nil {
 		return err
 	}
@@ -368,6 +377,26 @@ func cmdWorkspace(args []string) error {
 		return fmt.Errorf("%d of %d members failed: %s", len(failed), len(members), strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// keyringDirs returns the directories searched for keyring files: the current
+// directory first, then the workspace root (the nearest ancestor holding a
+// workspace.pekit.toml) when that differs — so a workspace-level keyring file
+// is found from any member while a recipe-local one still wins.
+func keyringDirs() ([]string, error) {
+	dirs := []string{"."}
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	root, found, err := findWorkspaceRoot(wd)
+	if err != nil {
+		return nil, err
+	}
+	if found && root != wd {
+		dirs = append(dirs, root)
+	}
+	return dirs, nil
 }
 
 // inDir runs fn with the process working directory changed to dir, then
