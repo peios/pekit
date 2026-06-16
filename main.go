@@ -205,7 +205,7 @@ func run(args []string) error {
 // so this is pure orchestration over the existing verbs.
 func cmdWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: pekit workspace <package|publish> <--all|--latest|--local> [--remember-built] [--bust]")
+		return errors.New("usage: pekit workspace <package|publish> <--all|--latest|--local> [--remember-built] [--bust] [--env name] [--keyring=file] [--keyring.k=v ...]")
 	}
 	verb := args[0]
 	if verb != "package" && verb != "publish" {
@@ -213,22 +213,59 @@ func cmdWorkspace(args []string) error {
 	}
 
 	var all, latest, local, remember, bust bool
-	for _, a := range args[1:] {
-		switch a {
-		case "--all":
+	var keyringArgs []string
+	var envArg []string // the --env passthrough, applied to each member
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--all":
 			all = true
-		case "--latest":
+		case a == "--latest":
 			latest = true
-		case "--local":
+		case a == "--local":
 			local = true
-		case "--remember-built":
+		case a == "--remember-built":
 			remember = true
-		case "--bust":
+		case a == "--bust":
 			bust = true
+		case a == "--env":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", a)
+			}
+			envArg = []string{"--env", args[i+1]}
+			i++
+		case strings.HasPrefix(a, "--env="):
+			envArg = []string{a}
+		case strings.HasPrefix(a, "--keyring.") || strings.HasPrefix(a, "--keyring="):
+			keyringArgs = append(keyringArgs, a)
 		default:
 			return fmt.Errorf("pekit workspace: unknown flag %q", a)
 		}
 	}
+
+	// Resolve --keyring once, here at the workspace root, so a --keyring=<file>
+	// is read from this directory rather than re-looked-up inside each member's
+	// dir during the fan-out. The resolved values are handed to members as
+	// individual --keyring.<NAME>=<value> flags (cwd-independent literals).
+	// extractFlags is the single source of truth for --keyring parsing.
+	_, kf, err := extractFlags(append([]string{verb}, keyringArgs...))
+	if err != nil {
+		return err
+	}
+	keyring, err := resolveKeyring(kf.keyring)
+	if err != nil {
+		return err
+	}
+	var keyringFlags []string
+	for k, v := range keyring {
+		keyringFlags = append(keyringFlags, "--keyring."+strings.TrimPrefix(k, "PEKIT_KEYRING_")+"="+v)
+	}
+	sort.Strings(keyringFlags)
+
+	// passthrough flags handed to every member's per-recipe run: the --env
+	// selection (each member resolves it in its own dir, with source fallback)
+	// and the workspace-resolved keyring values.
+	passthrough := append(append([]string{}, envArg...), keyringFlags...)
 	modes := 0
 	for _, on := range []bool{all, latest, local} {
 		if on {
@@ -286,7 +323,7 @@ func cmdWorkspace(args []string) error {
 		fmt.Fprintf(os.Stderr, "pekit: ── %s ──\n", name)
 		err := inDir(m, func() error {
 			if local {
-				return run([]string{verb, "--local"})
+				return run(append([]string{verb, "--local"}, passthrough...))
 			}
 			// Sourceless members (a buildless package like fsbase/live-boot,
 			// whose version is pinned in its package file) have no upstream
@@ -302,7 +339,7 @@ func cmdWorkspace(args []string) error {
 				if remember {
 					fmt.Fprintf(os.Stderr, "pekit: %s: no [source]; building its fixed version (--remember-built does not apply)\n", name)
 				}
-				return run([]string{verb})
+				return run(append([]string{verb}, passthrough...))
 			}
 			sel := "*"
 			if latest {
@@ -319,6 +356,7 @@ func cmdWorkspace(args []string) error {
 			if bust {
 				inner = append(inner, "--bust")
 			}
+			inner = append(inner, passthrough...)
 			return run(inner)
 		})
 		if err != nil {
