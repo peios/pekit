@@ -236,11 +236,16 @@ type keyringSpec struct {
 
 // resolveKeyring loads the named keyring files (left-to-right, later overriding
 // earlier) and overlays the individual --keyring flags on top, yielding the
-// env-var map baked into every command. Returns nil when nothing was selected.
-func resolveKeyring(spec keyringSpec) (map[string]string, error) {
+// env-var map baked into every command. Each file is found by searching dirs in
+// order (current dir first, then the workspace root). Returns nil when nothing
+// was selected; with no dirs the current directory is searched.
+func resolveKeyring(spec keyringSpec, dirs ...string) (map[string]string, error) {
+	if len(dirs) == 0 {
+		dirs = []string{"."}
+	}
 	out := map[string]string{}
 	for _, name := range spec.files {
-		m, err := loadKeyringFile(name)
+		m, err := loadKeyringFile(name, dirs)
 		if err != nil {
 			return nil, err
 		}
@@ -257,25 +262,32 @@ func resolveKeyring(spec keyringSpec) (map[string]string, error) {
 	return out, nil
 }
 
-// loadKeyringFile reads <name>.keyring.pekit.toml beside the recipe and flattens
-// it to a PEKIT_KEYRING_<NAME> map. Each string leaf becomes one var, keyed by
-// its dotted path: [tcb] pub = "x" -> PEKIT_KEYRING_TCB_PUB; [tcb] priv.path =
-// "y" -> PEKIT_KEYRING_TCB_PRIV_PATH.
-func loadKeyringFile(name string) (map[string]string, error) {
-	path := name + ".keyring.pekit.toml"
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("--keyring=%s: %w", name, err)
+// loadKeyringFile finds <name>.keyring.pekit.toml by searching dirs in order
+// (the first that has it wins) and flattens it to a PEKIT_KEYRING_<NAME> map.
+// Each string leaf becomes one var, keyed by its dotted path: [tcb] pub = "x"
+// -> PEKIT_KEYRING_TCB_PUB; [tcb] priv.path = "y" -> PEKIT_KEYRING_TCB_PRIV_PATH.
+func loadKeyringFile(name string, dirs []string) (map[string]string, error) {
+	fname := name + ".keyring.pekit.toml"
+	for _, dir := range dirs {
+		path := filepath.Join(dir, fname)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // not here; try the next search dir
+			}
+			return nil, fmt.Errorf("--keyring=%s: %w", name, err)
+		}
+		var raw map[string]any
+		if _, err := toml.Decode(string(data), &raw); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		out := map[string]string{}
+		if err := flattenKeyring(path, "", raw, out); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
-	var raw map[string]any
-	if _, err := toml.Decode(string(data), &raw); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	out := map[string]string{}
-	if err := flattenKeyring(path, "", raw, out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return nil, fmt.Errorf("--keyring=%s: no %s found (searched %s)", name, fname, strings.Join(dirs, ", "))
 }
 
 // flattenKeyring walks a decoded keyring table, emitting PEKIT_KEYRING_<NAME>

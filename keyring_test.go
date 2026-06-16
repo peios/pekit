@@ -103,6 +103,74 @@ pub = "Q"
 	}
 }
 
+func TestKeyringSearchDirs(t *testing.T) {
+	root := t.TempDir()
+	member := filepath.Join(root, "m1")
+	if err := os.MkdirAll(member, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// File only at the workspace root → found via the second search dir.
+	if err := os.WriteFile(filepath.Join(root, "prod.keyring.pekit.toml"), []byte("[tcb]\npub = \"ROOT\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := resolveKeyring(keyringSpec{files: []string{"prod"}}, member, root)
+	if err != nil || m["PEKIT_KEYRING_TCB_PUB"] != "ROOT" {
+		t.Fatalf("root search = %v (err %v), want ROOT", m, err)
+	}
+	// A member-local file wins over the root.
+	if err := os.WriteFile(filepath.Join(member, "prod.keyring.pekit.toml"), []byte("[tcb]\npub = \"LOCAL\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err = resolveKeyring(keyringSpec{files: []string{"prod"}}, member, root)
+	if err != nil || m["PEKIT_KEYRING_TCB_PUB"] != "LOCAL" {
+		t.Fatalf("member precedence = %v (err %v), want LOCAL", m, err)
+	}
+}
+
+func TestKeyringDirs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "workspace.pekit.toml"), []byte("include = \"./*\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	member := filepath.Join(root, "m1")
+	if err := os.MkdirAll(member, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// From a member: search the current dir, then the workspace root.
+	t.Chdir(member)
+	dirs, err := keyringDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 2 || dirs[0] != "." {
+		t.Fatalf("member dirs = %v, want [. <root>]", dirs)
+	}
+	if _, err := os.Stat(filepath.Join(dirs[1], "workspace.pekit.toml")); err != nil {
+		t.Errorf("dirs[1] = %s should be the workspace root", dirs[1])
+	}
+
+	// At the workspace root itself: just the current dir (no duplicate).
+	t.Chdir(root)
+	dirs, err = keyringDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0] != "." {
+		t.Errorf("root dirs = %v, want [.]", dirs)
+	}
+
+	// Outside any workspace: just the current dir.
+	t.Chdir(t.TempDir())
+	dirs, err = keyringDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0] != "." {
+		t.Errorf("no-workspace dirs = %v, want [.]", dirs)
+	}
+}
+
 // TestRemoteSpecIgnoresFlags: a pathy --keyring value must not be mistaken for
 // a remote recipe spec (extractRemoteSpec runs on raw args, before flags are
 // parsed).
