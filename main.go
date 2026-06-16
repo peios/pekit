@@ -1143,10 +1143,9 @@ func prepareBuild(wd string, ver *Version, local bool, env string, keyring map[s
 	if err := applyLocal(cfg, local); err != nil {
 		return nil, err
 	}
-	if err := applyEnv(cfg, env); err != nil {
-		return nil, err
-	}
 	cfg.Keyring = keyring
+	// The env wrap is resolved at the end, once the source tree is fetched, so
+	// it can fall back to the source like [build]/[env] do.
 
 	// The recipe's own package.pekit.toml, kept as a raw table so a partial
 	// override can be merged field-by-field below (a struct can't tell
@@ -1218,6 +1217,17 @@ func prepareBuild(wd string, ver *Version, local bool, env string, keyring map[s
 		if srcRaw, _, err = decodePackageFile(recipePackageFile(checkout), ver); err != nil {
 			return nil, err
 		}
+	}
+
+	// Resolve the env wrap: recipe dir first, then the fetched source tree in
+	// delegate mode (literalRoot is the checkout there), so a self-describing
+	// source can carry its own build environment while the recipe still wins.
+	envDirs := []string{wd}
+	if cfg.Source != nil {
+		envDirs = append(envDirs, literalRoot)
+	}
+	if err := applyEnv(cfg, env, envDirs...); err != nil {
+		return nil, err
 	}
 
 	return &buildContext{

@@ -45,21 +45,21 @@ command = ""
 	}
 }
 
-func TestLoadWrap(t *testing.T) {
+func TestResolveWrap(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	// none → never wraps, never reads a file.
-	if w, err := loadWrap("none"); err != nil || w != "" {
+	if w, err := resolveWrap("none", "."); err != nil || w != "" {
 		t.Errorf("none = (%q,%v), want (\"\",nil)", w, err)
 	}
 
 	// main with no env.pekit.toml → silent no-op (main is the default).
-	if w, err := loadWrap("main"); err != nil || w != "" {
+	if w, err := resolveWrap("main", "."); err != nil || w != "" {
 		t.Errorf("missing main = (%q,%v), want (\"\",nil)", w, err)
 	}
 
 	// An explicitly-named env that is missing → error.
-	if _, err := loadWrap("ci"); err == nil {
+	if _, err := resolveWrap("ci", "."); err == nil {
 		t.Error("a missing named env file should error")
 	}
 
@@ -67,7 +67,7 @@ func TestLoadWrap(t *testing.T) {
 	if err := os.WriteFile("env.pekit.toml", []byte("[wrap]\ncommand = \"w {{command}}\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if w, err := loadWrap("main"); err != nil || w != "w {{command}}" {
+	if w, err := resolveWrap("main", "."); err != nil || w != "w {{command}}" {
 		t.Errorf("main = (%q,%v), want (\"w {{command}}\",nil)", w, err)
 	}
 
@@ -75,8 +75,46 @@ func TestLoadWrap(t *testing.T) {
 	if err := os.WriteFile("ci.env.pekit.toml", []byte("[wrap]\ncommand = \"ci {{command}}\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if w, err := loadWrap("ci"); err != nil || w != "ci {{command}}" {
+	if w, err := resolveWrap("ci", "."); err != nil || w != "ci {{command}}" {
 		t.Errorf("ci = (%q,%v), want (\"ci {{command}}\",nil)", w, err)
+	}
+}
+
+// TestResolveWrapFallback: search order is first-dir-wins, with a later dir
+// (the source tree, in delegate mode) used as a fallback.
+func TestResolveWrapFallback(t *testing.T) {
+	root := t.TempDir()
+	recipe := filepath.Join(root, "recipe")
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(recipe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the source has the env file → it is used (the fallback).
+	if err := os.WriteFile(filepath.Join(src, "env.pekit.toml"), []byte("[wrap]\ncommand = \"src {{command}}\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := resolveWrap("main", recipe, src); err != nil || w != "src {{command}}" {
+		t.Errorf("fallback = (%q,%v), want source wrap", w, err)
+	}
+
+	// The recipe's own env file wins over the source's.
+	if err := os.WriteFile(filepath.Join(recipe, "env.pekit.toml"), []byte("[wrap]\ncommand = \"recipe {{command}}\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := resolveWrap("main", recipe, src); err != nil || w != "recipe {{command}}" {
+		t.Errorf("precedence = (%q,%v), want recipe wrap", w, err)
+	}
+
+	// A named env file (<name>.env.pekit.toml) falls back to the source too.
+	if err := os.WriteFile(filepath.Join(src, "ci.env.pekit.toml"), []byte("[wrap]\ncommand = \"src-ci {{command}}\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := resolveWrap("ci", recipe, src); err != nil || w != "src-ci {{command}}" {
+		t.Errorf("named fallback = (%q,%v), want source ci wrap", w, err)
 	}
 }
 
