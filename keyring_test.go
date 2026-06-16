@@ -15,17 +15,26 @@ func TestExtractFlagsKeyring(t *testing.T) {
 	if len(rest) != 1 || rest[0] != "build" {
 		t.Errorf("rest = %v, want [build]", rest)
 	}
-	if f.keyring["PEKIT_KEYRING_TCB_PRIV"] != "/secure/key.pem" {
-		t.Errorf("priv = %q, want /secure/key.pem", f.keyring["PEKIT_KEYRING_TCB_PRIV"])
+	if f.keyring.vars["PEKIT_KEYRING_TCB_PRIV"] != "/secure/key.pem" {
+		t.Errorf("priv = %q, want /secure/key.pem", f.keyring.vars["PEKIT_KEYRING_TCB_PRIV"])
 	}
-	if f.keyring["PEKIT_KEYRING_TCB_PUB"] != "ABCD" {
-		t.Errorf("pub = %q, want ABCD", f.keyring["PEKIT_KEYRING_TCB_PUB"])
+	if f.keyring.vars["PEKIT_KEYRING_TCB_PUB"] != "ABCD" {
+		t.Errorf("pub = %q, want ABCD", f.keyring.vars["PEKIT_KEYRING_TCB_PUB"])
 	}
 
 	// A value may contain '='.
 	_, f, err = extractFlags([]string{"build", "--keyring.token=a=b=c"})
-	if err != nil || f.keyring["PEKIT_KEYRING_TOKEN"] != "a=b=c" {
-		t.Errorf("value-with-= parsed as %q (err %v)", f.keyring["PEKIT_KEYRING_TOKEN"], err)
+	if err != nil || f.keyring.vars["PEKIT_KEYRING_TOKEN"] != "a=b=c" {
+		t.Errorf("value-with-= parsed as %q (err %v)", f.keyring.vars["PEKIT_KEYRING_TOKEN"], err)
+	}
+
+	// --keyring=<file> records a file to load.
+	_, f, err = extractFlags([]string{"build", "--keyring=prod"})
+	if err != nil || len(f.keyring.files) != 1 || f.keyring.files[0] != "prod" {
+		t.Errorf("--keyring=prod files=%v err=%v", f.keyring.files, err)
+	}
+	if _, _, err := extractFlags([]string{"build", "--keyring="}); err == nil {
+		t.Error("--keyring= with an empty name should error")
 	}
 
 	// Missing value / missing name are errors.
@@ -34,6 +43,63 @@ func TestExtractFlagsKeyring(t *testing.T) {
 	}
 	if _, _, err := extractFlags([]string{"build", "--keyring.=v"}); err == nil {
 		t.Error("--keyring.=v with an empty name should error")
+	}
+}
+
+func TestKeyringFileFlattenAndPrecedence(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("x.keyring.pekit.toml", []byte(`
+[tcb]
+priv.path = "/secrets/tcb.pem"
+pub = "DEAD"
+
+[otherkey]
+priv = "P"
+pub = "Q"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// --keyring=x flattens nested keys to PEKIT_KEYRING_<DOTTED_PATH>.
+	m, err := resolveKeyring(keyringSpec{files: []string{"x"}})
+	if err != nil {
+		t.Fatalf("resolveKeyring: %v", err)
+	}
+	want := map[string]string{
+		"PEKIT_KEYRING_TCB_PRIV_PATH": "/secrets/tcb.pem",
+		"PEKIT_KEYRING_TCB_PUB":       "DEAD",
+		"PEKIT_KEYRING_OTHERKEY_PRIV": "P",
+		"PEKIT_KEYRING_OTHERKEY_PUB":  "Q",
+	}
+	for k, v := range want {
+		if m[k] != v {
+			t.Errorf("%s = %q, want %q", k, m[k], v)
+		}
+	}
+
+	// An individual --keyring flag overrides a file value.
+	m, err = resolveKeyring(keyringSpec{
+		files: []string{"x"},
+		vars:  map[string]string{"PEKIT_KEYRING_TCB_PUB": "BEEF"},
+	})
+	if err != nil {
+		t.Fatalf("resolveKeyring: %v", err)
+	}
+	if m["PEKIT_KEYRING_TCB_PUB"] != "BEEF" {
+		t.Errorf("override = %q, want BEEF (CLI must beat file)", m["PEKIT_KEYRING_TCB_PUB"])
+	}
+
+	// A missing file errors.
+	if _, err := resolveKeyring(keyringSpec{files: []string{"nope"}}); err == nil {
+		t.Error("a missing keyring file should error")
+	}
+
+	// A non-string leaf errors.
+	if err := os.WriteFile("bad.keyring.pekit.toml", []byte("[k]\nn = 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveKeyring(keyringSpec{files: []string{"bad"}}); err == nil {
+		t.Error("a non-string keyring leaf should error")
 	}
 }
 

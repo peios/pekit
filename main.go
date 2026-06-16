@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] [--keyring.k=v ...] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] [--keyring.k=v ...] | pekit workspace <package|publish> <--all|--latest|--local>"
+const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] [--keyring=file] [--keyring.k=v ...] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] [--keyring=file] [--keyring.k=v ...] | pekit workspace <package|publish> <--all|--latest|--local>"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -55,6 +55,13 @@ func run(args []string) error {
 		return fmt.Errorf("--no-build does not apply to clean")
 	}
 
+	// Resolve --keyring=<file> / --keyring.<a.b>=<v> into the injected env map
+	// once, from the invocation directory (where the keyring files live).
+	kr, err := resolveKeyring(f.keyring)
+	if err != nil {
+		return err
+	}
+
 	// Local mode: PREFER the [source] working copy, fall back to remote.
 	// Source selection (--local) and version numbering (--version) are
 	// independent — --version only restamps and never drags a local build
@@ -93,7 +100,7 @@ func run(args []string) error {
 			if ver == nil {
 				ver = localVersion()
 			}
-			return dispatch(args, ver, true, f.noBuild, f.env, f.keyring)
+			return dispatch(args, ver, true, f.noBuild, f.env, kr)
 		}
 
 		// Working copy not present — fall back to remote instead of failing.
@@ -112,7 +119,7 @@ func run(args []string) error {
 			ver = v
 		}
 		fmt.Fprintf(os.Stderr, "pekit: warning: --local: %s; building %s from remote\n", localMissReason(src), ver.Full)
-		return dispatch(args, ver, false, f.noBuild, f.env, f.keyring)
+		return dispatch(args, ver, false, f.noBuild, f.env, kr)
 	}
 
 	// pekit.built is consulted for the work-doing verbs (build/package/
@@ -151,7 +158,7 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stderr, "pekit: %s already built, skipping (--bust to rebuild)\n", vers[0].Full)
 			return nil
 		}
-		return dispatch(args, vers[0], false, f.noBuild, f.env, f.keyring)
+		return dispatch(args, vers[0], false, f.noBuild, f.env, kr)
 	}
 
 	if len(vers) > 1 {
@@ -170,7 +177,7 @@ func run(args []string) error {
 			skipped++
 			continue
 		}
-		if err := dispatch(args, ver, false, f.noBuild, f.env, f.keyring); err != nil {
+		if err := dispatch(args, ver, false, f.noBuild, f.env, kr); err != nil {
 			failed = append(failed, ver.Full)
 			fmt.Fprintf(os.Stderr, "pekit: %s failed: %v\n", ver.Full, err)
 			continue
@@ -364,8 +371,8 @@ type flags struct {
 	bust       bool // --bust: rebuild even if the ledger says built
 	local      bool       // --local: build the [source] localpath working copy
 	noBuild    noBuildSet // --no-build[=t1,...]: reuse already-staged builds
-	env        string     // --env [main|none|<name>]: command-wrap selection (default main)
-	keyring    map[string]string // --keyring.<name>=<value>: injected env vars (PEKIT_KEYRING_<NAME>)
+	env        string      // --env [main|none|<name>]: command-wrap selection (default main)
+	keyring    keyringSpec // --keyring=<file> and --keyring.<a.b>=<value>
 }
 
 // noBuildSet records which build targets --no-build should reuse if they are
@@ -441,6 +448,13 @@ func extractFlags(args []string) ([]string, flags, error) {
 			i++
 		case strings.HasPrefix(a, "--env="):
 			f.env = strings.TrimPrefix(a, "--env=")
+		case strings.HasPrefix(a, "--keyring="):
+			// --keyring=<name> loads <name>.keyring.pekit.toml beside the recipe.
+			name := strings.TrimPrefix(a, "--keyring=")
+			if name == "" {
+				return nil, f, fmt.Errorf("--keyring= requires a name (--keyring=<file>)")
+			}
+			f.keyring.files = append(f.keyring.files, name)
 		case strings.HasPrefix(a, "--keyring."):
 			// --keyring.<dotted.name>=<value> → exported as PEKIT_KEYRING_<NAME>
 			// (uppercased, non-alphanumerics to '_'). The value is opaque.
@@ -453,10 +467,10 @@ func extractFlags(args []string) ([]string, flags, error) {
 			if path == "" {
 				return nil, f, fmt.Errorf("--keyring. requires a name (--keyring.<name>=<value>)")
 			}
-			if f.keyring == nil {
-				f.keyring = map[string]string{}
+			if f.keyring.vars == nil {
+				f.keyring.vars = map[string]string{}
 			}
-			f.keyring["PEKIT_KEYRING_"+envTargetName(path)] = value
+			f.keyring.vars["PEKIT_KEYRING_"+envTargetName(path)] = value
 		default:
 			// An unrecognised --flag is a mistake, not a positional: catch it
 			// here so it can't be silently swallowed as a target or package

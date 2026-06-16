@@ -198,6 +198,82 @@ func parseWrap(path, src string) (string, error) {
 	return command, nil
 }
 
+// keyringSpec is the keyring selection from the command line: zero or more
+// <name>.keyring.pekit.toml files (--keyring=<name>) plus individual
+// --keyring.<a.b>=<value> overrides. resolveKeyring turns it into the final
+// PEKIT_KEYRING_<NAME> env-var map.
+type keyringSpec struct {
+	files []string          // <name>, in order; loads <name>.keyring.pekit.toml
+	vars  map[string]string // PEKIT_KEYRING_<NAME> -> value, from --keyring.<a.b>=<v>
+}
+
+// resolveKeyring loads the named keyring files (left-to-right, later overriding
+// earlier) and overlays the individual --keyring flags on top, yielding the
+// env-var map baked into every command. Returns nil when nothing was selected.
+func resolveKeyring(spec keyringSpec) (map[string]string, error) {
+	out := map[string]string{}
+	for _, name := range spec.files {
+		m, err := loadKeyringFile(name)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	for k, v := range spec.vars {
+		out[k] = v // an explicit --keyring.a.b=v overrides a file value
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// loadKeyringFile reads <name>.keyring.pekit.toml beside the recipe and flattens
+// it to a PEKIT_KEYRING_<NAME> map. Each string leaf becomes one var, keyed by
+// its dotted path: [tcb] pub = "x" -> PEKIT_KEYRING_TCB_PUB; [tcb] priv.path =
+// "y" -> PEKIT_KEYRING_TCB_PRIV_PATH.
+func loadKeyringFile(name string) (map[string]string, error) {
+	path := name + ".keyring.pekit.toml"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("--keyring=%s: %w", name, err)
+	}
+	var raw map[string]any
+	if _, err := toml.Decode(string(data), &raw); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	out := map[string]string{}
+	if err := flattenKeyring(path, "", raw, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// flattenKeyring walks a decoded keyring table, emitting PEKIT_KEYRING_<NAME>
+// for each string leaf (name = dotted key path, uppercased, non-alphanumerics
+// to '_'). Tables recurse; any other leaf type is an error.
+func flattenKeyring(path, prefix string, m map[string]any, out map[string]string) error {
+	for _, k := range sortedKeys(m) {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		switch val := m[k].(type) {
+		case string:
+			out["PEKIT_KEYRING_"+envTargetName(key)] = val
+		case map[string]any:
+			if err := flattenKeyring(path, key, val, out); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%s: key %q must be a string or table, got %T", path, key, val)
+		}
+	}
+	return nil
+}
+
 // ParseConfig parses pekit.toml source. Every section comes in exactly one
 // of two shapes: bare ([build] with fields directly on it, sugar for a
 // single target named "main") or named ([build.<name>] subtables). Mixing
