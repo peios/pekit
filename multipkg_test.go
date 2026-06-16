@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -203,10 +204,13 @@ func TestPackageSelector(t *testing.T) {
 }
 
 // TestBuildPackagesUnknownName drives buildPackages far enough to hit the
-// selection error: a name that no member file provides is rejected (before
-// any source fetch) with the available members listed.
+// selection error: a name that no member file provides is rejected with the
+// available members listed.
 func TestBuildPackagesUnknownName(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pekit.toml"), []byte("outDir = \"out\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, m := range []string{"libc.package.pekit.toml", "libc-dev.package.pekit.toml"} {
 		if err := os.WriteFile(filepath.Join(dir, m), []byte("format=\"tar\"\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -227,6 +231,9 @@ func TestBuildPackagesUnknownName(t *testing.T) {
 // of the standalone package.
 func TestBuildPackagesNoNamedPackages(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pekit.toml"), []byte("outDir = \"out\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "package.pekit.toml"), []byte("format=\"tar\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +241,56 @@ func TestBuildPackagesNoNamedPackages(t *testing.T) {
 	_, _, err := buildPackages("libc", nil, false, noBuildSet{}, "none", nil)
 	if err == nil || !strings.Contains(err.Error(), "no named packages") {
 		t.Fatalf("err = %v, want a 'no named packages' error", err)
+	}
+}
+
+// TestDelegateMultiPackage: a pure-delegate recipe ([source] only) builds ALL
+// of the upstream's package members, discovered from the fetched source tree —
+// not just the bare base.
+func TestDelegateMultiPackage(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	recipe := filepath.Join(root, "recipe")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(recipe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Upstream source: a build, a base, and two members (one in packages.pekit/).
+	w(filepath.Join(src, "pekit.toml"), "outDir = \"out\"\n[build.main]\ncommand = \"echo hi > $PEKIT_OUT/hi.txt\"\n")
+	w(filepath.Join(src, "package.pekit.toml"), "format = \"tar\"\n")
+	w(filepath.Join(src, "foo.package.pekit.toml"), "[package]\nname = \"foo\"\n[files]\n\":hi.txt\" = \"usr/foo\"\n")
+	if err := os.MkdirAll(filepath.Join(src, "packages.pekit"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w(filepath.Join(src, "packages.pekit", "bar.package.pekit.toml"), "[package]\nname = \"bar\"\n[files]\n\":hi.txt\" = \"usr/bar\"\n")
+	// Pure-delegate recipe: just [source].
+	w(filepath.Join(recipe, "pekit.toml"), "outDir = \"out\"\n[source]\nlocalpath = \"../src\"\n")
+
+	t.Chdir(recipe)
+	results, _, err := buildPackages("", nil, true, noBuildSet{}, "none", nil)
+	if err != nil {
+		t.Fatalf("buildPackages: %v", err)
+	}
+	got := []string{}
+	for _, r := range results {
+		got = append(got, r.Name)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "bar,foo" {
+		t.Errorf("delegate built %v, want [bar foo]", got)
+	}
+
+	// Selecting one source member works too.
+	results, _, err = buildPackages("foo", nil, true, noBuildSet{}, "none", nil)
+	if err != nil || len(results) != 1 || results[0].Name != "foo" {
+		t.Errorf("select foo: results=%v err=%v", results, err)
 	}
 }
 

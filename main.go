@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -1044,48 +1043,79 @@ func buildPackages(sel string, ver *Version, local bool, noBuild noBuildSet, env
 	if err != nil {
 		return nil, "", err
 	}
-	members, err := discoverPackages(wd)
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Resolve the selection to a list of (name, prefixed-table) jobs before
-	// doing any build work, so a bad name fails before fetching a source.
-	type job struct {
-		name string         // prefix selector ("" for the standalone base)
-		raw  map[string]any // the prefixed file's table (nil for standalone)
-	}
-	var jobs []job
-	if len(members) == 0 {
-		if sel != "" {
-			return nil, "", fmt.Errorf("pekit package %q: this recipe defines no named packages (it has a single package.pekit.toml)", sel)
-		}
-		jobs = []job{{}}
-	} else {
-		chosen := members
-		if sel != "" {
-			i := slices.IndexFunc(members, func(m packageMember) bool { return m.name == sel })
-			if i < 0 {
-				return nil, "", fmt.Errorf("pekit package %q: no such package (available: %s)", sel, strings.Join(memberNames(members), ", "))
-			}
-			chosen = members[i : i+1]
-		}
-		for _, m := range chosen {
-			raw, _, derr := decodePackageFile(m.path, ver)
-			if derr != nil {
-				return nil, "", derr
-			}
-			jobs = append(jobs, job{name: m.name, raw: raw})
-		}
-	}
-
+	// prepareBuild fetches the [source] tree (delegate mode) and resolves the
+	// shared base, so it runs before member discovery: a delegate recipe's
+	// members live in the fetched source, discoverable only once it is checked
+	// out. (Without a [source] the fetch is a no-op, so nothing is paid here.)
 	bc, err := prepareBuild(wd, ver, local, env, keyring)
 	if err != nil {
 		return nil, "", err
 	}
 	bc.noBuild = noBuild
+
+	// Member files come from the recipe dir and, in delegate mode, the fetched
+	// source tree — discovered there exactly as a normal run would. A name in
+	// both merges recipe over source (mirroring the base's per-section
+	// delegation); a name in only one is taken whole.
+	recipePath := map[string]string{} // member name -> recipe-dir file
+	srcPath := map[string]string{}    // member name -> source-tree file
+	var order []string
+	record := func(ms []packageMember, into map[string]string) {
+		for _, m := range ms {
+			if _, dup := recipePath[m.name]; !dup {
+				if _, dup := srcPath[m.name]; !dup {
+					order = append(order, m.name)
+				}
+			}
+			into[m.name] = m.path
+		}
+	}
+	recipeMembers, err := discoverPackages(wd)
+	if err != nil {
+		return nil, "", err
+	}
+	record(recipeMembers, recipePath)
+	if bc.cfg.Source != nil {
+		srcMembers, serr := discoverPackages(bc.literalRoot)
+		if serr != nil {
+			return nil, "", serr
+		}
+		record(srcMembers, srcPath)
+	}
+	sort.Strings(order)
+
+	// Resolve the selection to a list of (name, merged-table) jobs.
+	type job struct {
+		name string         // prefix selector ("" for the standalone base)
+		raw  map[string]any // the merged member table (nil for standalone)
+	}
+	var jobs []job
+	if len(order) == 0 {
+		if sel != "" {
+			return nil, "", fmt.Errorf("pekit package %q: this recipe defines no named packages (it has a single package.pekit.toml)", sel)
+		}
+		jobs = []job{{}}
+	} else {
+		chosen := order
+		if sel != "" {
+			if _, ok := recipePath[sel]; !ok {
+				if _, ok := srcPath[sel]; !ok {
+					return nil, "", fmt.Errorf("pekit package %q: no such package (available: %s)", sel, strings.Join(order, ", "))
+				}
+			}
+			chosen = []string{sel}
+		}
+		for _, name := range chosen {
+			raw, derr := decodeMemberFile(recipePath[name], srcPath[name], ver)
+			if derr != nil {
+				return nil, "", derr
+			}
+			jobs = append(jobs, job{name: name, raw: raw})
+		}
+	}
+
 	if len(jobs) > 1 {
-		fmt.Fprintf(os.Stderr, "pekit: packaging %d packages: %s\n", len(jobs), strings.Join(memberNames(members), ", "))
+		fmt.Fprintf(os.Stderr, "pekit: packaging %d packages: %s\n", len(jobs), strings.Join(order, ", "))
 	}
 
 	var results []packResult
@@ -1185,7 +1215,7 @@ func prepareBuild(wd string, ver *Version, local bool, env string, keyring map[s
 			}
 		}
 
-		if srcRaw, _, err = decodePackageFile(filepath.Join(checkout, "package.pekit.toml"), ver); err != nil {
+		if srcRaw, _, err = decodePackageFile(recipePackageFile(checkout), ver); err != nil {
 			return nil, err
 		}
 	}
@@ -1459,6 +1489,26 @@ func recipePackageFile(dir string) string {
 		}
 	}
 	return root
+}
+
+// decodeMemberFile decodes a member's package file, merging a recipe-dir copy
+// over a source-tree copy (delegate mode) when both exist — recipe wins,
+// per-section, like the shared base. Either path may be empty.
+func decodeMemberFile(recipePath, srcPath string, ver *Version) (map[string]any, error) {
+	var recipeRaw, srcRaw map[string]any
+	if srcPath != "" {
+		var err error
+		if srcRaw, _, err = decodePackageFile(srcPath, ver); err != nil {
+			return nil, err
+		}
+	}
+	if recipePath != "" {
+		var err error
+		if recipeRaw, _, err = decodePackageFile(recipePath, ver); err != nil {
+			return nil, err
+		}
+	}
+	return mergePackageRaw(recipeRaw, srcRaw), nil
 }
 
 // memberNames is the selector names of discovered members, in order.
