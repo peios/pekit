@@ -675,7 +675,8 @@ func parseEnv(table map[string]any, md toml.MetaData) ([]EnvVar, error) {
 		if !envNameRe.MatchString(name) {
 			return nil, fmt.Errorf("[env]: invalid variable name %q", name)
 		}
-		if name == "PEKIT_OUT" || name == "PEKIT_ROOT" {
+		switch name {
+		case "PEKIT_OUT", "PEKIT_ROOT", "PEKIT_BUILD_TIMESTAMP", "PEKIT_SOURCE_TIMESTAMP":
 			return nil, fmt.Errorf("[env]: %s is set by pekit and cannot be overridden", name)
 		}
 		val, ok := table[name].(string)
