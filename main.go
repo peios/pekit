@@ -9,7 +9,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+// pekitStart is when this pekit run began, exposed to commands as
+// PEKIT_BUILD_TIMESTAMP (unix seconds). Captured once at process start so every
+// command in an invocation — and every member of a workspace fan-out — shares it.
+var pekitStart = time.Now()
 
 const usage = "usage: pekit <build|test|install|clean> [target] [--no-build[=t1,...]] [--env name] [--keyring=file] [--keyring.k=v ...] | pekit <package|publish> [name] [--local] [--no-build[=t1,...]] [--env name] [--keyring=file] [--keyring.k=v ...] | pekit workspace <package|publish> <--all|--latest|--local>"
 
@@ -775,6 +781,20 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 		fmt.Fprintf(&b, "export PEKIT_OUT=%s\n", shellQuote(stageDir))
 	}
 
+	// Timestamps, exposed (like PEKIT_ROOT) to both the inner script and the
+	// wrap's outer env, for every verb. PEKIT_BUILD_TIMESTAMP is when this run
+	// started; PEKIT_SOURCE_TIMESTAMP is the latest git commit (unix seconds) of
+	// the source tree being built — the [source] checkout, else the recipe dir —
+	// or 0 (epoch) when that is not a git repo (e.g. a url-tarball source).
+	buildTS := fmt.Sprintf("%d", pekitStart.Unix())
+	srcTree := workdir
+	if srcTree == "" {
+		srcTree = "."
+	}
+	sourceTS := gitCommitUnix(srcTree)
+	fmt.Fprintf(&b, "export PEKIT_BUILD_TIMESTAMP=%s\n", buildTS)
+	fmt.Fprintf(&b, "export PEKIT_SOURCE_TIMESTAMP=%s\n", sourceTS)
+
 	// Dependencies are always build targets; expose each direct need's staged
 	// output dir as PEKIT_<NAME>_OUT — in every section, so a test or install
 	// command can consume what it was built against. runTarget staged them
@@ -829,9 +849,10 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	// PEKIT_ROOT also goes in the wrap's OUTER env so the [wrap] template itself
-	// (e.g. docker run -v "$PEKIT_ROOT":"$PEKIT_ROOT") can reference it — the
+	// These also go in the wrap's OUTER env so the [wrap] template itself
+	// (e.g. docker run -v "$PEKIT_ROOT":"$PEKIT_ROOT") can reference them — the
 	// inner exports above are invisible to the wrap command.
+	cmd.Env = append(cmd.Env, "PEKIT_BUILD_TIMESTAMP="+buildTS, "PEKIT_SOURCE_TIMESTAMP="+sourceTS)
 	if root != "" {
 		cmd.Env = append(cmd.Env, "PEKIT_ROOT="+root)
 	}
@@ -846,6 +867,20 @@ func runCommandTarget(cfg *Config, verb, name string, target Target) error {
 		fmt.Fprintf(os.Stderr, "pekit: warning: build %s left %s empty\n", name, stageDir)
 	}
 	return nil
+}
+
+// gitCommitUnix returns the latest git commit time (unix seconds, as a string)
+// of dir, or "0" (epoch) when dir is not a git repo, has no commits, or git is
+// unavailable. Used for PEKIT_SOURCE_TIMESTAMP.
+func gitCommitUnix(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "log", "-1", "--format=%ct").Output()
+	if err != nil {
+		return "0"
+	}
+	if ts := strings.TrimSpace(string(out)); ts != "" {
+		return ts
+	}
+	return "0"
 }
 
 // shellQuote wraps s in single quotes for POSIX sh, escaping embedded single
