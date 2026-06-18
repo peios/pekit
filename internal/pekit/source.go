@@ -1,0 +1,905 @@
+package pekit
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/klauspost/compress/zstd"
+)
+
+type SourceState struct {
+	Kind          string
+	Scope         string
+	OutBase       string
+	WorkBase      string
+	SourceRoot    string
+	LiteralRoot   string
+	ProvenanceRef string
+	Timestamp     int64
+	Local         bool
+	Unanchored    bool
+}
+
+type SourceManifest struct {
+	Kind          string `json:"kind"`
+	Rendered      string `json:"rendered"`
+	Immutable     string `json:"immutable,omitempty"`
+	Checksum      string `json:"checksum,omitempty"`
+	Extract       bool   `json:"extract,omitempty"`
+	Root          string `json:"root,omitempty"`
+	SourceRoot    string `json:"source_root"`
+	ProvenanceRef string `json:"provenance_ref"`
+	Timestamp     int64  `json:"timestamp"`
+}
+
+func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceState, error) {
+	outBase := recipe.OutDir
+	if !filepath.IsAbs(outBase) {
+		outBase = filepath.Join(recipe.Root, outBase)
+	}
+	source := recipe.Source
+	if source.Local.Path != "" && source.Local.ResolvedPath == "" {
+		resolved, err := absPath(recipe.Root, source.Local.Path)
+		if err != nil {
+			return SourceState{}, wrapDiag("invalid_path", "resolve source.local.path", err)
+		}
+		source.Local.ResolvedPath = resolved
+	}
+	if !source.HasExternal() && (ctx.Inv.Local != nil || ctx.Inv.PreferLocal != nil) {
+		if ctx.Inv.AllowUnused {
+			ctx.Renderer.Event(Event{Type: "warning", Message: "local source flag ignored for sourceless recipe"})
+			return sourcelessSource(recipe, outBase), nil
+		}
+		return SourceState{}, diag("unsupported_flag", "local source flags are invalid for sourceless recipes")
+	}
+	if ctx.Inv.Local != nil {
+		return resolveLocalSource(ctx, recipe, outBase, source, version, true)
+	}
+	if ctx.Inv.PreferLocal != nil && ignorePreferLocal(ctx.Inv) {
+		ctx.Renderer.Event(Event{Type: "warning", Message: "prefer-local ignored for enumerable version selector under --allow-unused"})
+	} else if ctx.Inv.PreferLocal != nil {
+		if st, err := resolveLocalSource(ctx, recipe, outBase, source, version, false); err == nil {
+			return st, nil
+		} else if !source.HasReproducible() {
+			return SourceState{}, err
+		}
+	}
+	if source.Git.URL != "" {
+		return resolveGitSource(ctx, recipe, outBase, source.Git, version)
+	}
+	if source.URL.URL != "" {
+		return resolveURLSource(ctx, recipe, outBase, source.URL, version)
+	}
+	return sourcelessSource(recipe, outBase), nil
+}
+
+func sourcelessSource(recipe RecipeConfig, outBase string) SourceState {
+	return SourceState{
+		Kind:          "recipe",
+		Scope:         "recipe",
+		OutBase:       outBase,
+		WorkBase:      outBase,
+		SourceRoot:    recipe.Root,
+		LiteralRoot:   recipe.Root,
+		ProvenanceRef: "recipe:" + recipe.Root,
+		Timestamp:     gitWorktreeTimestamp(recipe.Root),
+	}
+}
+
+func resolveLocalSource(ctx *Context, recipe RecipeConfig, outBase string, source SourceConfig, version Version, strict bool) (SourceState, error) {
+	path := ""
+	if ctx.Inv.Local != nil && *ctx.Inv.Local != "" {
+		resolved, err := absPath(ctx.Inv.Cwd, *ctx.Inv.Local)
+		if err != nil {
+			return SourceState{}, wrapDiag("invalid_path", "resolve --local", err)
+		}
+		path = resolved
+	} else if ctx.Inv.PreferLocal != nil && *ctx.Inv.PreferLocal != "" {
+		resolved, err := absPath(ctx.Inv.Cwd, *ctx.Inv.PreferLocal)
+		if err != nil {
+			return SourceState{}, wrapDiag("invalid_path", "resolve --prefer-local", err)
+		}
+		path = resolved
+	} else {
+		path = source.Local.ResolvedPath
+	}
+	if path == "" {
+		if strict {
+			return SourceState{}, diag("missing_local_source", "--local requires [source.local] or --local=<path>")
+		}
+		return SourceState{}, diag("missing_local_source", "preferred local source is not configured")
+	}
+	if !dirExists(path) {
+		if strict {
+			return SourceState{}, diag("missing_local_source", "local source %s is not a directory", path)
+		}
+		return SourceState{}, diag("missing_local_source", "preferred local source %s is not a directory", path)
+	}
+	if _, err := os.ReadDir(path); err != nil {
+		return SourceState{}, wrapDiag("local_source_unreadable", path, err)
+	}
+	scope := "local-" + shortHash(path)
+	workBase := filepath.Join(outBase, scope)
+	return SourceState{
+		Kind:          "local",
+		Scope:         scope,
+		OutBase:       outBase,
+		WorkBase:      workBase,
+		SourceRoot:    path,
+		LiteralRoot:   path,
+		ProvenanceRef: "local:" + path,
+		Timestamp:     ctx.Start.Unix(),
+		Local:         true,
+	}, nil
+}
+
+func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg GitSourceConfig, version Version) (SourceState, error) {
+	ref, err := RenderTemplate(cfg.Ref, TemplateContext{Version: version})
+	if err != nil {
+		return SourceState{}, wrapDiag("template", "render source.git.ref", err)
+	}
+	if strings.TrimSpace(ref) == "" {
+		return SourceState{}, diag("missing_version", "source.git.ref rendered empty; pass --version or set a non-templated ref")
+	}
+	repoKey := shortHash(cfg.URL)
+	rawRepo := filepath.Join(outBase, "_source_cache", "git", repoKey, "repo.git")
+	if ctx.Inv.RefreshSource {
+		_ = os.RemoveAll(rawRepo)
+	}
+	if !dirExists(rawRepo) {
+		if ctx.Inv.DryRun {
+			scope := "git-" + shortHash(cfg.URL, ref)
+			return drySource("git", outBase, scope, "git:"+cfg.URL+"@"+ref), nil
+		}
+		if err := os.MkdirAll(filepath.Dir(rawRepo), 0o755); err != nil {
+			return SourceState{}, wrapDiag("mkdir", filepath.Dir(rawRepo), err)
+		}
+		if err := runSimple("", "git", "clone", "--mirror", cfg.URL, rawRepo); err != nil {
+			return SourceState{}, wrapDiag("git_clone", "clone source git", err)
+		}
+	} else if !ctx.Inv.DryRun {
+		if err := runSimple(rawRepo, "git", "fetch", "--prune", "--tags"); err != nil {
+			return SourceState{}, wrapDiag("git_fetch", "fetch source git", err)
+		}
+	}
+	commit := ref
+	if !ctx.Inv.DryRun || dirExists(rawRepo) {
+		out, err := commandOutput(rawRepo, "git", "rev-parse", ref+"^{commit}")
+		if err != nil && !ctx.Inv.DryRun {
+			return SourceState{}, wrapDiag("git_resolve", "resolve git ref "+ref, err)
+		}
+		if err == nil {
+			commit = strings.TrimSpace(out)
+		}
+	}
+	sourceTimestamp := gitObjectTimestamp(rawRepo, commit)
+	scope := "git-" + shortHash(cfg.URL, commit)
+	sourceRoot := filepath.Join(outBase, scope, "source")
+	if ctx.Inv.RefreshSource {
+		_ = os.RemoveAll(filepath.Join(outBase, scope))
+	}
+	if !ctx.Inv.DryRun {
+		if !dirExists(sourceRoot) {
+			if err := os.MkdirAll(filepath.Dir(sourceRoot), 0o755); err != nil {
+				return SourceState{}, wrapDiag("mkdir", filepath.Dir(sourceRoot), err)
+			}
+			if err := runSimple("", "git", "clone", rawRepo, sourceRoot); err != nil {
+				return SourceState{}, wrapDiag("git_checkout", "prepare source checkout", err)
+			}
+		}
+		if err := runSimple(sourceRoot, "git", "reset", "--hard", commit); err != nil {
+			return SourceState{}, wrapDiag("git_reset", "reset source checkout", err)
+		}
+		if err := runSimple(sourceRoot, "git", "clean", "-fdx"); err != nil {
+			return SourceState{}, wrapDiag("git_clean", "clean source checkout", err)
+		}
+		if err := writeSourceManifest(filepath.Join(outBase, scope, "source.pekit.json"), SourceManifest{
+			Kind:          "git",
+			Rendered:      cfg.URL + "@" + ref,
+			Immutable:     commit,
+			SourceRoot:    sourceRoot,
+			ProvenanceRef: "git:" + cfg.URL + "@" + commit,
+			Timestamp:     sourceTimestamp,
+		}); err != nil {
+			return SourceState{}, err
+		}
+	}
+	return SourceState{
+		Kind:          "git",
+		Scope:         scope,
+		OutBase:       outBase,
+		WorkBase:      filepath.Join(outBase, scope),
+		SourceRoot:    sourceRoot,
+		LiteralRoot:   sourceRoot,
+		ProvenanceRef: "git:" + cfg.URL + "@" + commit,
+		Timestamp:     sourceTimestamp,
+	}, nil
+}
+
+func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URLSourceConfig, version Version) (SourceState, error) {
+	renderedURL, err := RenderTemplate(cfg.URL, TemplateContext{Version: version})
+	if err != nil {
+		return SourceState{}, wrapDiag("template", "render source.url.url", err)
+	}
+	root, err := RenderTemplate(cfg.Root, TemplateContext{Version: version})
+	if err != nil {
+		return SourceState{}, wrapDiag("template", "render source.url.root", err)
+	}
+	root, err = cleanRelPath(root)
+	if err != nil {
+		return SourceState{}, wrapDiag("invalid_path", "source.url.root", err)
+	}
+	checksum := cfg.Checksum
+	if version.Raw != "" && len(cfg.ChecksumByVersion) > 0 {
+		var ok bool
+		checksum, ok = cfg.ChecksumByVersion[version.Raw]
+		if !ok {
+			return SourceState{}, diag("missing_checksum", "source.url.checksum has no entry for version %s", version.Raw)
+		}
+	}
+	scope := "url-" + shortHash(renderedURL, checksum, root)
+	if ctx.Inv.DryRun {
+		provenance := "url:" + renderedURL
+		if checksum != "" {
+			provenance += "#" + checksum
+		}
+		st := drySource("url", outBase, scope, provenance)
+		st.Unanchored = checksum == ""
+		return st, nil
+	}
+	rawDir := filepath.Join(outBase, "_source_cache", "url", shortHash(renderedURL))
+	artifact := filepath.Join(rawDir, "artifact")
+	if ctx.Inv.RefreshSource {
+		_ = os.RemoveAll(rawDir)
+		_ = os.RemoveAll(filepath.Join(outBase, scope))
+	}
+	if !fileExists(artifact) {
+		if err := os.MkdirAll(rawDir, 0o755); err != nil {
+			return SourceState{}, wrapDiag("mkdir", rawDir, err)
+		}
+		if err := downloadFile(renderedURL, artifact); err != nil {
+			return SourceState{}, wrapDiag("download", renderedURL, err)
+		}
+	}
+	if checksum != "" {
+		if err := verifyChecksum(artifact, checksum); err != nil {
+			_ = os.Remove(artifact)
+			if err2 := downloadFile(renderedURL, artifact); err2 != nil {
+				return SourceState{}, wrapDiag("download", renderedURL, err2)
+			}
+			if err2 := verifyChecksum(artifact, checksum); err2 != nil {
+				return SourceState{}, wrapDiag("checksum", renderedURL, err2)
+			}
+		}
+	}
+	sourceRoot := filepath.Join(outBase, scope, "source")
+	manifestPath := filepath.Join(outBase, scope, "source.pekit.json")
+	provenance := "url:" + renderedURL
+	unanchored := checksum == ""
+	sourceTimestamp := int64(0)
+	if checksum != "" {
+		sourceTimestamp = gitWorktreeTimestamp(recipe.Root)
+	}
+	if checksum != "" {
+		provenance += "#" + checksum
+	}
+	expectedManifest := SourceManifest{
+		Kind:          "url",
+		Rendered:      renderedURL,
+		Checksum:      checksum,
+		Extract:       cfg.Extract,
+		Root:          root,
+		SourceRoot:    sourceRoot,
+		ProvenanceRef: provenance,
+		Timestamp:     sourceTimestamp,
+	}
+	if checksum != "" && dirExists(sourceRoot) {
+		if err := os.RemoveAll(filepath.Join(outBase, scope)); err != nil {
+			return SourceState{}, wrapDiag("clean_source", filepath.Join(outBase, scope), err)
+		}
+	}
+	if dirExists(sourceRoot) && !sourceManifestMatches(manifestPath, expectedManifest) {
+		if err := os.RemoveAll(filepath.Join(outBase, scope)); err != nil {
+			return SourceState{}, wrapDiag("clean_source", filepath.Join(outBase, scope), err)
+		}
+	}
+	if !dirExists(sourceRoot) {
+		if err := os.MkdirAll(filepath.Dir(sourceRoot), 0o755); err != nil {
+			return SourceState{}, wrapDiag("mkdir", filepath.Dir(sourceRoot), err)
+		}
+		if cfg.Extract {
+			tmp, err := os.MkdirTemp(filepath.Dir(sourceRoot), ".extract-*")
+			if err != nil {
+				return SourceState{}, wrapDiag("mkdir", filepath.Dir(sourceRoot), err)
+			}
+			defer os.RemoveAll(tmp)
+			if err := extractArchive(artifact, tmp); err != nil {
+				return SourceState{}, err
+			}
+			selected := filepath.Join(tmp, filepath.FromSlash(root))
+			if !dirExists(selected) {
+				return SourceState{}, diag("missing_source_root", "extracted root %s does not exist", root)
+			}
+			if err := os.Rename(selected, sourceRoot); err != nil {
+				return SourceState{}, wrapDiag("rename", "promote extracted source", err)
+			}
+		} else {
+			if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+				return SourceState{}, wrapDiag("mkdir", sourceRoot, err)
+			}
+			name := filepath.Base(renderedURL)
+			if name == "." || name == "/" || name == "" {
+				name = "artifact"
+			}
+			if err := copyFile(artifact, filepath.Join(sourceRoot, name)); err != nil {
+				return SourceState{}, err
+			}
+		}
+		if err := writeSourceManifest(manifestPath, expectedManifest); err != nil {
+			return SourceState{}, err
+		}
+	}
+	return SourceState{
+		Kind:          "url",
+		Scope:         scope,
+		OutBase:       outBase,
+		WorkBase:      filepath.Join(outBase, scope),
+		SourceRoot:    sourceRoot,
+		LiteralRoot:   sourceRoot,
+		ProvenanceRef: provenance,
+		Timestamp:     sourceTimestamp,
+		Unanchored:    unanchored,
+	}, nil
+}
+
+func drySource(kind, outBase, scope, provenance string) SourceState {
+	sourceRoot := filepath.Join(outBase, scope, "source")
+	return SourceState{Kind: kind, Scope: scope, OutBase: outBase, WorkBase: filepath.Join(outBase, scope), SourceRoot: sourceRoot, LiteralRoot: sourceRoot, ProvenanceRef: provenance}
+}
+
+func downloadFile(url, dst string) error {
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "pekit/2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %s", resp.Status)
+	}
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return closeErr
+	}
+	return os.Rename(tmp, dst)
+}
+
+func verifyChecksum(path, spec string) error {
+	algo, want, ok := strings.Cut(spec, ":")
+	if !ok || algo != "sha256" || want == "" {
+		return fmt.Errorf("unsupported checksum spec %q", spec)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("sha256 mismatch: got %s want %s", got, want)
+	}
+	return nil
+}
+
+func extractArchive(artifact, dst string) error {
+	lower := strings.ToLower(filepath.Base(artifact))
+	if strings.HasSuffix(lower, ".zip") {
+		return extractZip(artifact, dst)
+	}
+	return extractTar(artifact, dst)
+}
+
+func extractZip(artifact, dst string) error {
+	reader, err := zip.OpenReader(artifact)
+	if err != nil {
+		return wrapDiag("extract", artifact, err)
+	}
+	defer reader.Close()
+	seen := map[string]string{}
+	for _, file := range reader.File {
+		rel, err := cleanArchiveEntryPath(file.Name)
+		if err != nil {
+			return wrapDiag("unsafe_archive", file.Name, err)
+		}
+		target := filepath.Join(dst, filepath.FromSlash(rel))
+		kind := archiveEntryKind(file.FileInfo().Mode(), file.FileInfo().IsDir())
+		if err := checkArchiveCollision(seen, rel, kind); err != nil {
+			return err
+		}
+		if file.FileInfo().IsDir() {
+			if err := makeArchiveDir(dst, rel, file.Mode()); err != nil {
+				return err
+			}
+			seen[rel] = "dir"
+			continue
+		}
+		if file.Mode()&os.ModeSymlink != 0 {
+			if err := ensureArchiveParentSafe(dst, rel); err != nil {
+				return err
+			}
+			rc, err := file.Open()
+			if err != nil {
+				return wrapDiag("extract", file.Name, err)
+			}
+			targetBytes, readErr := io.ReadAll(io.LimitReader(rc, 1<<20))
+			closeErr := rc.Close()
+			if readErr != nil {
+				return wrapDiag("extract", file.Name, readErr)
+			}
+			if closeErr != nil {
+				return wrapDiag("extract", file.Name, closeErr)
+			}
+			linkTarget := string(targetBytes)
+			if err := validateArchiveSymlinkTarget(rel, linkTarget); err != nil {
+				return wrapDiag("unsafe_archive", file.Name, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return wrapDiag("extract", filepath.Dir(target), err)
+			}
+			if err := os.Symlink(linkTarget, target); err != nil {
+				return wrapDiag("extract", target, err)
+			}
+			seen[rel] = "symlink"
+			continue
+		}
+		if !file.FileInfo().Mode().IsRegular() {
+			return diag("unsafe_archive", "archive entry %s has unsupported file type", file.Name)
+		}
+		if err := ensureArchiveParentSafe(dst, rel); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return wrapDiag("extract", filepath.Dir(target), err)
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return wrapDiag("extract", file.Name, err)
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, file.Mode())
+		if err != nil {
+			_ = rc.Close()
+			return wrapDiag("extract", target, err)
+		}
+		_, copyErr := io.Copy(out, rc)
+		closeOutErr := out.Close()
+		closeInErr := rc.Close()
+		if copyErr != nil {
+			return wrapDiag("extract", target, copyErr)
+		}
+		if closeOutErr != nil {
+			return wrapDiag("extract", target, closeOutErr)
+		}
+		if closeInErr != nil {
+			return wrapDiag("extract", file.Name, closeInErr)
+		}
+		seen[rel] = "file"
+	}
+	return nil
+}
+
+func extractTar(artifact, dst string) error {
+	stream, err := openTarStream(artifact)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	reader := tar.NewReader(stream)
+	seen := map[string]string{}
+	for {
+		hdr, err := reader.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return wrapDiag("extract", artifact, err)
+		}
+		rel, err := cleanArchiveEntryPath(hdr.Name)
+		if err != nil {
+			return wrapDiag("unsafe_archive", hdr.Name, err)
+		}
+		kind, err := tarEntryKind(hdr)
+		if err != nil {
+			return err
+		}
+		if err := checkArchiveCollision(seen, rel, kind); err != nil {
+			return err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := makeArchiveDir(dst, rel, os.FileMode(hdr.Mode)); err != nil {
+				return err
+			}
+			seen[rel] = "dir"
+		case tar.TypeReg, tar.TypeRegA:
+			if err := writeTarFileEntry(dst, rel, os.FileMode(hdr.Mode), reader); err != nil {
+				return err
+			}
+			seen[rel] = "file"
+		case tar.TypeSymlink:
+			if err := writeTarSymlinkEntry(dst, rel, hdr.Linkname); err != nil {
+				return err
+			}
+			seen[rel] = "symlink"
+		}
+	}
+}
+
+type archiveReadCloser struct {
+	io.Reader
+	close func() error
+}
+
+func (r archiveReadCloser) Close() error {
+	if r.close == nil {
+		return nil
+	}
+	return r.close()
+}
+
+func openTarStream(path string) (io.ReadCloser, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, wrapDiag("open", path, err)
+	}
+	lower := strings.ToLower(filepath.Base(path))
+	switch {
+	case strings.HasSuffix(lower, ".tar"):
+		return file, nil
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		gr, err := gzip.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, wrapDiag("extract", path, err)
+		}
+		return archiveReadCloser{Reader: gr, close: func() error {
+			err1 := gr.Close()
+			err2 := file.Close()
+			if err1 != nil {
+				return err1
+			}
+			return err2
+		}}, nil
+	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
+		return archiveReadCloser{Reader: bzip2.NewReader(file), close: file.Close}, nil
+	case strings.HasSuffix(lower, ".tar.zst"):
+		zr, err := zstd.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, wrapDiag("extract", path, err)
+		}
+		return archiveReadCloser{Reader: zr, close: func() error {
+			zr.Close()
+			return file.Close()
+		}}, nil
+	case strings.HasSuffix(lower, ".tar.xz"), strings.HasSuffix(lower, ".txz"):
+		_ = file.Close()
+		return openExternalCompressedTar(path, "xz", "-dc", path)
+	default:
+		_ = file.Close()
+		return nil, diag("unsupported_archive", "unsupported archive format %s", filepath.Base(path))
+	}
+}
+
+func openExternalCompressedTar(path, name string, args ...string) (io.ReadCloser, error) {
+	cmd := execCommand(name, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, wrapDiag("extract", path, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, wrapDiag("extract", path, err)
+	}
+	return archiveReadCloser{Reader: stdout, close: func() error {
+		err := cmd.Wait()
+		if err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg != "" {
+				return fmt.Errorf("%w: %s", err, msg)
+			}
+		}
+		return err
+	}}, nil
+}
+
+func tarEntryKind(hdr *tar.Header) (string, error) {
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		return "dir", nil
+	case tar.TypeReg, tar.TypeRegA:
+		return "file", nil
+	case tar.TypeSymlink:
+		return "symlink", nil
+	default:
+		return "", diag("unsafe_archive", "archive entry %s has unsupported type %d", hdr.Name, hdr.Typeflag)
+	}
+}
+
+func archiveEntryKind(mode os.FileMode, isDir bool) string {
+	if isDir {
+		return "dir"
+	}
+	if mode&os.ModeSymlink != 0 {
+		return "symlink"
+	}
+	return "file"
+}
+
+func checkArchiveCollision(seen map[string]string, rel, kind string) error {
+	if prev, ok := seen[rel]; ok {
+		if prev == "dir" && kind == "dir" {
+			return nil
+		}
+		return diag("unsafe_archive", "archive entry %s collides with prior %s entry", rel, prev)
+	}
+	return nil
+}
+
+func makeArchiveDir(root, rel string, mode os.FileMode) error {
+	if err := ensureArchiveParentSafe(root, rel); err != nil {
+		return err
+	}
+	target := filepath.Join(root, filepath.FromSlash(rel))
+	if info, err := os.Lstat(target); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return diag("unsafe_archive", "archive directory %s would replace a symlink", rel)
+		}
+		if !info.IsDir() {
+			return diag("unsafe_archive", "archive directory %s collides with a file", rel)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(target, mode.Perm()); err != nil {
+		return wrapDiag("extract", target, err)
+	}
+	return nil
+}
+
+func writeTarFileEntry(root, rel string, mode os.FileMode, reader io.Reader) error {
+	if err := ensureArchiveParentSafe(root, rel); err != nil {
+		return err
+	}
+	target := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return wrapDiag("extract", filepath.Dir(target), err)
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
+	if err != nil {
+		return wrapDiag("extract", target, err)
+	}
+	_, copyErr := io.Copy(out, reader)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return wrapDiag("extract", target, copyErr)
+	}
+	if closeErr != nil {
+		return wrapDiag("extract", target, closeErr)
+	}
+	return nil
+}
+
+func writeTarSymlinkEntry(root, rel, target string) error {
+	if err := validateArchiveSymlinkTarget(rel, target); err != nil {
+		return wrapDiag("unsafe_archive", rel, err)
+	}
+	if err := ensureArchiveParentSafe(root, rel); err != nil {
+		return err
+	}
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return wrapDiag("extract", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		return wrapDiag("extract", path, err)
+	}
+	return nil
+}
+
+func cleanArchiveEntryPath(name string) (string, error) {
+	if strings.ContainsRune(name, '\x00') {
+		return "", fmt.Errorf("archive entry contains NUL")
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(name))
+	if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive entry escapes extraction root")
+	}
+	return filepath.ToSlash(cleaned), nil
+}
+
+func validateArchiveSymlinkTarget(entry, target string) error {
+	if target == "" {
+		return fmt.Errorf("symlink target is empty")
+	}
+	if strings.ContainsRune(target, '\x00') {
+		return fmt.Errorf("symlink target contains NUL")
+	}
+	if filepath.IsAbs(filepath.FromSlash(target)) {
+		return fmt.Errorf("symlink target escapes extraction root")
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(filepath.FromSlash(entry)), filepath.FromSlash(target)))
+	if resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("symlink target escapes extraction root")
+	}
+	return nil
+}
+
+func ensureArchiveParentSafe(root, rel string) error {
+	dir := filepath.Dir(filepath.FromSlash(rel))
+	if dir == "." {
+		return nil
+	}
+	cur := root
+	for _, part := range strings.Split(dir, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return diag("unsafe_archive", "archive entry %s would be extracted through symlink component %s", rel, part)
+		}
+		if err == nil && !info.IsDir() {
+			return diag("unsafe_archive", "archive entry %s parent component %s is not a directory", rel, part)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return wrapDiag("extract", cur, err)
+		}
+	}
+	return nil
+}
+
+func sourceManifestMatches(path string, expected SourceManifest) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var actual SourceManifest
+	if err := json.Unmarshal(data, &actual); err != nil {
+		return false
+	}
+	return actual.Kind == expected.Kind &&
+		actual.Rendered == expected.Rendered &&
+		actual.Immutable == expected.Immutable &&
+		actual.Checksum == expected.Checksum &&
+		actual.Extract == expected.Extract &&
+		actual.Root == expected.Root &&
+		actual.ProvenanceRef == expected.ProvenanceRef &&
+		actual.Timestamp == expected.Timestamp
+}
+
+func writeSourceManifest(path string, manifest SourceManifest) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return wrapDiag("mkdir", filepath.Dir(path), err)
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return wrapDiag("source_manifest", path, err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return wrapDiag("source_manifest", path, err)
+	}
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return wrapDiag("copy", src, err)
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return wrapDiag("mkdir", filepath.Dir(dst), err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return wrapDiag("copy", dst, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	_, copyErr := io.Copy(tmp, in)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return wrapDiag("copy", dst, copyErr)
+	}
+	if closeErr != nil {
+		return wrapDiag("copy", dst, closeErr)
+	}
+	info, err := os.Stat(src)
+	if err == nil {
+		_ = os.Chmod(tmpPath, info.Mode())
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return wrapDiag("copy", dst, err)
+	}
+	return nil
+}
+
+func commandOutput(dir, name string, args ...string) (string, error) {
+	cmd := execCommand(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+func gitObjectTimestamp(repoDir, ref string) int64 {
+	if repoDir == "" || ref == "" || !dirExists(repoDir) {
+		return 0
+	}
+	out, err := commandOutput(repoDir, "git", "show", "-s", "--format=%ct", ref)
+	if err != nil {
+		return 0
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return ts
+}
+
+func gitWorktreeTimestamp(root string) int64 {
+	if root == "" || !pathExists(filepath.Join(root, ".git")) {
+		return 0
+	}
+	out, err := commandOutput(root, "git", "log", "-1", "--format=%ct")
+	if err != nil {
+		return 0
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return ts
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
