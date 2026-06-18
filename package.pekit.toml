@@ -1,4 +1,0 @@
-format = "tar"
-
-[files]
-":pekit" = "usr/bin/pekit"

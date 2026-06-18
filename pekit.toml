@@ -1,7 +1,0 @@
-outDir = "out"
-
-[build]
-command = "CGO_ENABLED=0 go build -o $PEKIT_OUT/pekit ."
-
-[install]
-command = "CGO_ENABLED=0 go install ."
