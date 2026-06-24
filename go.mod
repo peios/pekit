@@ -12,6 +12,7 @@ require (
 require (
 	github.com/peios/libp-go v0.8.0 // indirect
 	github.com/peios/pkm/uapi/go v0.20.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
 
 replace github.com/peios/peipkg => ../peipkg

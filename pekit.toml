@@ -1,0 +1,13 @@
+out_dir = "out"
+
+[build]
+command = "go build -trimpath -o \"$PEKIT_OUT/pekit\" ./cmd/pekit"
+
+[test]
+command = "go test ./..."
+
+[install]
+command = "go install ./cmd/pekit"
+
+[clean]
+command = "go clean ./..."

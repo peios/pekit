@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/peios/peipkg/pack"
 )
 
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -22,20 +23,26 @@ func (c ShellCommand) Empty() bool {
 }
 
 type TargetConfig struct {
-	Name     string
-	Kind     Command
-	Command  ShellCommand
-	Needs    []string
-	ClearOut bool
-	Owner    string
-	Path     string
+	Name         string
+	Kind         Command
+	Command      ShellCommand
+	Needs        []string
+	Dependencies map[string]map[string]string
+	ClearOut     bool
+	Owner        string
+	Path         string
+}
+
+type EnvVar struct {
+	Name  string
+	Value string
 }
 
 type RecipeConfig struct {
 	Root     string
 	Path     string
 	OutDir   string
-	Env      map[string]string
+	Env      []EnvVar
 	Wrap     ShellCommand
 	Targets  map[Command]map[string]TargetConfig
 	Source   SourceConfig
@@ -91,14 +98,34 @@ type WorkspaceConfig struct {
 	Path    string
 	Include []string
 	Exclude []string
-	Env     map[string]string
+	Env     []EnvVar
 	Wrap    ShellCommand
+	Policy  PolicyConfig
+}
+
+// PolicyConfig holds distro-wide derivation policy declared in the
+// workspace file. SymbolVersions maps a shared-library soname to the
+// symbol-version token prefix whose tokens are commensurable with the
+// providing package's version (e.g. "libc.so.6" -> "GLIBC_"); it governs
+// which sonames get a symbol-version floor during dependency derivation.
+type PolicyConfig struct {
+	SymbolVersions map[string]string
+}
+
+// symbolVersionPolicy adapts the workspace policy to the pack derivation
+// API, tolerating a nil workspace (no policy configured).
+func (w *WorkspaceConfig) symbolVersionPolicy() pack.SymbolVersionPolicy {
+	if w == nil || len(w.Policy.SymbolVersions) == 0 {
+		return nil
+	}
+	return pack.SymbolVersionPolicy(w.Policy.SymbolVersions)
 }
 
 type EnvFile struct {
-	Path string
-	Env  map[string]string
-	Wrap ShellCommand
+	Path               string
+	Env                []EnvVar
+	Wrap               ShellCommand
+	DependencyProvider string
 }
 
 type PackageLayer struct {
@@ -129,14 +156,47 @@ type PackageMeta struct {
 	Description  string
 	License      string
 	Homepage     string
+	// DefaultRoot is the package's top-level placement preference
+	// (§3.3.6, DESIGN-named-roots.md): the named root a top-level install
+	// lands in. Empty for no preference.
+	DefaultRoot string
 
 	Dependencies         map[string]string
 	OptionalDependencies map[string]string
 	Conflicts            map[string]string
+	// DependencyRoots and OptionalDependencyRoots carry the optional
+	// per-dependency placement root (§4.1.1), keyed by the same dependency
+	// name as the constraint maps above. A name absent here means the
+	// depender's own root (the default). They are kept parallel to the
+	// constraint maps so version-constraint templating and merging are
+	// unchanged; a root is a static name and is neither templated nor
+	// carried for conflicts (which stay root-local).
+	DependencyRoots         map[string]string
+	OptionalDependencyRoots map[string]string
 	Provides             map[string]string
 	Replaces             map[string]string
 	SideEffects          []string
 	SDOverrides          map[string]string
+	// Claims attaches claim slots (PSD-009 §4.4) to provides and
+	// dependency entries, keyed by role. It is parsed from the top-level
+	// [claims] table; recipes without claims leave it empty.
+	Claims ClaimsMeta
+}
+
+// ClaimsMeta carries a package's claim declarations: the provider side
+// (slots a provides entry fills) and the consumer side (slots a
+// dependency expects). Each is keyed role -> slot -> descriptor (§4.4.2).
+type ClaimsMeta struct {
+	Provides     map[string]map[string]ClaimSlot
+	Dependencies map[string]map[string]ClaimSlot
+}
+
+// ClaimSlot is one slot descriptor: a Path (the symlink location, set on
+// a consumer or as a provider default) and a Target (the holder file,
+// set on a provider).
+type ClaimSlot struct {
+	Path   string
+	Target string
 }
 
 type PackageFileEntry struct {
@@ -171,7 +231,7 @@ type LocalDirPublish struct {
 
 func LoadRecipe(path string) (RecipeConfig, error) {
 	root := filepath.Dir(path)
-	raw, err := loadTOML(path)
+	raw, md, err := loadTOMLWithMeta(path)
 	if err != nil {
 		return RecipeConfig{}, err
 	}
@@ -179,7 +239,6 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 		Root:    root,
 		Path:    path,
 		OutDir:  "out",
-		Env:     map[string]string{},
 		Targets: map[Command]map[string]TargetConfig{},
 	}
 	known := map[string]bool{
@@ -198,7 +257,7 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 		}
 	}
 	if v, ok := raw["env"]; ok {
-		cfg.Env, err = parseEnvMap(path, "env", v)
+		cfg.Env, err = parseEnvVars(path, "env", v, md)
 		if err != nil {
 			return RecipeConfig{}, err
 		}
@@ -237,12 +296,12 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 
 func LoadWorkspace(path string) (WorkspaceConfig, error) {
 	root := filepath.Dir(path)
-	raw, err := loadTOML(path)
+	raw, md, err := loadTOMLWithMeta(path)
 	if err != nil {
 		return WorkspaceConfig{}, err
 	}
-	cfg := WorkspaceConfig{Root: root, Path: path, Env: map[string]string{}}
-	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true}
+	cfg := WorkspaceConfig{Root: root, Path: path}
+	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true}
 	for key := range raw {
 		if !known[key] {
 			return WorkspaceConfig{}, diagAt("unknown_key", path, "unknown workspace key %q", key)
@@ -264,7 +323,7 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 		}
 	}
 	if v, ok := raw["env"]; ok {
-		cfg.Env, err = parseEnvMap(path, "env", v)
+		cfg.Env, err = parseEnvVars(path, "env", v, md)
 		if err != nil {
 			return WorkspaceConfig{}, err
 		}
@@ -275,22 +334,59 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 			return WorkspaceConfig{}, err
 		}
 	}
+	if v, ok := raw["policy"]; ok {
+		cfg.Policy, err = parsePolicy(path, v)
+		if err != nil {
+			return WorkspaceConfig{}, err
+		}
+	}
 	return cfg, nil
+}
+
+// parsePolicy parses the top-level [policy] table. Currently it carries one
+// sub-table, [policy.symbol_versions] (soname -> token prefix).
+func parsePolicy(path string, value any) (PolicyConfig, error) {
+	table, err := expectMap(path, "policy", value)
+	if err != nil {
+		return PolicyConfig{}, err
+	}
+	var out PolicyConfig
+	for key, raw := range table {
+		switch key {
+		case "symbol_versions":
+			sv, err := expectMap(path, "policy.symbol_versions", raw)
+			if err != nil {
+				return PolicyConfig{}, err
+			}
+			out.SymbolVersions = make(map[string]string, len(sv))
+			for soname, prefixVal := range sv {
+				prefix, err := expectString(path, "policy.symbol_versions."+soname, prefixVal)
+				if err != nil {
+					return PolicyConfig{}, err
+				}
+				out.SymbolVersions[soname] = prefix
+			}
+		default:
+			return PolicyConfig{}, diagAt("unknown_key", path,
+				"policy.%s is not a known policy table", key)
+		}
+	}
+	return out, nil
 }
 
 func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	if !fileExists(path) {
 		if missingOK {
-			return EnvFile{Path: path, Env: map[string]string{}}, nil
+			return EnvFile{Path: path}, nil
 		}
 		return EnvFile{}, diagAt("missing_env_file", path, "env file does not exist")
 	}
-	raw, err := loadTOML(path)
+	raw, md, err := loadTOMLWithMeta(path)
 	if err != nil {
 		return EnvFile{}, err
 	}
-	env := EnvFile{Path: path, Env: map[string]string{}}
-	known := map[string]bool{"env": true, "wrap": true}
+	env := EnvFile{Path: path}
+	known := map[string]bool{"env": true, "wrap": true, "dependency_provider": true}
 	for key := range raw {
 		if !known[key] {
 			return EnvFile{}, diagAt("unknown_key", path, "unknown env-file key %q", key)
@@ -298,11 +394,13 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	}
 	if _, hasEnv := raw["env"]; !hasEnv {
 		if _, hasWrap := raw["wrap"]; !hasWrap {
-			return EnvFile{}, diagAt("missing_key", path, "env file requires [env], [wrap], or both")
+			if _, hasProvider := raw["dependency_provider"]; !hasProvider {
+				return EnvFile{}, diagAt("missing_key", path, "env file requires [env], [wrap], dependency_provider, or a combination")
+			}
 		}
 	}
 	if v, ok := raw["env"]; ok {
-		env.Env, err = parseEnvMap(path, "env", v)
+		env.Env, err = parseEnvVars(path, "env", v, md)
 		if err != nil {
 			return EnvFile{}, err
 		}
@@ -310,6 +408,15 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	if v, ok := raw["wrap"]; ok {
 		env.Wrap, err = parseWrap(path, "wrap", v)
 		if err != nil {
+			return EnvFile{}, err
+		}
+	}
+	if v, ok := raw["dependency_provider"]; ok {
+		env.DependencyProvider, err = expectString(path, "dependency_provider", v)
+		if err != nil {
+			return EnvFile{}, err
+		}
+		if err := validateSelector("dependency provider", env.DependencyProvider); err != nil {
 			return EnvFile{}, err
 		}
 	}
@@ -417,6 +524,7 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 		"format": true, "clear_out": true, "builds": true, "package": true, "files": true, "symlinks": true,
 		"excludes": true, "multipack": true, "publish": true, "dependencies": true, "optional_dependencies": true,
 		"conflicts": true, "provides": true, "replaces": true, "side_effects": true, "sd_overrides": true,
+		"claims": true,
 	}
 	for key := range raw {
 		if !known[key] {
@@ -449,13 +557,15 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 		}
 	}
 	if v, ok := raw["dependencies"]; ok {
-		cfg.Package.Dependencies, err = parseStringMap(path, "dependencies", v)
+		cfg.Package.Dependencies, cfg.Package.DependencyRoots, err =
+			parseDependencyMap(path, "dependencies", v)
 		if err != nil {
 			return PackageConfig{}, err
 		}
 	}
 	if v, ok := raw["optional_dependencies"]; ok {
-		cfg.Package.OptionalDependencies, err = parseStringMap(path, "optional_dependencies", v)
+		cfg.Package.OptionalDependencies, cfg.Package.OptionalDependencyRoots, err =
+			parseDependencyMap(path, "optional_dependencies", v)
 		if err != nil {
 			return PackageConfig{}, err
 		}
@@ -480,6 +590,12 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 	}
 	if v, ok := raw["side_effects"]; ok {
 		cfg.Package.SideEffects, err = expectStringSlice(path, "side_effects", v)
+		if err != nil {
+			return PackageConfig{}, err
+		}
+	}
+	if v, ok := raw["claims"]; ok {
+		cfg.Package.Claims, err = parseClaims(path, v)
 		if err != nil {
 			return PackageConfig{}, err
 		}
@@ -523,19 +639,92 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 	return cfg, nil
 }
 
+// parseClaims parses the top-level [claims] table (§4.4.2): a provides
+// and/or dependencies side, each keyed role -> slot -> {path, target}.
+func parseClaims(path string, value any) (ClaimsMeta, error) {
+	table, err := expectMap(path, "claims", value)
+	if err != nil {
+		return ClaimsMeta{}, err
+	}
+	var out ClaimsMeta
+	for side, raw := range table {
+		roles, err := parseClaimSide(path, "claims."+side, raw)
+		if err != nil {
+			return ClaimsMeta{}, err
+		}
+		switch side {
+		case "provides":
+			out.Provides = roles
+		case "dependencies":
+			out.Dependencies = roles
+		default:
+			return ClaimsMeta{}, diagAt("unknown_key", path,
+				"claims.%s must be provides or dependencies", side)
+		}
+	}
+	return out, nil
+}
+
+// parseClaimSide parses one side of [claims]: role -> slot -> descriptor.
+func parseClaimSide(path, key string, value any) (map[string]map[string]ClaimSlot, error) {
+	roles, err := expectMap(path, key, value)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]ClaimSlot, len(roles))
+	for role, rawSlots := range roles {
+		slots, err := expectMap(path, key+"."+role, rawSlots)
+		if err != nil {
+			return nil, err
+		}
+		slotMap := make(map[string]ClaimSlot, len(slots))
+		for slot, rawSlot := range slots {
+			fields, err := expectMap(path, key+"."+role+"."+slot, rawSlot)
+			if err != nil {
+				return nil, err
+			}
+			var cs ClaimSlot
+			for fk, fv := range fields {
+				s, err := expectString(path, key+"."+role+"."+slot+"."+fk, fv)
+				if err != nil {
+					return nil, err
+				}
+				switch fk {
+				case "path":
+					cs.Path = s
+				case "target":
+					cs.Target = s
+				default:
+					return nil, diagAt("unknown_key", path,
+						"%s.%s.%s.%s must be path or target", key, role, slot, fk)
+				}
+			}
+			slotMap[slot] = cs
+		}
+		out[role] = slotMap
+	}
+	return out, nil
+}
+
 func loadTOML(path string) (map[string]any, error) {
+	raw, _, err := loadTOMLWithMeta(path)
+	return raw, err
+}
+
+func loadTOMLWithMeta(path string) (map[string]any, toml.MetaData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, wrapDiag("read_file", path, err)
+		return nil, toml.MetaData{}, wrapDiag("read_file", path, err)
 	}
 	var raw map[string]any
-	if err := toml.Unmarshal(data, &raw); err != nil {
-		return nil, wrapDiag("parse_toml", path, err)
+	md, err := toml.Decode(string(data), &raw)
+	if err != nil {
+		return nil, toml.MetaData{}, wrapDiag("parse_toml", path, err)
 	}
 	if raw == nil {
 		raw = map[string]any{}
 	}
-	return raw, nil
+	return raw, md, nil
 }
 
 func parseTargets(path string, kind Command, value any) (map[string]TargetConfig, error) {
@@ -552,7 +741,7 @@ func parseTargets(path string, kind Command, value any) (map[string]TargetConfig
 	}
 	if hasCommand {
 		for key, v := range table {
-			if _, ok := v.(map[string]any); ok && key != "command" {
+			if _, ok := v.(map[string]any); ok && !targetConfigKey(kind, key) {
 				return nil, diagAt("mixed_targets", path, "cannot mix bare [%s] target with named [%s.%s]", kind, kind, key)
 			}
 		}
@@ -580,8 +769,22 @@ func parseTargets(path string, kind Command, value any) (map[string]TargetConfig
 	return out, nil
 }
 
+func targetConfigKey(kind Command, key string) bool {
+	switch key {
+	case "command", "needs", "clear_out":
+		return true
+	case "dependencies":
+		return kind == CommandBuild
+	default:
+		return false
+	}
+}
+
 func parseTarget(path string, kind Command, name string, table map[string]any) (TargetConfig, error) {
 	known := map[string]bool{"command": true, "needs": true, "clear_out": true}
+	if kind == CommandBuild {
+		known["dependencies"] = true
+	}
 	for key := range table {
 		if !known[key] {
 			return TargetConfig{}, diagAt("unknown_key", path, "unknown target key %s.%s.%s", kind, name, key)
@@ -602,6 +805,12 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 			return TargetConfig{}, err
 		}
 	}
+	if v, ok := table["dependencies"]; ok {
+		t.Dependencies, err = parseTargetDependencies(path, string(kind)+"."+name+".dependencies", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
 	if v, ok := table["clear_out"]; ok {
 		t.ClearOut, err = expectBool(path, string(kind)+"."+name+".clear_out", v)
 		if err != nil {
@@ -609,6 +818,42 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 		}
 	}
 	return t, nil
+}
+
+func parseTargetDependencies(path, key string, value any) (map[string]map[string]string, error) {
+	table, err := expectMap(path, key, value)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]string{}
+	for provider, raw := range table {
+		if err := validateSelector("dependency provider", provider); err != nil {
+			return nil, err
+		}
+		depTable, err := expectMap(path, key+"."+provider, raw)
+		if err != nil {
+			return nil, err
+		}
+		deps := map[string]string{}
+		for name, depRaw := range depTable {
+			// Dependency names may be real package names or virtual
+			// (capability) names — sonames, pkgconfig(...), etc. Use the
+			// same grammar peipkg enforces at manifest decode.
+			if err := pack.ValidateCapabilityName(name); err != nil {
+				return nil, diagAt("invalid_dependency", path, "%s.%s dependency name %q is not valid: %v", key, provider, name, err)
+			}
+			constraint, ok := depRaw.(string)
+			if !ok {
+				return nil, diagAt("invalid_type", path, "%s.%s.%s must be a string", key, provider, name)
+			}
+			if strings.TrimSpace(constraint) == "" {
+				return nil, diagAt("invalid_dependency", path, "%s.%s.%s constraint must be non-empty; use \"*\" for any version", key, provider, name)
+			}
+			deps[name] = constraint
+		}
+		out[provider] = deps
+	}
+	return out, nil
 }
 
 func parseSource(path, root string, value any) (SourceConfig, error) {
@@ -804,7 +1049,7 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 	if err != nil {
 		return PackageMeta{}, err
 	}
-	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "homepage": true}
+	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "homepage": true, "default_root": true}
 	for key := range table {
 		if !known[key] {
 			return PackageMeta{}, diagAt("unknown_key", path, "unknown package metadata key %q", key)
@@ -829,9 +1074,96 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 			meta.License = s
 		case "homepage":
 			meta.Homepage = s
+		case "default_root":
+			if err := validRootRef(s); err != nil {
+				return PackageMeta{}, diagAt("invalid_root", path, "package.default_root: %v", err)
+			}
+			meta.DefaultRoot = s
 		}
 	}
 	return meta, nil
+}
+
+// validRootRef checks a root reference against the §3.3.6 grammar: dotted
+// segments, each [a-z0-9][a-z0-9_-]*, and never a filesystem path (the
+// presence of '/' marks a path). It mirrors the consumer's check so a
+// recipe-author sees a placement typo at build time, not install time.
+func validRootRef(s string) error {
+	if s == "" {
+		return fmt.Errorf("root reference must not be empty")
+	}
+	if strings.ContainsRune(s, '/') {
+		return fmt.Errorf("%q must be a named reference, not a filesystem path", s)
+	}
+	for _, seg := range strings.Split(s, ".") {
+		if seg == "" {
+			return fmt.Errorf("%q has an empty segment", s)
+		}
+		for i := 0; i < len(seg); i++ {
+			c := seg[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			case (c == '-' || c == '_') && i > 0:
+			default:
+				return fmt.Errorf("%q has an invalid segment %q", s, seg)
+			}
+		}
+	}
+	return nil
+}
+
+// parseDependencyMap parses a dependencies or optional_dependencies table
+// where each entry is either a bare constraint string (the common short
+// form → the depender's own root) or a table { constraint, root } that
+// places the dependency in a named root (§4.1.1, DESIGN-named-roots.md).
+// It returns parallel maps: constraints (name → constraint) and roots
+// (name → placement root, only for entries that set one). The table form
+// is the only way to place a dependency — there is no IN-string sugar.
+func parseDependencyMap(path, key string, value any) (constraints, roots map[string]string, err error) {
+	table, err := expectMap(path, key, value)
+	if err != nil {
+		return nil, nil, err
+	}
+	constraints = map[string]string{}
+	roots = map[string]string{}
+	for k, raw := range table {
+		switch v := raw.(type) {
+		case string:
+			constraints[k] = v
+		default:
+			sub, err := expectMap(path, key+"."+k, raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			knownSub := map[string]bool{"constraint": true, "root": true}
+			for sk := range sub {
+				if !knownSub[sk] {
+					return nil, nil, diagAt("unknown_key", path,
+						"unknown %s.%s key %q (a dependency table takes constraint and root)", key, k, sk)
+				}
+			}
+			if c, ok := sub["constraint"]; ok {
+				cs, ok := c.(string)
+				if !ok {
+					return nil, nil, diagAt("invalid_type", path, "%s.%s.constraint must be a string", key, k)
+				}
+				constraints[k] = cs
+			} else {
+				constraints[k] = "" // a table without a constraint matches any version
+			}
+			if r, ok := sub["root"]; ok {
+				rs, ok := r.(string)
+				if !ok {
+					return nil, nil, diagAt("invalid_type", path, "%s.%s.root must be a string", key, k)
+				}
+				if err := validRootRef(rs); err != nil {
+					return nil, nil, diagAt("invalid_root", path, "%s.%s.root: %v", key, k, err)
+				}
+				roots[k] = rs
+			}
+		}
+	}
+	return constraints, roots, nil
 }
 
 func parsePackageFiles(path string, value any) (map[string]PackageFileEntry, error) {
@@ -1119,15 +1451,44 @@ func parseStringMap(path, key string, value any) (map[string]string, error) {
 	return out, nil
 }
 
-func parseEnvMap(path, key string, value any) (map[string]string, error) {
-	out, err := parseStringMap(path, key, value)
+func parseEnvVars(path, key string, value any, md toml.MetaData) ([]EnvVar, error) {
+	table, err := expectMap(path, key, value)
 	if err != nil {
 		return nil, err
 	}
-	for name := range out {
+	seen := map[string]bool{}
+	var out []EnvVar
+	for _, metaKey := range md.Keys() {
+		if len(metaKey) != 2 || metaKey[0] != key {
+			continue
+		}
+		name := metaKey[1]
 		if !envNameRE.MatchString(name) {
 			return nil, diagAt("invalid_env", path, "%s.%s is not a valid environment variable name", key, name)
 		}
+		raw, ok := table[name]
+		if !ok {
+			continue
+		}
+		value, ok := raw.(string)
+		if !ok {
+			return nil, diagAt("invalid_type", path, "%s.%s must be a string", key, name)
+		}
+		seen[name] = true
+		out = append(out, EnvVar{Name: name, Value: value})
+	}
+	for _, name := range sortedKeys(table) {
+		if seen[name] {
+			continue
+		}
+		if !envNameRE.MatchString(name) {
+			return nil, diagAt("invalid_env", path, "%s.%s is not a valid environment variable name", key, name)
+		}
+		value, ok := table[name].(string)
+		if !ok {
+			return nil, diagAt("invalid_type", path, "%s.%s must be a string", key, name)
+		}
+		out = append(out, EnvVar{Name: name, Value: value})
 	}
 	return out, nil
 }

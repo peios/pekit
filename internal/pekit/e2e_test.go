@@ -5,11 +5,15 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestBuildAndPackageTar(t *testing.T) {
@@ -44,6 +48,48 @@ format = "tar"
 		t.Fatalf("expected one artifact, got %v", artifacts)
 	}
 	assertTarHas(t, artifacts[0], "usr/bin/hello")
+}
+
+// A directory source that stages an empty directory must pack as an
+// explicit empty-directory payload entry rather than vanishing. This is
+// the fsbase skeleton case (runtime mountpoint dirs, no files); without it
+// the package resolves to zero payload entries and fails "empty_package".
+func TestBuildAndPackageEmptyDirectories(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build.main]
+command = "for d in dev proc var; do mkdir -p \"$PEKIT_OUT/$d\"; done"
+`)
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+":dev"  = "dev"
+":proc" = "proc"
+":var"  = "var"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected one artifact, got %v", artifacts)
+	}
+	for _, want := range []string{"dev/", "proc/", "var/"} {
+		assertTarHas(t, artifacts[0], want)
+	}
 }
 
 func TestMemberPackageDoesNotInheritBaseEmittedName(t *testing.T) {
@@ -271,6 +317,93 @@ command = ["sh", "-euc", "{{command}}"]
 	}
 }
 
+func TestBuildDependenciesAreExportedForSelectedProvider(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = 'cp "$PEKIT_DEPENDENCIES_FILE" "$PEKIT_OUT/deps.json" && printf "%s" "$PEKIT_DEPENDENCIES" > "$PEKIT_OUT/deps.txt" && printf "%s" "$PEKIT_DEPENDENCY_PROVIDER" > "$PEKIT_OUT/provider"'
+
+[build.dependencies.peipkg]
+tool-devel = "{{version}}"
+
+[build.dependencies.apt]
+"g++" = ">= 15"
+libtool-dev = "*"
+`)
+	writeFile(t, filepath.Join(dir, "env.pekit.toml"), `dependency_provider = "apt"`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--version", "1.2.3"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out", "build", "main", "deps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload DependencyPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("dependency payload is not JSON: %v\n%s", err, string(data))
+	}
+	if payload.Provider != "apt" || payload.Dependencies["g++"] != ">= 15" || payload.Dependencies["libtool-dev"] != "*" {
+		t.Fatalf("unexpected selected dependencies: %#v", payload)
+	}
+	if payload.AllProviders["peipkg"]["tool-devel"] != "1.2.3" {
+		t.Fatalf("peipkg dependencies were not rendered: %#v", payload.AllProviders)
+	}
+	list, err := os.ReadFile(filepath.Join(dir, "out", "build", "main", "deps.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(list, []byte("g++ >= 15\n")) || !bytes.Contains(list, []byte("libtool-dev *\n")) {
+		t.Fatalf("unexpected dependency list: %q", string(list))
+	}
+	provider, err := os.ReadFile(filepath.Join(dir, "out", "build", "main", "provider"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(provider) != "apt" {
+		t.Fatalf("provider export = %q", string(provider))
+	}
+}
+
+func TestBuildDependenciesRequireSelectedProvider(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = 'printf ran > "$PEKIT_OUT/marker"'
+
+[build.dependencies.peipkg]
+gmp-devel = ">= 6.3.0"
+`)
+	writeFile(t, filepath.Join(dir, "env.pekit.toml"), `dependency_provider = "apt"`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run([]string{"build"})
+	if err == nil {
+		t.Fatal("expected missing selected dependency provider to fail")
+	}
+	if diagCode(err) != "missing_dependency_provider" {
+		t.Fatalf("err = %v, want missing_dependency_provider", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "out", "build", "main", "marker")); !os.IsNotExist(statErr) {
+		t.Fatalf("target command should not have run; stat err = %v", statErr)
+	}
+}
+
 func TestTargetTimestampExportsAreUnixSeconds(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `
@@ -382,6 +515,37 @@ command = 'printf "$TOOL_PATH" > "$PEKIT_OUT/tool_path"'
 	}
 	if string(data) != filepath.Join(dir, "out", "tools") {
 		t.Fatalf("env value did not expand managed export: %q", string(data))
+	}
+}
+
+func TestUserEnvValuesCanReferenceEarlierEnvValues(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[env]
+Z_BASE = "base"
+A_CHILD = "$Z_BASE/child"
+
+[build]
+command = 'printf "$A_CHILD" > "$PEKIT_OUT/value"'
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out", "build", "main", "value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "base/child" {
+		t.Fatalf("env value did not expand earlier env value: %q", string(data))
 	}
 }
 
@@ -748,7 +912,7 @@ out_dir = "out"
 format = "peipkg"
 
 [package]
-version = "1.0.0"
+version = "1.0.0-1"
 architecture = "x86_64"
 description = "override package"
 license = "MIT"
@@ -766,12 +930,65 @@ license = "MIT"
 	if err := app.Run([]string{"package"}); err != nil {
 		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
 	}
-	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main_1.0.0_x86_64.peipkg"))
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main_1.0.0-1_x86_64.peipkg"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(artifacts) != 1 {
 		t.Fatalf("expected peipkg artifact, got %v", artifacts)
+	}
+}
+
+func TestPeipkgMetadataTemplatesAreRendered(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+`)
+	writeFile(t, filepath.Join(dir, "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "peipkg"
+
+[package]
+version = "{{version}}-1"
+architecture = "x86_64"
+description = "runtime {{version}}"
+license = "MIT"
+
+[dependencies]
+runtime = "{{version}}"
+
+[provides]
+"runtime-{{version}}" = "{{version}}"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package", "--version", "2.43"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main_2.43-1_x86_64.peipkg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected peipkg artifact, got %v", artifacts)
+	}
+	manifest := readPeipkgManifest(t, artifacts[0])
+	if manifest.Description != "runtime 2.43" {
+		t.Fatalf("description = %q", manifest.Description)
+	}
+	if len(manifest.Dependencies) != 1 || manifest.Dependencies[0].Name != "runtime" || manifest.Dependencies[0].Constraint != "2.43" {
+		t.Fatalf("dependencies = %#v", manifest.Dependencies)
+	}
+	if len(manifest.Provides) != 1 || manifest.Provides[0].Name != "runtime-2.43" || manifest.Provides[0].Version != "2.43" {
+		t.Fatalf("provides = %#v", manifest.Provides)
 	}
 }
 
@@ -789,7 +1006,7 @@ format = "peipkg"
 builds = ["main"]
 
 [package]
-version = "1.0.0"
+version = "1.0.0-1"
 
 [files]
 "@recipe:payload.txt" = "usr/share/payload"
@@ -1140,6 +1357,107 @@ excludes = ["@recipe:share/*.tmp"]
 	assertTarNotHas(t, artifacts[0], "usr/share/app/drop.tmp")
 }
 
+func TestGlobbedDirectoryMatchesPreserveRelativeDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	writeFile(t, filepath.Join(dir, "locale", "de_AT", "LC_ADDRESS"), "de_AT")
+	writeFile(t, filepath.Join(dir, "locale", "de_AT.utf8", "LC_ADDRESS"), "de_AT.utf8")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:locale/de_*/**" = "usr/lib/locale/"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected package artifact, got %v", artifacts)
+	}
+	assertTarHas(t, artifacts[0], "usr/lib/locale/de_AT/LC_ADDRESS")
+	assertTarHas(t, artifacts[0], "usr/lib/locale/de_AT.utf8/LC_ADDRESS")
+}
+
+func TestGlobDestinationWithoutTrailingSlashIsDirectoryPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	writeFile(t, filepath.Join(dir, "share", "man8", "a.8"), "a")
+	writeFile(t, filepath.Join(dir, "share", "man8", "b.8"), "b")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:share/man8/*" = "usr/share/man/man8"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected package artifact, got %v", artifacts)
+	}
+	assertTarHas(t, artifacts[0], "usr/share/man/man8/a.8")
+	assertTarHas(t, artifacts[0], "usr/share/man/man8/b.8")
+}
+
+func TestGlobbedSymlinkDirectoryIsNotTraversed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	writeFile(t, filepath.Join(dir, "real", "payload.txt"), "payload")
+	if err := os.MkdirAll(filepath.Join(dir, "links"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../real", filepath.Join(dir, "links", "tree")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:links/**" = "usr/share/app"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected package artifact, got %v", artifacts)
+	}
+	assertTarHas(t, artifacts[0], "usr/share/app/tree")
+	assertTarNotHas(t, artifacts[0], "usr/share/app/tree/payload.txt")
+}
+
 func TestSingleFileDestinationDirectoryKeepsBasename(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
@@ -1184,7 +1502,7 @@ format = "tar"
 builds = ["main"]
 
 [package]
-version = "1.0.0"
+version = "1.0.0-1"
 
 [files]
 "@recipe:payload.txt" = "usr/share/payload"
@@ -1301,6 +1619,85 @@ path = "repo"
 	stderr.Reset()
 	if err := app.Run([]string{"publish", "--dry-run", "--allow-unanchored"}); err != nil {
 		t.Fatalf("allow-unanchored dry-run failed: %v", err)
+	}
+}
+
+func TestURLTarXZSourceUsesURLBasenameForExtraction(t *testing.T) {
+	if _, err := exec.LookPath("xz"); err != nil {
+		t.Skip("xz not installed")
+	}
+	dir := t.TempDir()
+	serveDir := filepath.Join(dir, "serve")
+	if err := os.MkdirAll(serveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarPath := filepath.Join(serveDir, "app-1.0.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	payload := []byte("payload")
+	if err := tw.WriteHeader(&tar.Header{Name: "app-1.0/payload.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runTestCmd(t, serveDir, "xz", "-z", "-k", tarPath)
+	rawURL := "https://example.test/app-1.0.tar.xz"
+	oldClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != rawURL {
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+		}
+		f, err := os.Open(filepath.Join(serveDir, "app-1.0.tar.xz"))
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: f, Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = oldClient })
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[source.url]
+url = "https://example.test/app-{{version}}.tar.xz"
+extract = true
+root = "app-{{version}}"
+
+[build]
+command = "cat payload.txt > \"$PEKIT_OUT/value\""
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out", "url-"+shortHash(rawURL, "", "app-1.0"), "build", "main", "value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("unexpected build output %q", string(data))
+	}
+	cached, err := filepath.Glob(filepath.Join(dir, "out", "_source_cache", "url", "*", "app-1.0.tar.xz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cached) != 1 {
+		t.Fatalf("expected cached URL artifact with extension, got %v", cached)
 	}
 }
 
@@ -1708,6 +2105,61 @@ func assertTarNotHas(t *testing.T, path, unwanted string) {
 			t.Fatalf("%s unexpectedly found in %s", unwanted, path)
 		}
 	}
+}
+
+type peipkgManifestDoc struct {
+	Description  string `json:"description"`
+	Dependencies []struct {
+		Name       string `json:"name"`
+		Constraint string `json:"constraint"`
+	} `json:"dependencies"`
+	Provides []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"provides"`
+}
+
+func readPeipkgManifest(t *testing.T, path string) peipkgManifestDoc {
+	t.Helper()
+	compressed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zstd.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Name != ".peipkg/manifest.json" {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc peipkgManifestDoc
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	t.Fatalf(".peipkg/manifest.json not found in %s", path)
+	return peipkgManifestDoc{}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func runTestCmd(t *testing.T, dir, name string, args ...string) {

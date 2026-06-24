@@ -277,12 +277,11 @@ func applyVersionSelector(available []string, inv Invocation, cap string) ([]str
 }
 
 func validateConstraintString(raw string) error {
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
+	for _, part := range splitConstraintParts(raw) {
 		if part == "" || part == "*" {
 			continue
 		}
-		for _, op := range []string{">=", "<=", ">", "<", "="} {
+		for _, op := range constraintOperators {
 			if strings.HasPrefix(part, op) {
 				v := strings.TrimSpace(strings.TrimPrefix(part, op))
 				if _, err := ParseVersion(v); err != nil {
@@ -305,6 +304,36 @@ func validateConstraintString(raw string) error {
 	return nil
 }
 
+var constraintOperators = []string{">=", "<=", ">", "<", "="}
+
+func splitConstraintParts(raw string) []string {
+	fields := strings.Fields(strings.ReplaceAll(raw, ",", " "))
+	parts := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		part := fields[i]
+		if isStandaloneConstraintOperator(part) || part == "^" || part == "~" {
+			if i+1 < len(fields) {
+				parts = append(parts, part+fields[i+1])
+				i++
+			} else {
+				parts = append(parts, part)
+			}
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func isStandaloneConstraintOperator(part string) bool {
+	for _, op := range constraintOperators {
+		if part == op {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceVersionCap(source SourceConfig) string {
 	if source.Git.Versions != "" {
 		return source.Git.Versions
@@ -313,12 +342,12 @@ func sourceVersionCap(source SourceConfig) string {
 }
 
 func filterVersions(values []string, constraint string) []string {
-	parts := strings.Split(constraint, ",")
+	parts := splitConstraintParts(constraint)
 	out := make([]string, 0, len(values))
 	for _, value := range values {
 		ok := true
 		for _, part := range parts {
-			if !matchConstraint(value, strings.TrimSpace(part)) {
+			if !matchConstraint(value, part) {
 				ok = false
 				break
 			}
@@ -334,7 +363,7 @@ func matchConstraint(value, constraint string) bool {
 	if constraint == "" || constraint == "*" {
 		return true
 	}
-	for _, op := range []string{">=", "<=", ">", "<", "="} {
+	for _, op := range constraintOperators {
 		if strings.HasPrefix(constraint, op) {
 			rhs := strings.TrimSpace(strings.TrimPrefix(constraint, op))
 			cmp := compareVersionText(value, rhs)

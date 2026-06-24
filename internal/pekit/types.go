@@ -157,7 +157,7 @@ func diagCode(err error) string {
 	return ""
 }
 
-var selectorRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+var selectorRE = regexp.MustCompile(`^[A-Za-z0-9_.+-]+$`)
 
 func validateSelector(kind, name string) error {
 	if name == "" {

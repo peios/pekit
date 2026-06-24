@@ -17,33 +17,41 @@ type CommandEnv struct {
 
 func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut string) (CommandEnv, error) {
 	values := map[string]string{}
+	var userEnv []EnvVar
 	if workspace != nil {
-		overlay(values, workspace.Env)
+		appendEnvLayer(&userEnv, values, workspace.Env)
 	}
-	sourceEnvFile := EnvFile{Env: map[string]string{}}
+	sourceEnvFile := EnvFile{}
 	sourceDelegated := source.Kind != "recipe" && source.SourceRoot != "" && source.SourceRoot != recipe.Root
 	if sourceDelegated && recipe.Delegate.AllowsEnv() {
 		if sourceRecipe, err := LoadRecipe(filepath.Join(source.SourceRoot, "pekit.toml")); err == nil {
-			overlay(values, sourceRecipe.Env)
+			appendEnvLayer(&userEnv, values, sourceRecipe.Env)
 		}
 		var err error
 		sourceEnvFile, err = selectedEnvFile(ctx.Inv, source.SourceRoot, true)
 		if err != nil {
 			return CommandEnv{}, err
 		}
-		overlay(values, sourceEnvFile.Env)
+		appendEnvLayer(&userEnv, values, sourceEnvFile.Env)
 	}
-	overlay(values, recipe.Env)
+	appendEnvLayer(&userEnv, values, recipe.Env)
 	envFile, err := selectedEnvFile(ctx.Inv, recipe.Root, false)
 	if err != nil {
 		return CommandEnv{}, err
 	}
 	if envFile.Path != "" {
-		overlay(values, envFile.Env)
+		appendEnvLayer(&userEnv, values, envFile.Env)
 	}
-	for key := range values {
-		if strings.HasPrefix(key, "PEKIT_") {
-			return CommandEnv{}, diag("reserved_env", "user env cannot set reserved variable %s", key)
+	dependencyProvider := ""
+	if sourceDelegated && recipe.Delegate.AllowsEnv() && sourceEnvFile.DependencyProvider != "" {
+		dependencyProvider = sourceEnvFile.DependencyProvider
+	}
+	if envFile.DependencyProvider != "" {
+		dependencyProvider = envFile.DependencyProvider
+	}
+	for _, env := range userEnv {
+		if strings.HasPrefix(env.Name, "PEKIT_") {
+			return CommandEnv{}, diag("reserved_env", "user env cannot set reserved variable %s", env.Name)
 		}
 	}
 	keyringEnv, err := resolveKeyrings(ctx.Inv, recipe.Root, workspace)
@@ -55,7 +63,7 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 			return CommandEnv{}, diag("env_collision", "keyring export %s collides with normal env", key)
 		}
 	}
-	managed, err := managedEnv(ctx, recipe, workspace, source, version, target, targetOut)
+	managed, err := managedEnv(ctx, recipe, workspace, source, version, target, targetOut, dependencyProvider)
 	if err != nil {
 		return CommandEnv{}, err
 	}
@@ -89,10 +97,10 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 			Message: "managed=" + strings.Join(sortedKeys(managed), ",") + " keyring=" + strings.Join(sortedKeys(keyringEnv), ",") + " env=" + strings.Join(sortedKeys(values), ","),
 		})
 	}
-	return CommandEnv{Values: all, Outer: managed, Script: exportScriptLayers(managed, keyringEnv, values), Wrap: wrap}, nil
+	return CommandEnv{Values: all, Outer: managed, Script: exportScriptLayers(managed, keyringEnv, userEnv), Wrap: wrap}, nil
 }
 
-func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut string) (map[string]string, error) {
+func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut, dependencyProvider string) (map[string]string, error) {
 	values := map[string]string{
 		"PEKIT_RECIPE_ROOT":      recipe.Root,
 		"PEKIT_SOURCE_ROOT":      source.SourceRoot,
@@ -127,6 +135,11 @@ func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, s
 		seenDeps[name] = dep
 		values[name] = targetStage(source, CommandBuild, dep)
 	}
+	dependencyEnv, err := dependencyManagedEnv(source, version, target, dependencyProvider)
+	if err != nil {
+		return nil, err
+	}
+	overlay(values, dependencyEnv)
 	return values, nil
 }
 
@@ -140,7 +153,7 @@ func selectedEnvFile(inv Invocation, recipeRoot string, missingOKOverride bool) 
 		name = "main"
 	}
 	if name == "none" {
-		return EnvFile{Env: map[string]string{}}, nil
+		return EnvFile{}, nil
 	}
 	file := "env.pekit.toml"
 	missingOK := true
@@ -251,6 +264,13 @@ func flattenKeyring(out map[string]string, prefix string, raw map[string]any) er
 func overlay(dst map[string]string, src map[string]string) {
 	for key, value := range src {
 		dst[key] = value
+	}
+}
+
+func appendEnvLayer(out *[]EnvVar, final map[string]string, vars []EnvVar) {
+	for _, env := range vars {
+		*out = append(*out, env)
+		final[env.Name] = env.Value
 	}
 }
 

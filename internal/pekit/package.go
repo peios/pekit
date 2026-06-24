@@ -306,11 +306,20 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	if over.Homepage != "" {
 		out.Homepage = over.Homepage
 	}
+	if over.DefaultRoot != "" {
+		out.DefaultRoot = over.DefaultRoot
+	}
 	if len(over.Dependencies) > 0 {
 		out.Dependencies = cloneStringMap(over.Dependencies)
 	}
+	if len(over.DependencyRoots) > 0 {
+		out.DependencyRoots = cloneStringMap(over.DependencyRoots)
+	}
 	if len(over.OptionalDependencies) > 0 {
 		out.OptionalDependencies = cloneStringMap(over.OptionalDependencies)
+	}
+	if len(over.OptionalDependencyRoots) > 0 {
+		out.OptionalDependencyRoots = cloneStringMap(over.OptionalDependencyRoots)
 	}
 	if len(over.Conflicts) > 0 {
 		out.Conflicts = cloneStringMap(over.Conflicts)
@@ -326,6 +335,9 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	}
 	if len(over.SDOverrides) > 0 {
 		out.SDOverrides = cloneStringMap(over.SDOverrides)
+	}
+	if len(over.Claims.Provides) > 0 || len(over.Claims.Dependencies) > 0 {
+		out.Claims = cloneClaims(over.Claims)
 	}
 	return out
 }
@@ -438,6 +450,11 @@ func expandPackageInstances(pkg EffectivePackage, source SourceState, recipe Rec
 
 func makePackageInstance(selector, instanceSelector, multipack string, cfg PackageConfig, source SourceState, version Version) (PackageInstance, error) {
 	ctx := TemplateContext{Version: version, Multipack: multipack}
+	renderedMeta, err := renderPackageMeta(cfg.Package, ctx)
+	if err != nil {
+		return PackageInstance{}, err
+	}
+	cfg.Package = renderedMeta
 	format := cfg.Format
 	if format == "" {
 		format = "tar"
@@ -448,21 +465,8 @@ func makePackageInstance(selector, instanceSelector, multipack string, cfg Packa
 		if multipack != "" {
 			name += "-" + multipack
 		}
-	} else {
-		rendered, err := RenderTemplate(name, ctx)
-		if err != nil {
-			return PackageInstance{}, wrapDiag("template", "render package.name", err)
-		}
-		name = rendered
 	}
 	versionText := cfg.Package.Version
-	if versionText != "" {
-		rendered, err := RenderTemplate(versionText, ctx)
-		if err != nil {
-			return PackageInstance{}, wrapDiag("template", "render package.version", err)
-		}
-		versionText = rendered
-	}
 	arch := cfg.Package.Architecture
 	stageID := selector
 	if instanceSelector != "" {
@@ -486,6 +490,165 @@ func makePackageInstance(selector, instanceSelector, multipack string, cfg Packa
 		Stage:              stage,
 		Artifact:           artifact,
 	}, nil
+}
+
+func renderPackageMeta(meta PackageMeta, ctx TemplateContext) (PackageMeta, error) {
+	var err error
+	if meta.Name, err = renderPackageString("package.name", meta.Name, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Version, err = renderPackageString("package.version", meta.Version, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Architecture, err = renderPackageString("package.architecture", meta.Architecture, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Description, err = renderPackageString("package.description", meta.Description, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.License, err = renderPackageString("package.license", meta.License, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Homepage, err = renderPackageString("package.homepage", meta.Homepage, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Dependencies, err = renderPackageStringMap("dependencies", meta.Dependencies, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.OptionalDependencies, err = renderPackageStringMap("optional_dependencies", meta.OptionalDependencies, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Conflicts, err = renderPackageStringMap("conflicts", meta.Conflicts, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Provides, err = renderPackageStringMap("provides", meta.Provides, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Replaces, err = renderPackageStringMap("replaces", meta.Replaces, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.SDOverrides, err = renderPackageStringMap("sd_overrides", meta.SDOverrides, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.SideEffects, err = renderPackageStringSlice("side_effects", meta.SideEffects, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	if meta.Claims, err = renderClaims(meta.Claims, ctx); err != nil {
+		return PackageMeta{}, err
+	}
+	return meta, nil
+}
+
+// cloneClaims deep-copies a ClaimsMeta so an override's claims do not
+// alias the base recipe's maps.
+func cloneClaims(in ClaimsMeta) ClaimsMeta {
+	return ClaimsMeta{
+		Provides:     cloneClaimSide(in.Provides),
+		Dependencies: cloneClaimSide(in.Dependencies),
+	}
+}
+
+func cloneClaimSide(in map[string]map[string]ClaimSlot) map[string]map[string]ClaimSlot {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]ClaimSlot, len(in))
+	for role, slots := range in {
+		cp := make(map[string]ClaimSlot, len(slots))
+		for slot, s := range slots {
+			cp[slot] = s
+		}
+		out[role] = cp
+	}
+	return out
+}
+
+// renderClaims runs each claim path and target through the template
+// engine, so a recipe may parameterise them (e.g. an arch triplet in a
+// library path) like any other manifest value.
+func renderClaims(in ClaimsMeta, ctx TemplateContext) (ClaimsMeta, error) {
+	var err error
+	if in.Provides, err = renderClaimSide("claims.provides", in.Provides, ctx); err != nil {
+		return ClaimsMeta{}, err
+	}
+	if in.Dependencies, err = renderClaimSide("claims.dependencies", in.Dependencies, ctx); err != nil {
+		return ClaimsMeta{}, err
+	}
+	return in, nil
+}
+
+func renderClaimSide(field string, in map[string]map[string]ClaimSlot,
+	ctx TemplateContext) (map[string]map[string]ClaimSlot, error) {
+	if len(in) == 0 {
+		return in, nil
+	}
+	out := make(map[string]map[string]ClaimSlot, len(in))
+	for role, slots := range in {
+		cp := make(map[string]ClaimSlot, len(slots))
+		for slot, s := range slots {
+			var err error
+			if s.Path != "" {
+				if s.Path, err = RenderTemplate(s.Path, ctx); err != nil {
+					return nil, wrapDiag("template", "render "+field, err)
+				}
+			}
+			if s.Target != "" {
+				if s.Target, err = RenderTemplate(s.Target, ctx); err != nil {
+					return nil, wrapDiag("template", "render "+field, err)
+				}
+			}
+			cp[slot] = s
+		}
+		out[role] = cp
+	}
+	return out, nil
+}
+
+func renderPackageString(field, value string, ctx TemplateContext) (string, error) {
+	rendered, err := RenderTemplate(value, ctx)
+	if err != nil {
+		return "", wrapDiag("template", "render "+field, err)
+	}
+	return rendered, nil
+}
+
+func renderPackageStringMap(field string, values map[string]string, ctx TemplateContext) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(values))
+	seenRaw := map[string]string{}
+	for _, rawKey := range sortedKeys(values) {
+		key, err := renderPackageString(field+" key", rawKey, ctx)
+		if err != nil {
+			return nil, err
+		}
+		value, err := renderPackageString(field+"."+rawKey, values[rawKey], ctx)
+		if err != nil {
+			return nil, err
+		}
+		if prev, exists := seenRaw[key]; exists {
+			return nil, diag("template_collision", "%s keys %q and %q render to the same name %q", field, prev, rawKey, key)
+		}
+		seenRaw[key] = rawKey
+		out[key] = value
+	}
+	return out, nil
+}
+
+func renderPackageStringSlice(field string, values []string, ctx TemplateContext) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(values))
+	for idx, value := range values {
+		rendered, err := renderPackageString(fmt.Sprintf("%s[%d]", field, idx), value, ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rendered)
+	}
+	return out, nil
 }
 
 func enumerateMultipack(cfg MultipackConfig, source SourceState, recipe RecipeConfig, workspace *WorkspaceConfig, version Version) ([]string, error) {
@@ -597,7 +760,7 @@ func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig,
 			return err
 		}
 	} else if inst.Format == "peipkg" {
-		if err := writePeipkg(ctx, inst, source, entries); err != nil {
+		if err := writePeipkg(ctx, workspace, inst, source, entries); err != nil {
 			return err
 		}
 	} else {
@@ -788,8 +951,8 @@ func validatePayloadDestinations(entries []payloadEntry) error {
 		if err != nil {
 			return wrapDiag("stat", entry.Source, err)
 		}
-		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-			return diag("unsupported_payload_type", "package source %s is not a regular file or symlink", entry.Source)
+		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && !info.IsDir() {
+			return diag("unsupported_payload_type", "package source %s is not a regular file, directory, or symlink", entry.Source)
 		}
 		seen[dest] = entry.Source
 	}
@@ -815,7 +978,7 @@ func expandPayloadMapping(root, pattern, dest string, override bool, excludes []
 	magic := hasGlobMagic(pattern)
 	var matches []string
 	if magic {
-		matches, err = doublestar.Glob(os.DirFS(root), filepath.ToSlash(pattern))
+		matches, err = doublestar.Glob(os.DirFS(root), filepath.ToSlash(pattern), doublestar.WithNoFollow())
 		if err != nil {
 			return nil, err
 		}
@@ -826,9 +989,6 @@ func expandPayloadMapping(root, pattern, dest string, override bool, excludes []
 		return nil, diag("missing_payload", "file source %s has no matches", filepath.Join(root, pattern))
 	}
 	matches = filterCoveredDirectoryMatches(root, matches)
-	if len(matches) > 1 && !destIsDir {
-		return nil, diag("invalid_payload_path", "destination %s must end with / when a source expands to multiple entries", dest)
-	}
 	base := globBase(pattern)
 	var out []payloadEntry
 	for _, match := range matches {
@@ -843,13 +1003,34 @@ func expandPayloadMapping(root, pattern, dest string, override bool, excludes []
 					return walkErr
 				}
 				if d.IsDir() {
-					return nil
+					// Non-empty directories are implied by their contents
+					// (pack auto-creates ancestor directories), so they need
+					// no entry of their own. An empty directory has no such
+					// content to imply it, so emit it as an explicit
+					// empty-directory payload entry — otherwise a pure
+					// directory skeleton (e.g. fsbase's runtime mountpoints)
+					// would pack to nothing.
+					children, derr := os.ReadDir(path)
+					if derr != nil {
+						return derr
+					}
+					if len(children) > 0 {
+						return nil
+					}
 				}
 				rel, _ := filepath.Rel(abs, path)
 				sourceRel, _ := filepath.Rel(root, path)
 				sourceRel = filepath.ToSlash(sourceRel)
 				if excluded(sourceRel, excludes) {
 					return nil
+				}
+				if magic || len(matches) > 1 {
+					rel = sourceRel
+					if base != "" {
+						if r, err := filepath.Rel(filepath.FromSlash(base), filepath.FromSlash(sourceRel)); err == nil {
+							rel = filepath.ToSlash(r)
+						}
+					}
 				}
 				archivePath := filepath.ToSlash(filepath.Join(dest, rel))
 				out = append(out, payloadEntry{Source: path, Dest: archivePath, Override: override})
@@ -933,6 +1114,11 @@ func writeTar(path string, entries []payloadEntry) error {
 			return wrapDiag("tar", entry.Source, err)
 		}
 		hdr.Name = filepath.ToSlash(entry.Dest)
+		if info.IsDir() && !strings.HasSuffix(hdr.Name, "/") {
+			// POSIX pax mandates a trailing slash on directory entry names;
+			// FileInfoHeader adds it but the explicit Name override drops it.
+			hdr.Name += "/"
+		}
 		hdr.ModTime = time.Unix(0, 0).UTC()
 		hdr.AccessTime = time.Unix(0, 0).UTC()
 		hdr.ChangeTime = time.Unix(0, 0).UTC()
@@ -974,7 +1160,7 @@ func copyToTar(tw *tar.Writer, path string) error {
 	return nil
 }
 
-func writePeipkg(ctx *Context, inst PackageInstance, source SourceState, entries []payloadEntry) error {
+func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance, source SourceState, entries []payloadEntry) error {
 	if inst.Version == "" {
 		return diag("missing_package_field", "peipkg package %s requires [package].version", instanceID(inst))
 	}
@@ -1011,10 +1197,11 @@ func writePeipkg(ctx *Context, inst PackageInstance, source SourceState, entries
 		Description:          meta.Description,
 		License:              meta.License,
 		Homepage:             meta.Homepage,
-		Dependencies:         packDeps(meta.Dependencies),
-		OptionalDependencies: packDeps(meta.OptionalDependencies),
-		Conflicts:            packDeps(meta.Conflicts),
-		Provides:             packProvides(meta.Provides),
+		DefaultRoot:          meta.DefaultRoot,
+		Dependencies:         packDeps(meta.Dependencies, meta.DependencyRoots, meta.Claims.Dependencies),
+		OptionalDependencies: packDeps(meta.OptionalDependencies, meta.OptionalDependencyRoots, meta.Claims.Dependencies),
+		Conflicts:            packDeps(meta.Conflicts, nil, nil),
+		Provides:             packProvides(meta.Provides, meta.Claims.Provides),
 		Replaces:             packReplaces(meta.Replaces),
 		SideEffects:          append([]string(nil), meta.SideEffects...),
 		SDOverrides:          packSDOverrides(meta.SDOverrides),
@@ -1023,6 +1210,25 @@ func writePeipkg(ctx *Context, inst PackageInstance, source SourceState, entries
 			FarmID:    "local",
 			SourceRef: source.ProvenanceRef,
 		},
+	}
+	// Derive provides/dependencies from the staged payload, on top of
+	// whatever the recipe declared by hand: shared-library sonames (the
+	// workspace symbol-version policy refines glibc-style sonames with a
+	// version floor) and pkgconfig(...) capabilities from .pc files.
+	for _, d := range []pack.DerivedDeps{
+		pack.DeriveELFDeps(files, inst.Version, workspace.symbolVersionPolicy()),
+		pack.DerivePkgConfigDeps(files),
+	} {
+		manifest.Provides = mergeProvides(manifest.Provides, d.Provides)
+		manifest.Dependencies = mergeDeps(manifest.Dependencies, d.Dependencies)
+		for _, w := range d.Warnings {
+			fmt.Fprintf(ctx.App.Stderr, "warning: %s: %s\n", instanceID(inst), w)
+		}
+	}
+	// A provider claim must point at a file this package ships (§4.4): keeps
+	// claim targets in-root, so the materialised symlink can be relative.
+	if err := pack.ValidateClaimTargets(manifest.Provides, files); err != nil {
+		return wrapDiag("claim_target_validation", instanceID(inst), err)
 	}
 	if err := pack.Pack(pack.PackOptions{Manifest: manifest, Files: files, Out: f}); err != nil {
 		_ = f.Close()
@@ -1227,7 +1433,7 @@ func instanceID(inst PackageInstance) string {
 	return inst.DefinitionSelector + ":" + inst.InstanceSelector
 }
 
-func packDeps(values map[string]string) []pack.Dependency {
+func packDeps(values, roots map[string]string, claims map[string]map[string]ClaimSlot) []pack.Dependency {
 	keys := sortedKeys(values)
 	out := make([]pack.Dependency, 0, len(keys))
 	for _, key := range keys {
@@ -1235,16 +1441,64 @@ func packDeps(values map[string]string) []pack.Dependency {
 		if constraint == "*" {
 			constraint = ""
 		}
-		out = append(out, pack.Dependency{Name: key, Constraint: constraint})
+		out = append(out, pack.Dependency{
+			Name: key, Constraint: constraint, Root: roots[key],
+			Claims: packClaimSlots(claims[key])})
 	}
 	return out
 }
 
-func packProvides(values map[string]string) []pack.Provides {
+func packProvides(values map[string]string, claims map[string]map[string]ClaimSlot) []pack.Provides {
 	keys := sortedKeys(values)
 	out := make([]pack.Provides, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, pack.Provides{Name: key, Version: values[key]})
+		out = append(out, pack.Provides{
+			Name: key, Version: values[key], Claims: packClaimSlots(claims[key])})
+	}
+	return out
+}
+
+// mergeProvides appends derived provides to the recipe-declared set, keeping
+// the recipe entry on a name collision (it may carry a version or claims).
+func mergeProvides(existing, derived []pack.Provides) []pack.Provides {
+	have := make(map[string]bool, len(existing))
+	for _, p := range existing {
+		have[p.Name] = true
+	}
+	for _, p := range derived {
+		if !have[p.Name] {
+			existing = append(existing, p)
+			have[p.Name] = true
+		}
+	}
+	return existing
+}
+
+// mergeDeps appends derived dependencies to the recipe-declared set, keeping
+// the recipe entry on a name collision (its explicit constraint wins).
+func mergeDeps(existing, derived []pack.Dependency) []pack.Dependency {
+	have := make(map[string]bool, len(existing))
+	for _, d := range existing {
+		have[d.Name] = true
+	}
+	for _, d := range derived {
+		if !have[d.Name] {
+			existing = append(existing, d)
+			have[d.Name] = true
+		}
+	}
+	return existing
+}
+
+// packClaimSlots adapts a recipe role's slot map to the pack form,
+// returning nil when the role declares no claims.
+func packClaimSlots(slots map[string]ClaimSlot) map[string]pack.ClaimSlot {
+	if len(slots) == 0 {
+		return nil
+	}
+	out := make(map[string]pack.ClaimSlot, len(slots))
+	for slot, s := range slots {
+		out[slot] = pack.ClaimSlot{Path: s.Path, Target: s.Target}
 	}
 	return out
 }

@@ -1874,7 +1874,11 @@ Rules:
 - Empty paths are invalid.
 - `..` components are invalid.
 - `.` components and duplicate slashes are normalized away.
-- A destination ending in `/` is a destination directory.
+- For literal single-file sources, a destination ending in `/` is a destination
+  directory.
+- For directory sources and glob sources, the destination is a directory prefix
+  even when it does not end in `/`; the trailing slash is accepted as explicit
+  notation but is not required.
 - Parent directories are synthesized by the package format.
 - A file entry cannot collide with another file, symlink, or directory entry.
 - A directory entry cannot collide with a file or symlink entry.
@@ -1923,9 +1927,8 @@ Rules:
 - Globs only match inside their source root.
 - Glob expansion is sorted lexicographically by normalized source path.
 - A glob that matches nothing is an error by default.
-- If a glob expands to multiple entries, the destination must be a directory.
-- For a glob mapped to a destination directory, each matched path is placed
-  under the destination using its path relative to the non-glob source prefix.
+- Each matched path is placed under the destination using its path relative to
+  the non-glob source prefix.
 - Source symlinks matched by globs remain symlink payload entries.
 
 Future extension:
@@ -2855,6 +2858,41 @@ PEKIT_<TARGET>_OUT=<absolute out base/build/<target>>
 Only direct dependencies are exported. Transitive dependency outputs are not
 exported unless they are direct needs.
 
+Build target dependency metadata is exported for every shell-running target:
+
+```sh
+PEKIT_DEPENDENCIES_FILE=<absolute path to generated JSON payload>
+PEKIT_DEPENDENCY_PROVIDER=<selected dependency provider, or empty>
+PEKIT_DEPENDENCIES=<newline list of "name constraint" pairs for selected provider>
+```
+
+The JSON payload is canonical. It contains:
+
+```json
+{
+  "command": "build",
+  "target": "main",
+  "provider": "apt",
+  "version": "1.2.3",
+  "dependencies": {
+    "libssl-dev": "*"
+  },
+  "all_providers": {
+    "peipkg": {
+      "openssl-devel": ">= 3.0"
+    },
+    "apt": {
+      "libssl-dev": "*"
+    }
+  }
+}
+```
+
+If an env file selects `dependency_provider = "apt"` and a build target declares
+dependencies for other providers but not `apt`, Pekit errors before running the
+target. If no provider is selected, `dependencies` is empty and
+`all_providers` still records the recipe declarations.
+
 ### Environment Assembly
 
 Environment assembly is a plan-time object. Execution should consume the
@@ -3043,6 +3081,12 @@ PATH = "$HOME/.cargo/bin:$PATH"
 [build.main]
 command = "cargo build --release"
 
+[build.main.dependencies.peipkg]
+openssl-devel = ">= 3.0"
+
+[build.main.dependencies.apt]
+libssl-dev = "*"
+
 [test.unit]
 needs = ["main"]
 command = "cargo test"
@@ -3074,6 +3118,9 @@ Command target shape stays close to current Pekit:
 - mixing bare and named targets in the same section is an error
 - `command` is required
 - `needs` names build targets, not sibling test/install targets
+- build targets may declare provider-scoped build dependencies under
+  `[build.<target>.dependencies.<provider>]`
+- dependency providers are selected by env files, not by recipes
 
 ### `package.pekit.toml`
 
@@ -3154,6 +3201,8 @@ ci.env.pekit.toml
 Shape:
 
 ```toml
+dependency_provider = "apt"
+
 [wrap]
 command = "nix develop --command sh -euc {{command}}"
 
@@ -3161,8 +3210,8 @@ command = "nix develop --command sh -euc {{command}}"
 RUSTFLAGS = "-C target-feature=+crt-static"
 ```
 
-Env files may contain `[wrap]`, `[env]`, or both. At least one section must be
-present.
+Env files may contain `[wrap]`, `[env]`, `dependency_provider`, or a
+combination. At least one must be present.
 
 Env file selection:
 
@@ -3216,12 +3265,16 @@ Common rules:
   env-scrubbing wrappers.
 - `[env]` in an env file participates in the environment assembly layer for
   that selected env name.
+- `dependency_provider` selects which build dependency provider is exposed as
+  the active dependency set for target wrappers and commands.
 - Source env-file `[env]` values participate only when env delegation is
   enabled.
 - Source env-file `[wrap]` values participate only when wrap delegation is
   enabled.
-- Recipe env files override delegated source env files for both `[env]` and
-  `[wrap]`.
+- Source env-file `dependency_provider` values participate only when env
+  delegation is enabled.
+- Recipe env files override delegated source env files for `[env]`, `[wrap]`,
+  and `dependency_provider`.
 
 ### Keyring Files
 

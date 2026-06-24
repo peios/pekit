@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -261,10 +263,18 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		return st, nil
 	}
 	rawDir := filepath.Join(outBase, "_source_cache", "url", shortHash(renderedURL))
-	artifact := filepath.Join(rawDir, "artifact")
+	artifact := filepath.Join(rawDir, urlArtifactName(renderedURL))
 	if ctx.Inv.RefreshSource {
 		_ = os.RemoveAll(rawDir)
 		_ = os.RemoveAll(filepath.Join(outBase, scope))
+	}
+	if !fileExists(artifact) {
+		legacyArtifact := filepath.Join(rawDir, "artifact")
+		if legacyArtifact != artifact && fileExists(legacyArtifact) {
+			if err := os.Rename(legacyArtifact, artifact); err != nil {
+				return SourceState{}, wrapDiag("rename", "preserve URL artifact extension", err)
+			}
+		}
 	}
 	if !fileExists(artifact) {
 		if err := os.MkdirAll(rawDir, 0o755); err != nil {
@@ -340,11 +350,7 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
 				return SourceState{}, wrapDiag("mkdir", sourceRoot, err)
 			}
-			name := filepath.Base(renderedURL)
-			if name == "." || name == "/" || name == "" {
-				name = "artifact"
-			}
-			if err := copyFile(artifact, filepath.Join(sourceRoot, name)); err != nil {
+			if err := copyFile(artifact, filepath.Join(sourceRoot, filepath.Base(artifact))); err != nil {
 				return SourceState{}, err
 			}
 		}
@@ -363,6 +369,18 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		Timestamp:     sourceTimestamp,
 		Unanchored:    unanchored,
 	}, nil
+}
+
+func urlArtifactName(raw string) string {
+	parsed, err := url.Parse(raw)
+	name := ""
+	if err == nil {
+		name = path.Base(parsed.Path)
+	}
+	if name == "" || name == "." || name == "/" || strings.ContainsRune(name, '\x00') {
+		return "artifact"
+	}
+	return name
 }
 
 func drySource(kind, outBase, scope, provenance string) SourceState {

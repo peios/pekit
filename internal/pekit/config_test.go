@@ -26,6 +26,13 @@ path = "../src"
 command = "make"
 needs = ["prep"]
 
+[build.main.dependencies.peipkg]
+gmp-devel = ">= 6.3.0"
+
+[build.main.dependencies.apt]
+"libgmp-dev" = ">= 2:6.3.0"
+"g++" = "*"
+
 [build.prep]
 command = ["true"]
 `)
@@ -38,6 +45,9 @@ command = ["true"]
 	}
 	if recipe.Targets[CommandBuild]["main"].Needs[0] != "prep" {
 		t.Fatalf("target needs not decoded: %#v", recipe.Targets[CommandBuild]["main"])
+	}
+	if recipe.Targets[CommandBuild]["main"].Dependencies["apt"]["g++"] != "*" {
+		t.Fatalf("target dependencies not decoded: %#v", recipe.Targets[CommandBuild]["main"].Dependencies)
 	}
 }
 
@@ -112,6 +122,19 @@ func TestEnvFileRequiresEnvOrWrap(t *testing.T) {
 	}
 }
 
+func TestEnvFileAllowsDependencyProviderOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "apt.env.pekit.toml")
+	writeFile(t, path, `dependency_provider = "apt"`)
+	env, err := LoadEnvFile(path, false)
+	if err != nil {
+		t.Fatalf("load env file: %v", err)
+	}
+	if env.DependencyProvider != "apt" {
+		t.Fatalf("dependency provider = %q", env.DependencyProvider)
+	}
+}
+
 func TestWorkspaceRequiresInclude(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "workspace.pekit.toml")
@@ -123,6 +146,45 @@ CC = "clang"
 	}
 }
 
+func TestWorkspaceSymbolVersionPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workspace.pekit.toml")
+	writeFile(t, path, `include = ["**/package.pekit.toml"]
+
+[policy.symbol_versions]
+"libc.so.6" = "GLIBC_"
+"libgcc_s.so.1" = "GCC_"
+`)
+	cfg, err := LoadWorkspace(path)
+	if err != nil {
+		t.Fatalf("LoadWorkspace: %v", err)
+	}
+	if got := cfg.Policy.SymbolVersions["libc.so.6"]; got != "GLIBC_" {
+		t.Errorf("libc.so.6 prefix = %q, want GLIBC_", got)
+	}
+	pol := cfg.symbolVersionPolicy()
+	if pol["libgcc_s.so.1"] != "GCC_" {
+		t.Errorf("symbolVersionPolicy() = %v", pol)
+	}
+	// A nil/empty workspace yields a nil policy, not a panic.
+	if (*WorkspaceConfig)(nil).symbolVersionPolicy() != nil {
+		t.Error("nil workspace should yield nil policy")
+	}
+}
+
+func TestWorkspaceRejectsUnknownPolicyTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workspace.pekit.toml")
+	writeFile(t, path, `include = ["**/package.pekit.toml"]
+
+[policy.bogus]
+x = "y"
+`)
+	if _, err := LoadWorkspace(path); err == nil {
+		t.Fatal("expected unknown policy sub-table to fail")
+	}
+}
+
 func TestEnvNamesMustBeShellVariables(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `
@@ -131,6 +193,31 @@ func TestEnvNamesMustBeShellVariables(t *testing.T) {
 `)
 	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
 		t.Fatal("expected invalid env name to fail")
+	}
+}
+
+func TestEnvPreservesDocumentOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[env]
+Z_BASE = "base"
+A_CHILD = "$Z_BASE/child"
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []EnvVar{
+		{Name: "Z_BASE", Value: "base"},
+		{Name: "A_CHILD", Value: "$Z_BASE/child"},
+	}
+	if len(recipe.Env) != len(want) {
+		t.Fatalf("env = %#v, want %#v", recipe.Env, want)
+	}
+	for i := range want {
+		if recipe.Env[i] != want[i] {
+			t.Fatalf("env[%d] = %#v, want %#v", i, recipe.Env[i], want[i])
+		}
 	}
 }
 

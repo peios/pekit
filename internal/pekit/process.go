@@ -191,16 +191,15 @@ func exportScript(values map[string]string) string {
 	return b.String()
 }
 
-func exportScriptLayers(managed, keyring, user map[string]string) string {
+func exportScriptLayers(managed, keyring map[string]string, user []EnvVar) string {
 	var b strings.Builder
 	appendQuotedExports(&b, managed)
 	appendQuotedExports(&b, keyring)
-	keys := sortedKeys(user)
-	for _, key := range keys {
+	for _, env := range user {
 		b.WriteString("export ")
-		b.WriteString(key)
+		b.WriteString(env.Name)
 		b.WriteByte('=')
-		b.WriteString(user[key])
+		b.WriteString(env.Value)
 		b.WriteByte('\n')
 	}
 	return b.String()
