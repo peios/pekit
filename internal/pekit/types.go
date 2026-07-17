@@ -18,6 +18,8 @@ const (
 	CommandClean     Command = "clean"
 	CommandPackage   Command = "package"
 	CommandPublish   Command = "publish"
+	CommandGen       Command = "gen"
+	CommandVerify    Command = "verify"
 	CommandWorkspace Command = "workspace"
 )
 
@@ -28,6 +30,8 @@ var commands = map[string]Command{
 	"clean":     CommandClean,
 	"package":   CommandPackage,
 	"publish":   CommandPublish,
+	"gen":       CommandGen,
+	"verify":    CommandVerify,
 	"workspace": CommandWorkspace,
 }
 
@@ -64,6 +68,7 @@ type Invocation struct {
 	PreferLocal *string
 
 	NoBuild            *string
+	NoVerify           *string
 	EnvName            string
 	Keyrings           []string
 	KeyringValues      map[string]string

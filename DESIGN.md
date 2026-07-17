@@ -140,6 +140,8 @@ Candidate commands:
 - `clean`
 - `package`
 - `publish`
+- `gen`
+- `verify`
 - `workspace`
 
 Each command should define:
@@ -545,6 +547,8 @@ This is the first-pass v2 command contract.
 | `package` | packages | yes, multiple versions | yes | yes | yes | stages builds, writes package artifacts |
 | `publish` | packages | yes, multiple versions | yes | yes | yes | stages builds, writes packages, publishes artifacts |
 | `clean` | clean target and/or managed output | no | no | no | only when a clean target runs | runs clean target and/or removes managed output |
+| `gen` | gen targets | no | no | no | yes | runs gen commands (writes generated source in-tree) |
+| `verify` | gen targets | no | no | no | yes | runs gen verify_commands (read-only drift check) |
 | `workspace` | workspace members plus a delegated command | delegated | delegated | delegated | delegated | delegates normal operations per member |
 
 Version behavior:
@@ -554,6 +558,42 @@ Version behavior:
   version. If a selector expands to multiple versions, that is an error unless a
   future explicit multi-test/multi-install mode is added.
 - `clean` does not support version selection in the initial v2 design.
+- `gen` and `verify` do not select versions or a source at all: they operate on
+  the committed tree at the recipe root (short pipeline — no source resolution,
+  no version selection, no artifact collection).
+
+### Gen and Verify
+
+A `gen` target generates source that is committed to the tree, rather than
+building an artifact into `out/`. This is a distinct data-flow direction from
+`build` (which reads source and writes artifacts): `gen` reads canonical inputs
+and writes generated source *back into the tree*. Because its product is
+committed, `gen` skips the whole source/version/artifact pipeline and runs its
+`command` at the recipe root. Its `$PEKIT_OUT` is a pekit-managed scratch
+directory (`<out_dir>/.scratch/gen/<name>`) that sits outside the artifact
+namespace — package collection and `--no-build` reuse never see it — cleaned on
+success and retained on failure for post-mortem.
+
+Each `[gen.<name>]` may declare a `verify_command`: the drift gate. It exits
+zero when the committed output is in sync and non-zero otherwise, and it owns
+its own comparison — pekit never diffs, and never assumes a generator is
+deterministic (a generator that stamps a timestamp filters it out in its own
+`verify_command`). `pekit verify` runs these on demand (the CI / pre-push gate).
+
+`verify_command`s also run as a **pre-flight** for consuming commands
+(`build`, `test`, `install`, `package`, `publish`): before any such command
+runs, the drift gates that scope to the targets it will execute are checked, so
+a stale tree fails fast (with a message recommending `pekit gen <name>`) rather
+than being silently consumed. Scope is per namespace, via `verify_on_build` and
+`verify_on_test` (separate keys because `[build.x]` and `[test.x]` share a bare
+name): an absent key gates *all* targets in that namespace, an empty list gates
+*none* (verify only on demand), and a populated list gates only the named
+targets. `--no-verify` skips the pre-flight entirely; `--no-verify=a,b` skips
+named gens; on `package`/`publish` the flag passes through to the builds they
+trigger. Multiple failing gates are collected and reported together, not
+fail-fast. A `verify_dependencies` table, when present, fully replaces the gen
+target's `dependencies` for the `verify_command` run (so a cheap check need not
+inherit the generator's toolchain).
 
 ### Target Selection
 
@@ -565,10 +605,14 @@ Target names:
 - Canonical target names match `[A-Za-z0-9_.-]+`.
 - Target names must not contain `/` or `:`.
 - Target names must not start with `-`.
-- Bare `[build]`, `[test]`, `[install]`, or `[clean]` means target `main`.
-- Named targets use `[build.<name>]`, `[test.<name>]`, `[install.<name>]`, or
-  `[clean.<name>]`.
+- Bare `[build]`, `[test]`, `[install]`, `[clean]`, or `[gen]` means target
+  `main`.
+- Named targets use `[build.<name>]`, `[test.<name>]`, `[install.<name>]`,
+  `[clean.<name>]`, or `[gen.<name>]`.
 - Mixing bare and named targets in the same command section is an error.
+- `gen` and `verify` share the `[gen.<name>]` namespace: `verify` runs the
+  `verify_command` of the selected gen targets. `pekit gen --all` /
+  `pekit verify --all` operate on every gen target.
 
 Build:
 

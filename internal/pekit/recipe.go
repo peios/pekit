@@ -40,6 +40,20 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 		}
 		return cleanRecipe(ctx, recipe, workspace, source, member)
 	}
+	// gen and verify operate on the committed tree — no version selection and no
+	// source clone — so they short-circuit before source resolution.
+	if cmd == CommandGen {
+		return runGen(ctx, recipe, workspace, cleanSourceState(recipe), ctx.Inv.selectors(), member)
+	}
+	if cmd == CommandVerify {
+		return runVerify(ctx, recipe, workspace, cleanSourceState(recipe), ctx.Inv.selectors(), member)
+	}
+	// Consuming commands run the scoped drift gates first, so no build/test/
+	// package/publish ever proceeds from a stale generated tree (unless
+	// --no-verify is passed).
+	if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
+		return err
+	}
 	versions, err := ResolveVersions(ctx.Inv, recipe.Source)
 	if err != nil {
 		return err
@@ -81,7 +95,7 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 
 func recipeTargetSummary(recipe RecipeConfig) string {
 	parts := make([]string, 0, len(recipe.Targets))
-	for _, kind := range []Command{CommandBuild, CommandTest, CommandInstall, CommandClean} {
+	for _, kind := range []Command{CommandBuild, CommandTest, CommandInstall, CommandClean, CommandGen} {
 		targets := recipe.Targets[kind]
 		if len(targets) == 0 {
 			continue

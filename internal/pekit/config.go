@@ -31,6 +31,18 @@ type TargetConfig struct {
 	ClearOut     bool
 	Owner        string
 	Path         string
+
+	// gen-only fields. VerifyCommand is the drift gate run by `pekit verify`
+	// and by the build/test/package/publish pre-flight. VerifyOnBuild and
+	// VerifyOnTest scope which targets the pre-flight gates, per namespace:
+	// nil (absent) gates ALL targets in that namespace, a non-nil empty slice
+	// gates NONE (verify only on demand), and a populated slice gates only the
+	// listed bare target names. VerifyDependencies, when non-nil, fully
+	// replaces Dependencies for the verify_command run.
+	VerifyCommand      ShellCommand
+	VerifyOnBuild      *[]string
+	VerifyOnTest       *[]string
+	VerifyDependencies map[string]map[string]string
 }
 
 type EnvVar struct {
@@ -173,10 +185,10 @@ type PackageMeta struct {
 	// carried for conflicts (which stay root-local).
 	DependencyRoots         map[string]string
 	OptionalDependencyRoots map[string]string
-	Provides             map[string]string
-	Replaces             map[string]string
-	SideEffects          []string
-	SDOverrides          map[string]string
+	Provides                map[string]string
+	Replaces                map[string]string
+	SideEffects             []string
+	SDOverrides             map[string]string
 	// Claims attaches claim slots (PSD-009 §4.4) to provides and
 	// dependency entries, keyed by role. It is parsed from the top-level
 	// [claims] table; recipes without claims leave it empty.
@@ -243,7 +255,7 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	}
 	known := map[string]bool{
 		"out_dir": true, "env": true, "wrap": true, "source": true, "delegate": true,
-		"build": true, "test": true, "install": true, "clean": true,
+		"build": true, "test": true, "install": true, "clean": true, "gen": true,
 	}
 	for key := range raw {
 		if !known[key] {
@@ -280,7 +292,7 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 			return RecipeConfig{}, err
 		}
 	}
-	for _, cmd := range []Command{CommandBuild, CommandTest, CommandInstall, CommandClean} {
+	for _, cmd := range []Command{CommandBuild, CommandTest, CommandInstall, CommandClean, CommandGen} {
 		v, ok := raw[string(cmd)]
 		if !ok {
 			continue
@@ -770,6 +782,14 @@ func parseTargets(path string, kind Command, value any) (map[string]TargetConfig
 }
 
 func targetConfigKey(kind Command, key string) bool {
+	if kind == CommandGen {
+		switch key {
+		case "command", "verify_command", "verify_on_build", "verify_on_test", "dependencies", "verify_dependencies":
+			return true
+		default:
+			return false
+		}
+	}
 	switch key {
 	case "command", "needs", "clear_out":
 		return true
@@ -781,6 +801,9 @@ func targetConfigKey(kind Command, key string) bool {
 }
 
 func parseTarget(path string, kind Command, name string, table map[string]any) (TargetConfig, error) {
+	if kind == CommandGen {
+		return parseGenTarget(path, name, table)
+	}
 	known := map[string]bool{"command": true, "needs": true, "clear_out": true}
 	if kind == CommandBuild {
 		known["dependencies"] = true
@@ -818,6 +841,91 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 		}
 	}
 	return t, nil
+}
+
+// parseGenTarget parses a [gen.NAME] target. Unlike build/test targets it has
+// no needs (no build DAG — it operates on the committed tree) and no clear_out
+// (its $PEKIT_OUT is a pekit-managed scratch dir), but it adds the drift-gate
+// fields: verify_command, verify_on_{build,test}, and verify_dependencies.
+func parseGenTarget(path, name string, table map[string]any) (TargetConfig, error) {
+	prefix := "gen." + name
+	known := map[string]bool{
+		"command": true, "verify_command": true,
+		"verify_on_build": true, "verify_on_test": true,
+		"dependencies": true, "verify_dependencies": true,
+	}
+	for key := range table {
+		if !known[key] {
+			return TargetConfig{}, diagAt("unknown_key", path, "unknown target key %s.%s", prefix, key)
+		}
+	}
+	raw, ok := table["command"]
+	if !ok {
+		return TargetConfig{}, diagAt("missing_key", path, "%s requires command", prefix)
+	}
+	cmd, err := parseCommand(path, prefix+".command", raw)
+	if err != nil {
+		return TargetConfig{}, err
+	}
+	t := TargetConfig{Name: name, Kind: CommandGen, Command: cmd, Owner: "recipe", Path: path}
+	if v, ok := table["verify_command"]; ok {
+		t.VerifyCommand, err = parseCommand(path, prefix+".verify_command", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
+	if v, ok := table["verify_on_build"]; ok {
+		names, err := parseVerifyScope(path, prefix+".verify_on_build", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+		t.VerifyOnBuild = &names
+	}
+	if v, ok := table["verify_on_test"]; ok {
+		names, err := parseVerifyScope(path, prefix+".verify_on_test", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+		t.VerifyOnTest = &names
+	}
+	if v, ok := table["dependencies"]; ok {
+		t.Dependencies, err = parseTargetDependencies(path, prefix+".dependencies", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
+	if v, ok := table["verify_dependencies"]; ok {
+		t.VerifyDependencies, err = parseTargetDependencies(path, prefix+".verify_dependencies", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
+	if (t.VerifyOnBuild != nil || t.VerifyOnTest != nil) && t.VerifyCommand.Empty() {
+		return TargetConfig{}, diagAt("invalid_gen", path, "%s sets verify_on_build/verify_on_test but has no verify_command to gate", prefix)
+	}
+	if t.VerifyDependencies != nil && t.VerifyCommand.Empty() {
+		return TargetConfig{}, diagAt("invalid_gen", path, "%s sets verify_dependencies but has no verify_command", prefix)
+	}
+	return t, nil
+}
+
+// parseVerifyScope parses a verify_on_build / verify_on_test array. An empty
+// array is valid and meaningful (gate nothing); each entry must be a canonical
+// bare target name within the referenced namespace.
+func parseVerifyScope(path, key string, value any) ([]string, error) {
+	names, err := expectStringSlice(path, key, value)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range names {
+		if err := validateSelector("target", n); err != nil {
+			return nil, diagAt("invalid_selector", path, "%s: %s", key, err.Error())
+		}
+	}
+	if names == nil {
+		names = []string{}
+	}
+	return names, nil
 }
 
 func parseTargetDependencies(path, key string, value any) (map[string]map[string]string, error) {

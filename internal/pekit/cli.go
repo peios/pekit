@@ -12,6 +12,7 @@ const (
 	flagVersion flagUse = iota
 	flagLocal
 	flagNoBuild
+	flagNoVerify
 	flagEnv
 	flagKeyring
 	flagRefreshSource
@@ -22,22 +23,31 @@ const (
 
 var commandFlags = map[Command]map[flagUse]bool{
 	CommandBuild: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
 	},
 	CommandTest: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
 	},
 	CommandInstall: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
 	},
 	CommandPackage: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
 	},
 	CommandPublish: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAll: true,
 	},
 	CommandClean: {
 		flagEnv: true, flagKeyring: true, flagCleanMode: true,
+	},
+	// gen runs a source-generating target; verify runs a gen target's
+	// verify_command. Neither resolves versions or a remote source, so they
+	// carry only the env/keyring/wrap inputs plus --all (every gen target).
+	CommandGen: {
+		flagEnv: true, flagKeyring: true, flagAll: true,
+	},
+	CommandVerify: {
+		flagEnv: true, flagKeyring: true, flagAll: true,
 	},
 }
 
@@ -161,6 +171,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.Local = sub.Local
 	inv.PreferLocal = sub.PreferLocal
 	inv.NoBuild = sub.NoBuild
+	inv.NoVerify = sub.NoVerify
 	inv.EnvName = sub.EnvName
 	inv.Keyrings = sub.Keyrings
 	inv.KeyringValues = sub.KeyringValues
@@ -194,6 +205,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.NoBuild != nil {
 		out = append(out, flagNoBuild)
+	}
+	if inv.NoVerify != nil {
+		out = append(out, flagNoVerify)
 	}
 	if inv.EnvName != "" {
 		out = append(out, flagEnv)
@@ -315,6 +329,13 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.NoBuild = &v
 		return true, i + 1, flagNoBuild, nil
+	case "--no-verify":
+		v := ""
+		if hasValue {
+			v = value
+		}
+		inv.NoVerify = &v
+		return true, i + 1, flagNoVerify, nil
 	case "--env":
 		v, next, err := flagValue(args, i, value, hasValue, name)
 		if err != nil {
@@ -435,6 +456,10 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 		if inv.All && len(selectors) > 0 {
 			return diag("invalid_flags", "--all cannot be combined with package selectors")
 		}
+	case CommandGen, CommandVerify:
+		if inv.All && len(selectors) > 0 {
+			return diag("invalid_flags", "--all cannot be combined with %s target selectors", cmd)
+		}
 	default:
 		if inv.All && !inv.AllowUnused {
 			return diag("unsupported_flag", "%s does not support --all", cmd)
@@ -466,6 +491,8 @@ func flagUseName(u flagUse) string {
 		return "local source flags"
 	case flagNoBuild:
 		return "--no-build"
+	case flagNoVerify:
+		return "--no-verify"
 	case flagEnv:
 		return "--env"
 	case flagKeyring:

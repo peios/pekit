@@ -86,3 +86,35 @@ func TestWorkspaceFlagRequiresWorkspaceCommand(t *testing.T) {
 		t.Fatal("expected --workspace without workspace command to fail")
 	}
 }
+
+func TestParseNoVerifyForms(t *testing.T) {
+	inv, err := ParseInvocation([]string{"build", "--no-verify"}, "/tmp")
+	if err != nil || inv.NoVerify == nil || *inv.NoVerify != "" {
+		t.Fatalf("bare --no-verify: inv.NoVerify=%v err=%v", inv.NoVerify, err)
+	}
+	inv, err = ParseInvocation([]string{"build", "--no-verify=uapi,docs"}, "/tmp")
+	if err != nil || inv.NoVerify == nil || *inv.NoVerify != "uapi,docs" {
+		t.Fatalf("--no-verify=list: inv.NoVerify=%v err=%v", inv.NoVerify, err)
+	}
+}
+
+func TestParseGenVerifyCommands(t *testing.T) {
+	inv, err := ParseInvocation([]string{"gen", "uapi"}, "/tmp")
+	if err != nil || inv.Command != CommandGen || len(inv.Positionals) != 1 || inv.Positionals[0] != "uapi" {
+		t.Fatalf("gen uapi: %#v err=%v", inv, err)
+	}
+	if _, err := ParseInvocation([]string{"gen", "--all"}, "/tmp"); err != nil {
+		t.Fatalf("gen --all should parse: %v", err)
+	}
+	if _, err := ParseInvocation([]string{"gen", "--all", "uapi"}, "/tmp"); err == nil {
+		t.Fatal("gen --all with a selector should be rejected")
+	}
+	// gen resolves no versions/source, so version selection is unsupported.
+	if _, err := ParseInvocation([]string{"gen", "--version", "1.0"}, "/tmp"); err == nil {
+		t.Fatal("gen --version should be rejected")
+	}
+	// verify does not run builds, so --no-verify is meaningless on it.
+	if _, err := ParseInvocation([]string{"verify", "--no-verify"}, "/tmp"); err == nil {
+		t.Fatal("verify --no-verify should be rejected")
+	}
+}
