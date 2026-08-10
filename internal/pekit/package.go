@@ -855,6 +855,13 @@ func validateSelectedPackageConfigs(packages []EffectivePackage) error {
 			if pkg.Config.Package.Architecture == "" {
 				return diag("missing_package_field", "peipkg package %s requires [package].architecture", pkg.Selector)
 			}
+			// License is optional at the format level (PSD-009 §3.3.3) but
+			// required distro-side: an unlicensed package cannot state its
+			// redistribution terms, and the corresponding-source package
+			// derives its own license from the members'.
+			if pkg.Config.Package.License == "" {
+				return diag("missing_package_field", "peipkg package %s requires [package].license", pkg.Selector)
+			}
 		default:
 			return diag("unsupported_format", "unsupported package format %q", format)
 		}
@@ -1191,6 +1198,9 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 	}
 	if inst.Architecture == "" {
 		return diag("missing_package_field", "peipkg package %s requires [package].architecture", instanceID(inst))
+	}
+	if inst.Config.Package.License == "" {
+		return diag("missing_package_field", "peipkg package %s requires [package].license", instanceID(inst))
 	}
 	files := map[string]string{}
 	validateFiles := map[string]string{}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1020,6 +1021,46 @@ version = "1.0.0-1"
 	}
 	if err := app.Run([]string{"package"}); err == nil {
 		t.Fatal("expected missing peipkg architecture to fail")
+	}
+	if fileExists(filepath.Join(dir, "built.txt")) {
+		t.Fatal("build ran before peipkg metadata planning error")
+	}
+}
+
+func TestPeipkgRequiresLicense(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = "printf built > built.txt"
+`)
+	writeFile(t, filepath.Join(dir, "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "peipkg"
+builds = ["main"]
+
+[package]
+version = "1.0.0-1"
+architecture = "x86_64"
+description = "unlicensed"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run([]string{"package"})
+	if err == nil {
+		t.Fatal("expected missing peipkg license to fail")
+	}
+	if diagCode(err) != "missing_package_field" || !strings.Contains(err.Error(), "license") {
+		t.Fatalf("expected missing license error, got %v", err)
 	}
 	if fileExists(filepath.Join(dir, "built.txt")) {
 		t.Fatal("build ran before peipkg metadata planning error")
