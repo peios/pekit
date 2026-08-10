@@ -2165,6 +2165,8 @@ type peipkgManifestDoc struct {
 		FarmID        string `json:"farm_id"`
 		SourceRef     string `json:"source_ref"`
 		SourcePackage string `json:"source_package"`
+		RecipeRef     string `json:"recipe_ref"`
+		Builder       string `json:"builder"`
 	} `json:"build"`
 }
 

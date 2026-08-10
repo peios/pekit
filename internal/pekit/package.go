@@ -2,7 +2,6 @@ package pekit
 
 import (
 	"archive/tar"
-	"crypto/ed25519"
 	"fmt"
 	"io"
 	"os"
@@ -135,6 +134,7 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	if err != nil {
 		return err
 	}
+	run := packRun{SignKey: signKey, RecipeRef: recipeRef(recipe.Root), Builder: pekitBuilder()}
 	anyPeipkg := false
 	for _, inst := range instances {
 		if inst.Format == "peipkg" {
@@ -167,12 +167,12 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			continue
 		}
 		if inst.SourcePkg {
-			if err := writeSourcePackage(ctx, recipe, workspace, source, version, inst, member, signKey); err != nil {
+			if err := writeSourcePackage(ctx, recipe, workspace, source, version, inst, member, run); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := writePackage(ctx, recipe, workspace, source, version, inst, member, signKey); err != nil {
+		if err := writePackage(ctx, recipe, workspace, source, version, inst, member, run); err != nil {
 			return err
 		}
 	}
@@ -760,7 +760,7 @@ func multipackCaptureIndex(re *regexp.Regexp) (int, error) {
 	return 1, nil
 }
 
-func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, signKey ed25519.PrivateKey) error {
+func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, run packRun) error {
 	clearOut := true
 	if inst.Config.ClearOut != nil {
 		clearOut = *inst.Config.ClearOut
@@ -800,11 +800,11 @@ func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig,
 			return err
 		}
 	} else if inst.Format == "peipkg" {
-		if err := writePeipkg(ctx, workspace, inst, source, entries, signKey); err != nil {
+		if err := writePeipkg(ctx, workspace, inst, source, entries, run); err != nil {
 			return err
 		}
-		if signKey != nil {
-			ctx.Renderer.Event(Event{Type: "sign", Member: member, Package: instanceID(inst), Path: inst.Artifact, Message: "signed with key " + pack.SigningKeyFingerprint(signKey)})
+		if run.SignKey != nil {
+			ctx.Renderer.Event(Event{Type: "sign", Member: member, Package: instanceID(inst), Path: inst.Artifact, Message: "signed with key " + pack.SigningKeyFingerprint(run.SignKey)})
 		}
 	} else {
 		return diag("unsupported_format", "unsupported package format %q", inst.Format)
@@ -1210,7 +1210,7 @@ func copyToTar(tw *tar.Writer, path string) error {
 	return nil
 }
 
-func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance, source SourceState, entries []payloadEntry, signKey ed25519.PrivateKey) error {
+func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance, source SourceState, entries []payloadEntry, run packRun) error {
 	if inst.Version == "" {
 		return diag("missing_package_field", "peipkg package %s requires [package].version", instanceID(inst))
 	}
@@ -1263,6 +1263,8 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 			FarmID:        "local",
 			SourceRef:     source.ProvenanceRef,
 			SourcePackage: inst.SourcePackageName,
+			RecipeRef:     run.RecipeRef,
+			Builder:       run.Builder,
 		},
 	}
 	// Derive provides/dependencies from the staged payload, on top of
@@ -1284,7 +1286,7 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 	if err := pack.ValidateClaimTargets(manifest.Provides, files); err != nil {
 		return wrapDiag("claim_target_validation", instanceID(inst), err)
 	}
-	if err := pack.Pack(pack.PackOptions{Manifest: manifest, Files: files, Out: f, SignKey: signKey}); err != nil {
+	if err := pack.Pack(pack.PackOptions{Manifest: manifest, Files: files, Out: f, SignKey: run.SignKey}); err != nil {
 		_ = f.Close()
 		return err
 	}
