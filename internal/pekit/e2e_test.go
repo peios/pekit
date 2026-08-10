@@ -1833,6 +1833,55 @@ func TestSafeTarSymlinkSourcePreserved(t *testing.T) {
 	}
 }
 
+// TestExtractPreservesArchiveMtimes guards the autotools contract: release
+// tarballs encode "generated outputs are newer than their inputs" in member
+// mtimes, and extraction must reproduce that rather than stamping files in
+// write order — write-order mtimes make maintainer rebuild rules fire in
+// build environments that deliberately lack autoconf/automake.
+func TestExtractPreservesArchiveMtimes(t *testing.T) {
+	dir := t.TempDir()
+	older := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(48 * time.Hour)
+	tarPath := filepath.Join(dir, "timed.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	// The generated output is written FIRST but is the NEWER file: with
+	// write-order mtimes it would end up older than its input.
+	for _, entry := range []struct {
+		name string
+		mod  time.Time
+	}{{"configure", newer}, {"configure.ac", older}} {
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, ModTime: entry.mod}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	extractDir := filepath.Join(dir, "extract")
+	if err := extractArchive(tarPath, extractDir); err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	for name, want := range map[string]time.Time{"configure": newer, "configure.ac": older} {
+		info, err := os.Stat(filepath.Join(extractDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(want) {
+			t.Errorf("%s mtime = %v, want %v", name, info.ModTime(), want)
+		}
+	}
+}
+
 func TestArchiveRejectsExtractionThroughSymlink(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "bad.tar")

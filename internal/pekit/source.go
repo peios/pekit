@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -631,6 +632,13 @@ func extractZip(artifact, dst string) error {
 		if closeInErr != nil {
 			return wrapDiag("extract", file.Name, closeInErr)
 		}
+		// Same mtime preservation as writeTarFileEntry, for the same
+		// maintainer-rebuild-rule reason.
+		if mod := file.Modified; !mod.IsZero() {
+			if err := os.Chtimes(target, mod, mod); err != nil {
+				return wrapDiag("extract", target, err)
+			}
+		}
 		seen[rel] = "file"
 	}
 	return nil
@@ -670,7 +678,7 @@ func extractTar(artifact, dst string) error {
 			}
 			seen[rel] = "dir"
 		case tar.TypeReg, tar.TypeRegA:
-			if err := writeTarFileEntry(dst, rel, os.FileMode(hdr.Mode), reader); err != nil {
+			if err := writeTarFileEntry(dst, rel, os.FileMode(hdr.Mode), hdr.ModTime, reader); err != nil {
 				return err
 			}
 			seen[rel] = "file"
@@ -815,7 +823,7 @@ func makeArchiveDir(root, rel string, mode os.FileMode) error {
 	return nil
 }
 
-func writeTarFileEntry(root, rel string, mode os.FileMode, reader io.Reader) error {
+func writeTarFileEntry(root, rel string, mode os.FileMode, modTime time.Time, reader io.Reader) error {
 	if err := ensureArchiveParentSafe(root, rel); err != nil {
 		return err
 	}
@@ -834,6 +842,17 @@ func writeTarFileEntry(root, rel string, mode os.FileMode, reader io.Reader) err
 	}
 	if closeErr != nil {
 		return wrapDiag("extract", target, closeErr)
+	}
+	// Preserve the archived mtime: autotools release tarballs encode
+	// "generated outputs are newer than their inputs" in timestamps, and
+	// write-order mtimes make the maintainer rebuild rules (autoconf,
+	// automake, makeinfo) fire in environments that deliberately lack
+	// those tools. Directories and symlinks don't feed make's dependency
+	// checks, so only regular files need this.
+	if !modTime.IsZero() {
+		if err := os.Chtimes(target, modTime, modTime); err != nil {
+			return wrapDiag("extract", target, err)
+		}
 	}
 	return nil
 }
