@@ -20,6 +20,7 @@ const (
 	CommandPublish   Command = "publish"
 	CommandGen       Command = "gen"
 	CommandVerify    Command = "verify"
+	CommandLock      Command = "lock"
 	CommandWorkspace Command = "workspace"
 )
 
@@ -32,6 +33,7 @@ var commands = map[string]Command{
 	"publish":   CommandPublish,
 	"gen":       CommandGen,
 	"verify":    CommandVerify,
+	"lock":      CommandLock,
 	"workspace": CommandWorkspace,
 }
 
@@ -75,6 +77,7 @@ type Invocation struct {
 	ResolvedKeyringEnv map[string]string
 	RefreshSource      bool
 	AllowUnanchored    bool
+	Repin              bool
 
 	All        bool
 	OutputOnly bool

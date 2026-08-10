@@ -19,6 +19,7 @@ const (
 	flagAllowUnanchored
 	flagAll
 	flagCleanMode
+	flagRepin
 )
 
 var commandFlags = map[Command]map[flagUse]bool{
@@ -48,6 +49,12 @@ var commandFlags = map[Command]map[flagUse]bool{
 	},
 	CommandVerify: {
 		flagEnv: true, flagKeyring: true, flagAll: true,
+	},
+	// lock fetches and pins source inputs without building. --repin is the
+	// explicit accept-changed-upstream-bytes ceremony and demands an exact
+	// --version; --refresh-source re-downloads before verifying.
+	CommandLock: {
+		flagVersion: true, flagRefreshSource: true, flagRepin: true,
 	},
 }
 
@@ -178,6 +185,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.ResolvedKeyringEnv = sub.ResolvedKeyringEnv
 	inv.RefreshSource = sub.RefreshSource
 	inv.AllowUnanchored = sub.AllowUnanchored
+	inv.Repin = sub.Repin
 	inv.All = sub.All
 	inv.OutputOnly = sub.OutputOnly
 	inv.TargetOnly = sub.TargetOnly
@@ -220,6 +228,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.AllowUnanchored {
 		out = append(out, flagAllowUnanchored)
+	}
+	if inv.Repin {
+		out = append(out, flagRepin)
 	}
 	if inv.All {
 		out = append(out, flagAll)
@@ -362,6 +373,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.AllowUnanchored = true
 		return true, i + 1, flagAllowUnanchored, nil
+	case "--repin":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--repin does not take a value")
+		}
+		inv.Repin = true
+		return true, i + 1, flagRepin, nil
 	case "--all":
 		if hasValue {
 			return false, i, -1, diag("unexpected_flag_value", "--all does not take a value")
@@ -460,6 +477,10 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 		if inv.All && len(selectors) > 0 {
 			return diag("invalid_flags", "--all cannot be combined with %s target selectors", cmd)
 		}
+	case CommandLock:
+		if len(selectors) > 0 {
+			return diag("invalid_selector", "lock does not accept selectors")
+		}
 	default:
 		if inv.All && !inv.AllowUnused {
 			return diag("unsupported_flag", "%s does not support --all", cmd)
@@ -501,6 +522,8 @@ func flagUseName(u flagUse) string {
 		return "--refresh-source"
 	case flagAllowUnanchored:
 		return "--allow-unanchored"
+	case flagRepin:
+		return "--repin"
 	case flagAll:
 		return "--all"
 	case flagCleanMode:

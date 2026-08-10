@@ -98,7 +98,23 @@ type URLSourceConfig struct {
 	FileRegex         string
 	Checksum          string
 	ChecksumByVersion map[string]string
+	Signature         URLSignatureConfig
 }
+
+// URLSignatureConfig pins upstream release-signature verification for a URL
+// source. Presence of the block makes verification required: a missing or
+// invalid signature fails the fetch and nothing is locked. KeyFiles are
+// committed public keys resolved relative to the recipe root; Of selects
+// what the detached signature covers — the artifact as published, or its
+// decompressed content (kernel.org signs the uncompressed tar).
+type URLSignatureConfig struct {
+	URL          string // template; empty means "{{source_url}}.sig"
+	Of           string // "artifact" (default) or "decompressed"
+	KeyFiles     []string
+	Fingerprints []string
+}
+
+func (c URLSignatureConfig) Configured() bool { return len(c.KeyFiles) > 0 }
 
 type LocalSourceConfig struct {
 	Path         string
@@ -1049,7 +1065,7 @@ func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) 
 }
 
 func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) {
-	known := map[string]bool{"url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true}
+	known := map[string]bool{"url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true}
 	for key := range table {
 		if !known[key] {
 			return URLSourceConfig{}, diagAt("unknown_key", path, "unknown source.url key %q", key)
@@ -1093,6 +1109,57 @@ func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) 
 			if err != nil {
 				return URLSourceConfig{}, err
 			}
+		}
+	}
+	if v, ok := table["signature"]; ok {
+		cfg.Signature, err = parseURLSignature(path, v)
+		if err != nil {
+			return URLSourceConfig{}, err
+		}
+	}
+	return cfg, nil
+}
+
+func parseURLSignature(path string, value any) (URLSignatureConfig, error) {
+	table, err := expectMap(path, "source.url.signature", value)
+	if err != nil {
+		return URLSignatureConfig{}, err
+	}
+	known := map[string]bool{"url": true, "of": true, "key_files": true, "fingerprints": true}
+	for key := range table {
+		if !known[key] {
+			return URLSignatureConfig{}, diagAt("unknown_key", path, "unknown source.url.signature key %q", key)
+		}
+	}
+	cfg := URLSignatureConfig{}
+	if v, ok := table["url"]; ok {
+		cfg.URL, err = expectString(path, "source.url.signature.url", v)
+		if err != nil {
+			return URLSignatureConfig{}, err
+		}
+	}
+	if v, ok := table["of"]; ok {
+		cfg.Of, err = expectString(path, "source.url.signature.of", v)
+		if err != nil {
+			return URLSignatureConfig{}, err
+		}
+		if cfg.Of != "artifact" && cfg.Of != "decompressed" {
+			return URLSignatureConfig{}, diagAt("invalid_signature", path, "source.url.signature.of must be \"artifact\" or \"decompressed\"")
+		}
+	}
+	if v, ok := table["key_files"]; ok {
+		cfg.KeyFiles, err = expectStringSlice(path, "source.url.signature.key_files", v)
+		if err != nil {
+			return URLSignatureConfig{}, err
+		}
+	}
+	if len(cfg.KeyFiles) == 0 {
+		return URLSignatureConfig{}, diagAt("missing_key", path, "source.url.signature requires a non-empty key_files")
+	}
+	if v, ok := table["fingerprints"]; ok {
+		cfg.Fingerprints, err = expectStringSlice(path, "source.url.signature.fingerprints", v)
+		if err != nil {
+			return URLSignatureConfig{}, err
 		}
 	}
 	return cfg, nil

@@ -48,6 +48,11 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	if cmd == CommandVerify {
 		return runVerify(ctx, recipe, workspace, cleanSourceState(recipe), ctx.Inv.selectors(), member)
 	}
+	// lock resolves and pins sources without running targets, so it skips the
+	// gen drift gates.
+	if cmd == CommandLock {
+		return runLockCmd(ctx, recipe, member)
+	}
 	// Consuming commands run the scoped drift gates first, so no build/test/
 	// package/publish ever proceeds from a stale generated tree (unless
 	// --no-verify is passed).

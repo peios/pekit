@@ -63,7 +63,7 @@ func (r *humanRenderer) Event(e Event) {
 
 func quietEvent(e Event) bool {
 	switch e.Type {
-	case "warning", "artifact", "publish", "workspace_summary":
+	case "warning", "artifact", "publish", "workspace_summary", "lock":
 		return true
 	default:
 		return false

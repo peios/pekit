@@ -187,6 +187,13 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 			commit = strings.TrimSpace(out)
 		}
 	}
+	// Git sources lock only under a selected version: a bare branch ref is a
+	// deliberately moving target, like --local.
+	if !ctx.Inv.DryRun && version.Raw != "" {
+		if err := applyGitLock(ctx, recipe, ref, commit, version); err != nil {
+			return SourceState{}, err
+		}
+	}
 	sourceTimestamp := gitObjectTimestamp(rawRepo, commit)
 	scope := "git-" + shortHash(cfg.URL, commit)
 	sourceRoot := filepath.Join(outBase, scope, "source")
@@ -260,11 +267,22 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		}
 		st := drySource("url", outBase, scope, provenance)
 		st.Unanchored = checksum == ""
+		// A dry run fetches nothing, but an existing lock entry still anchors
+		// the version.
+		if st.Unanchored {
+			if lock, err := LoadLockFile(recipe.Root); err == nil {
+				if e := lock.Find(version.Raw); e != nil && e.SHA256 != "" {
+					st.Unanchored = false
+				}
+			}
+		}
 		return st, nil
 	}
 	rawDir := filepath.Join(outBase, "_source_cache", "url", shortHash(renderedURL))
 	artifact := filepath.Join(rawDir, urlArtifactName(renderedURL))
-	if ctx.Inv.RefreshSource {
+	// A repin must judge freshly downloaded bytes — its purpose is accepting
+	// what upstream publishes now, not re-blessing the cache.
+	if ctx.Inv.RefreshSource || ctx.Inv.Repin {
 		_ = os.RemoveAll(rawDir)
 		_ = os.RemoveAll(filepath.Join(outBase, scope))
 	}
@@ -295,16 +313,24 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			}
 		}
 	}
+	// The lock runs on every resolve, cache hits included, so a poisoned
+	// cache entry is caught the same as a changed upstream.
+	lockState, err := applyURLLock(ctx, recipe, cfg, renderedURL, artifact, version)
+	if err != nil {
+		return SourceState{}, err
+	}
 	sourceRoot := filepath.Join(outBase, scope, "source")
 	manifestPath := filepath.Join(outBase, scope, "source.pekit.json")
 	provenance := "url:" + renderedURL
-	unanchored := checksum == ""
+	unanchored := checksum == "" && !lockState.Locked
 	sourceTimestamp := int64(0)
-	if checksum != "" {
+	if !unanchored {
 		sourceTimestamp = gitWorktreeTimestamp(recipe.Root)
 	}
 	if checksum != "" {
 		provenance += "#" + checksum
+	} else if lockState.Locked {
+		provenance += "#sha256:" + lockState.Hash
 	}
 	expectedManifest := SourceManifest{
 		Kind:          "url",
