@@ -17,6 +17,7 @@ const (
 	flagKeyring
 	flagRefreshSource
 	flagAllowUnanchored
+	flagAllowUnsigned
 	flagAll
 	flagCleanMode
 	flagRepin
@@ -36,7 +37,7 @@ var commandFlags = map[Command]map[flagUse]bool{
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
 	},
 	CommandPublish: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true,
 	},
 	CommandClean: {
 		flagEnv: true, flagKeyring: true, flagCleanMode: true,
@@ -185,6 +186,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.ResolvedKeyringEnv = sub.ResolvedKeyringEnv
 	inv.RefreshSource = sub.RefreshSource
 	inv.AllowUnanchored = sub.AllowUnanchored
+	inv.AllowUnsigned = sub.AllowUnsigned
 	inv.Repin = sub.Repin
 	inv.All = sub.All
 	inv.OutputOnly = sub.OutputOnly
@@ -373,6 +375,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.AllowUnanchored = true
 		return true, i + 1, flagAllowUnanchored, nil
+	case "--allow-unsigned":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--allow-unsigned does not take a value")
+		}
+		inv.AllowUnsigned = true
+		return true, i + 1, flagAllowUnsigned, nil
 	case "--repin":
 		if hasValue {
 			return false, i, -1, diag("unexpected_flag_value", "--repin does not take a value")
@@ -522,6 +530,8 @@ func flagUseName(u flagUse) string {
 		return "--refresh-source"
 	case flagAllowUnanchored:
 		return "--allow-unanchored"
+	case flagAllowUnsigned:
+		return "--allow-unsigned"
 	case flagRepin:
 		return "--repin"
 	case flagAll:

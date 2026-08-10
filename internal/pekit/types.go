@@ -77,6 +77,7 @@ type Invocation struct {
 	ResolvedKeyringEnv map[string]string
 	RefreshSource      bool
 	AllowUnanchored    bool
+	AllowUnsigned      bool
 	Repin              bool
 
 	All        bool

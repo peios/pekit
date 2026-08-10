@@ -1,10 +1,13 @@
 package pekit
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/peios/peipkg/pack"
 )
 
 // planSourcePackage decides whether a packaging run emits a
@@ -98,7 +101,7 @@ func sourcePayloadRoot(inst PackageInstance) string {
 // hash covers, or a git-archive export of the locked commit), recipe/
 // carries the recipe directory's build-controlling files, and patches/
 // carries the recipe's patch series when one exists.
-func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string) error {
+func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, signKey ed25519.PrivateKey) error {
 	if err := os.RemoveAll(inst.Stage); err != nil {
 		return wrapDiag("clean_stage", inst.Stage, err)
 	}
@@ -135,8 +138,11 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 	if err := validatePayloadDestinations(entries); err != nil {
 		return err
 	}
-	if err := writePeipkg(ctx, workspace, inst, source, entries); err != nil {
+	if err := writePeipkg(ctx, workspace, inst, source, entries, signKey); err != nil {
 		return err
+	}
+	if signKey != nil {
+		ctx.Renderer.Event(Event{Type: "sign", Member: member, Package: instanceID(inst), Path: inst.Artifact, Message: "signed with key " + pack.SigningKeyFingerprint(signKey)})
 	}
 	ctx.Renderer.Event(Event{Type: "artifact", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "wrote source package"})
 	return nil
