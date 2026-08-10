@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -281,6 +282,35 @@ func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit string,
 	}
 	ctx.Renderer.Event(Event{Type: "lock", Version: version.Raw, Path: lockFilePath(recipe.Root), Message: message})
 	return nil
+}
+
+// lockedMirroredCommit reports the commit a failed source refresh may
+// fall back to: the selected version's lock entry, provided it is a git
+// entry for the same rendered ref and its commit object is already
+// present in the mirror clone. Anything less returns "" and the caller
+// treats the refresh failure as fatal. Lockfile read errors are
+// swallowed here — the caller's applyGitLock surfaces them.
+func lockedMirroredCommit(recipe RecipeConfig, ref string, version Version, rawRepo string) string {
+	if version.Raw == "" {
+		return ""
+	}
+	lock, err := LoadLockFile(recipe.Root)
+	if err != nil {
+		return ""
+	}
+	entry := lock.Find(version.Raw)
+	if entry == nil || entry.kind() != "git" || entry.Ref != ref || entry.Commit == "" {
+		return ""
+	}
+	if err := runSimple(rawRepo, "git", "cat-file", "-e", entry.Commit+"^{commit}"); err != nil {
+		return ""
+	}
+	return entry.Commit
+}
+
+func firstErrorLine(err error) string {
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return line
 }
 
 func lockTimestamp(ctx *Context) string {

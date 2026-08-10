@@ -177,7 +177,8 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 	if ctx.Inv.RefreshSource {
 		_ = os.RemoveAll(rawRepo)
 	}
-	if !dirExists(rawRepo) {
+	mirrorExisted := dirExists(rawRepo)
+	if !mirrorExisted {
 		if ctx.Inv.DryRun {
 			scope := "git-" + shortHash(cfg.URL, ref)
 			return drySource("git", outBase, scope, "git:"+cfg.URL+"@"+ref), nil
@@ -188,13 +189,27 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 		if err := runSimple("", "git", "clone", "--mirror", cfg.URL, rawRepo); err != nil {
 			return SourceState{}, wrapDiag("git_clone", "clone source git", err)
 		}
-	} else if !ctx.Inv.DryRun {
+	}
+	// A failed refresh is fatal only when nothing pins what the ref means.
+	// A locked version whose pinned commit is already mirrored builds from
+	// the lock instead: the lock asserts the exact bytes, so the remote has
+	// nothing the build needs. Rate-limited upstreams (sourceware's 429s)
+	// and offline builds land here; the moved-tag tripwire still fires on
+	// every refresh that succeeds.
+	fallbackCommit := ""
+	if mirrorExisted && !ctx.Inv.DryRun {
 		if err := runSimple(rawRepo, "git", "fetch", "--prune", "--tags"); err != nil {
-			return SourceState{}, wrapDiag("git_fetch", "fetch source git", err)
+			fallbackCommit = lockedMirroredCommit(recipe, ref, version, rawRepo)
+			if fallbackCommit == "" {
+				return SourceState{}, wrapDiag("git_fetch", "fetch source git", err)
+			}
+			ctx.Renderer.Event(Event{Type: "warning", Message: "source refresh failed (" + firstErrorLine(err) + "); building from locked commit " + fallbackCommit})
 		}
 	}
 	commit := ref
-	if !ctx.Inv.DryRun || dirExists(rawRepo) {
+	if fallbackCommit != "" {
+		commit = fallbackCommit
+	} else if !ctx.Inv.DryRun || dirExists(rawRepo) {
 		out, err := commandOutput(rawRepo, "git", "rev-parse", ref+"^{commit}")
 		if err != nil && !ctx.Inv.DryRun {
 			return SourceState{}, wrapDiag("git_resolve", "resolve git ref "+ref, err)

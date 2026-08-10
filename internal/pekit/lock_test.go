@@ -217,6 +217,72 @@ command = "true"
 	}
 }
 
+// TestGitSourceBuildsFromLockWhenFetchFails covers the refresh-failure
+// fallback: once a version is locked and its commit mirrored, losing the
+// upstream (rate limit, offline, deleted repo) downgrades the fetch
+// error to a warning and the build proceeds from the locked commit. An
+// unlocked resolve still fails hard — nothing pins what the ref means.
+func TestGitSourceBuildsFromLockWhenFetchFails(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "src")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runTestCmd(t, repo, "git", "init")
+	runTestCmd(t, repo, "git", "config", "user.email", "test@example.invalid")
+	runTestCmd(t, repo, "git", "config", "user.name", "Test")
+	writeFile(t, filepath.Join(repo, "payload.txt"), "payload")
+	runTestCmd(t, repo, "git", "add", ".")
+	runTestCmd(t, repo, "git", "commit", "-m", "initial")
+	runTestCmd(t, repo, "git", "tag", "v1.0.0")
+
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+
+[source.git]
+url = "`+repo+`"
+ref = "v{{version}}"
+
+[build]
+command = "true"
+`)
+	chdir(t, recipe)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--version", "1.0.0"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	lock, err := LoadLockFile(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.Find("1.0.0")
+	if entry == nil || entry.Commit == "" {
+		t.Fatalf("expected git lock entry, got %+v", entry)
+	}
+
+	// Upstream disappears: the locked, mirrored version keeps building.
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--version", "1.0.0"}); err != nil {
+		t.Fatalf("locked build after upstream loss failed: %v\nstderr=%s", err, stderr.String())
+	}
+
+	// Without the lock the same failed refresh is fatal.
+	if err := os.Remove(filepath.Join(recipe, "pekit.lock")); err != nil {
+		t.Fatal(err)
+	}
+	err = app.Run([]string{"build", "--version", "1.0.0"})
+	if err == nil {
+		t.Fatal("expected unlocked build to fail when the refresh fails")
+	}
+	if diagCode(err) != "git_fetch" {
+		t.Fatalf("expected git_fetch, got %v", err)
+	}
+}
+
 func newTestSigner(t *testing.T) *openpgp.Entity {
 	t.Helper()
 	entity, err := openpgp.NewEntity("Upstream Test", "", "upstream@example.test", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
