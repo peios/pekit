@@ -2108,7 +2108,10 @@ func assertTarNotHas(t *testing.T, path, unwanted string) {
 }
 
 type peipkgManifestDoc struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
 	Description  string `json:"description"`
+	License      string `json:"license"`
 	Dependencies []struct {
 		Name       string `json:"name"`
 		Constraint string `json:"constraint"`
@@ -2117,6 +2120,11 @@ type peipkgManifestDoc struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"provides"`
+	Build struct {
+		FarmID        string `json:"farm_id"`
+		SourceRef     string `json:"source_ref"`
+		SourcePackage string `json:"source_package"`
+	} `json:"build"`
 }
 
 func readPeipkgManifest(t *testing.T, path string) peipkgManifestDoc {

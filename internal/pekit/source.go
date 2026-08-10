@@ -33,6 +33,16 @@ type SourceState struct {
 	Timestamp     int64
 	Local         bool
 	Unanchored    bool
+	// Artifact is the cached download of a url source — the pristine
+	// upstream bytes, exactly what the lock hash covers. Empty for other
+	// kinds and on dry runs.
+	Artifact string
+	// GitRepo and Commit identify a git source's mirror clone and the
+	// resolved commit, so a consumer can re-export the exact tree (git
+	// archive) without trusting the mutable checkout. Empty for other
+	// kinds and on dry runs.
+	GitRepo string
+	Commit  string
 }
 
 type SourceManifest struct {
@@ -235,6 +245,8 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 		LiteralRoot:   sourceRoot,
 		ProvenanceRef: "git:" + cfg.URL + "@" + commit,
 		Timestamp:     sourceTimestamp,
+		GitRepo:       rawRepo,
+		Commit:        commit,
 	}, nil
 }
 
@@ -394,6 +406,7 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		ProvenanceRef: provenance,
 		Timestamp:     sourceTimestamp,
 		Unanchored:    unanchored,
+		Artifact:      artifact,
 	}, nil
 }
 

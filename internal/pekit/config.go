@@ -51,15 +51,27 @@ type EnvVar struct {
 }
 
 type RecipeConfig struct {
-	Root     string
-	Path     string
-	OutDir   string
-	Env      []EnvVar
-	Wrap     ShellCommand
-	Targets  map[Command]map[string]TargetConfig
-	Source   SourceConfig
-	Delegate DelegateConfig
+	Root          string
+	Path          string
+	OutDir        string
+	Env           []EnvVar
+	Wrap          ShellCommand
+	Targets       map[Command]map[string]TargetConfig
+	Source        SourceConfig
+	Delegate      DelegateConfig
+	SourcePackage SourcePackageConfig
 }
+
+// SourcePackageConfig controls the corresponding-source package a recipe
+// emits alongside its binary packages. Emission defaults on for any
+// recipe with a reproducible [source] that produces peipkg-format
+// packages; the table exists to opt out or rename.
+type SourcePackageConfig struct {
+	Name    string
+	Enabled *bool
+}
+
+func (c SourcePackageConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
 
 type DelegateConfig struct {
 	All      bool
@@ -272,6 +284,7 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	known := map[string]bool{
 		"out_dir": true, "env": true, "wrap": true, "source": true, "delegate": true,
 		"build": true, "test": true, "install": true, "clean": true, "gen": true,
+		"source_package": true,
 	}
 	for key := range raw {
 		if !known[key] {
@@ -304,6 +317,12 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	}
 	if v, ok := raw["delegate"]; ok {
 		cfg.Delegate, err = parseDelegate(path, v)
+		if err != nil {
+			return RecipeConfig{}, err
+		}
+	}
+	if v, ok := raw["source_package"]; ok {
+		cfg.SourcePackage, err = parseSourcePackage(path, v)
 		if err != nil {
 			return RecipeConfig{}, err
 		}
@@ -1217,6 +1236,38 @@ func parseDelegate(path string, value any) (DelegateConfig, error) {
 		}
 		return cfg, nil
 	}
+}
+
+func parseSourcePackage(path string, value any) (SourcePackageConfig, error) {
+	table, err := expectMap(path, "source_package", value)
+	if err != nil {
+		return SourcePackageConfig{}, err
+	}
+	cfg := SourcePackageConfig{}
+	known := map[string]bool{"name": true, "enabled": true}
+	for key, raw := range table {
+		if !known[key] {
+			return SourcePackageConfig{}, diagAt("unknown_key", path, "unknown source_package key %q", key)
+		}
+		switch key {
+		case "name":
+			name, err := expectString(path, "source_package.name", raw)
+			if err != nil {
+				return SourcePackageConfig{}, err
+			}
+			if name == "" {
+				return SourcePackageConfig{}, diagAt("invalid_value", path, "source_package.name must not be empty")
+			}
+			cfg.Name = name
+		case "enabled":
+			b, err := expectBool(path, "source_package.enabled", raw)
+			if err != nil {
+				return SourcePackageConfig{}, err
+			}
+			cfg.Enabled = &b
+		}
+	}
+	return cfg, nil
 }
 
 func parsePackageMeta(path string, value any) (PackageMeta, error) {

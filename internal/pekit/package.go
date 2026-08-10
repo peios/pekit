@@ -32,6 +32,13 @@ type PackageInstance struct {
 	Format             string
 	Stage              string
 	Artifact           string
+	// SourcePkg marks the synthesized corresponding-source instance,
+	// staged by writeSourcePackage rather than from [files] refs.
+	SourcePkg bool
+	// SourcePackageName is the manifest build.source_package linkage: the
+	// name of the source package emitted from this recipe, empty when
+	// none is.
+	SourcePackageName string
 }
 
 type payloadEntry struct {
@@ -105,6 +112,18 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 		}
 		return diag("no_artifacts", "no package artifacts were planned")
 	}
+	srcInst, err := planSourcePackage(recipe, source, instances)
+	if err != nil {
+		return err
+	}
+	if srcInst != nil {
+		for i := range instances {
+			if instances[i].Format == "peipkg" {
+				instances[i].SourcePackageName = srcInst.Name
+			}
+		}
+		instances = append(instances, *srcInst)
+	}
 	if err := validateArtifactDestinations(instances); err != nil {
 		return err
 	}
@@ -130,6 +149,12 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	for _, inst := range instances {
 		if ctx.Inv.DryRun {
 			ctx.Renderer.Event(Event{Type: "package_plan", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "would write package"})
+			continue
+		}
+		if inst.SourcePkg {
+			if err := writeSourcePackage(ctx, recipe, workspace, source, version, inst, member); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := writePackage(ctx, recipe, workspace, source, version, inst, member); err != nil {
@@ -1206,9 +1231,10 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 		SideEffects:          append([]string(nil), meta.SideEffects...),
 		SDOverrides:          packSDOverrides(meta.SDOverrides),
 		Build: pack.BuildInfo{
-			Timestamp: ctx.Start.UTC().Format(time.RFC3339),
-			FarmID:    "local",
-			SourceRef: source.ProvenanceRef,
+			Timestamp:     ctx.Start.UTC().Format(time.RFC3339),
+			FarmID:        "local",
+			SourceRef:     source.ProvenanceRef,
+			SourcePackage: inst.SourcePackageName,
 		},
 	}
 	// Derive provides/dependencies from the staged payload, on top of
