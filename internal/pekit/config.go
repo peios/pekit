@@ -90,6 +90,9 @@ type SourceConfig struct {
 	Git   GitSourceConfig
 	URL   URLSourceConfig
 	Local LocalSourceConfig
+	// Patches names a recipe-root directory whose series file pekit
+	// applies to the materialised source tree before any target runs.
+	Patches string
 }
 
 func (s SourceConfig) HasReproducible() bool { return s.Git.URL != "" || s.URL.URL != "" }
@@ -1005,11 +1008,23 @@ func parseSource(path, root string, value any) (SourceConfig, error) {
 		return SourceConfig{}, err
 	}
 	cfg := SourceConfig{}
-	known := map[string]bool{"git": true, "url": true, "local": true}
+	known := map[string]bool{"git": true, "url": true, "local": true, "patches": true}
 	for key := range table {
 		if !known[key] {
 			return SourceConfig{}, diagAt("unknown_key", path, "unknown source key %q; v2 uses [source.git], [source.url], and [source.local]", key)
 		}
+	}
+	if v, ok := table["patches"]; ok {
+		patches, err := expectString(path, "source.patches", v)
+		if err != nil {
+			return SourceConfig{}, err
+		}
+		// A single directory name: the whole directory ships as the source
+		// package's patches/, so nesting or escaping is not allowed.
+		if patches == "" || patches != filepath.Base(patches) || patches == "." || patches == ".." {
+			return SourceConfig{}, diagAt("invalid_path", path, "source.patches must name a directory in the recipe root, got %q", patches)
+		}
+		cfg.Patches = patches
 	}
 	repro := 0
 	if v, ok := table["git"]; ok {
@@ -1046,6 +1061,9 @@ func parseSource(path, root string, value any) (SourceConfig, error) {
 		if err != nil {
 			return SourceConfig{}, err
 		}
+	}
+	if cfg.Patches != "" && !cfg.HasReproducible() {
+		return SourceConfig{}, diagAt("patches_source", path, "source.patches requires [source.git] or [source.url]")
 	}
 	return cfg, nil
 }

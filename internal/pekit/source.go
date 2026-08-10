@@ -55,6 +55,7 @@ type SourceManifest struct {
 	SourceRoot    string `json:"source_root"`
 	ProvenanceRef string `json:"provenance_ref"`
 	Timestamp     int64  `json:"timestamp"`
+	Patches       string `json:"patches,omitempty"`
 }
 
 func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceState, error) {
@@ -143,6 +144,11 @@ func resolveLocalSource(ctx *Context, recipe RecipeConfig, outBase string, sourc
 	if _, err := os.ReadDir(path); err != nil {
 		return SourceState{}, wrapDiag("local_source_unreadable", path, err)
 	}
+	if source.Patches != "" {
+		// A local tree is the developer's own working state — often with the
+		// series already applied or mid-rework — so pekit never patches it.
+		ctx.Renderer.Event(Event{Type: "warning", Message: "patches are not applied to a local source tree"})
+	}
 	scope := "local-" + shortHash(path)
 	workBase := filepath.Join(outBase, scope)
 	return SourceState{
@@ -225,6 +231,20 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 		if err := runSimple(sourceRoot, "git", "clean", "-fdx"); err != nil {
 			return SourceState{}, wrapDiag("git_clean", "clean source checkout", err)
 		}
+		// Reset + clean restored the pristine tree, so the series re-applies
+		// on every resolve; an edited patch takes effect without a scope
+		// change.
+		ps, err := loadPatchSet(recipe, ctx.Inv.AllowUnused)
+		if err != nil {
+			return SourceState{}, err
+		}
+		if err := applyPatchSet(ctx, ps, sourceRoot, version); err != nil {
+			return SourceState{}, err
+		}
+		patchesHash := ""
+		if ps != nil {
+			patchesHash = ps.Hash
+		}
 		if err := writeSourceManifest(filepath.Join(outBase, scope, "source.pekit.json"), SourceManifest{
 			Kind:          "git",
 			Rendered:      cfg.URL + "@" + ref,
@@ -232,6 +252,7 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 			SourceRoot:    sourceRoot,
 			ProvenanceRef: "git:" + cfg.URL + "@" + commit,
 			Timestamp:     sourceTimestamp,
+			Patches:       patchesHash,
 		}); err != nil {
 			return SourceState{}, err
 		}
@@ -271,7 +292,19 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			return SourceState{}, diag("missing_checksum", "source.url.checksum has no entry for version %s", version.Raw)
 		}
 	}
-	scope := "url-" + shortHash(renderedURL, checksum, root)
+	ps, err := loadPatchSet(recipe, ctx.Inv.AllowUnused)
+	if err != nil {
+		return SourceState{}, err
+	}
+	// Unlike a git checkout there is no pristine state to reset to, so a
+	// patched url tree is materialised once per patch-set content: the
+	// series hash joins the scope and an edited patch lands in a fresh
+	// extraction. Unpatched recipes keep their existing scopes.
+	scopeParts := []string{renderedURL, checksum, root}
+	if ps != nil && ps.Hash != "" {
+		scopeParts = append(scopeParts, ps.Hash)
+	}
+	scope := "url-" + shortHash(scopeParts...)
 	if ctx.Inv.DryRun {
 		provenance := "url:" + renderedURL
 		if checksum != "" {
@@ -344,6 +377,10 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 	} else if lockState.Locked {
 		provenance += "#sha256:" + lockState.Hash
 	}
+	patchesHash := ""
+	if ps != nil {
+		patchesHash = ps.Hash
+	}
 	expectedManifest := SourceManifest{
 		Kind:          "url",
 		Rendered:      renderedURL,
@@ -353,6 +390,7 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		SourceRoot:    sourceRoot,
 		ProvenanceRef: provenance,
 		Timestamp:     sourceTimestamp,
+		Patches:       patchesHash,
 	}
 	if checksum != "" && dirExists(sourceRoot) {
 		if err := os.RemoveAll(filepath.Join(outBase, scope)); err != nil {
@@ -391,6 +429,12 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			if err := copyFile(artifact, filepath.Join(sourceRoot, filepath.Base(artifact))); err != nil {
 				return SourceState{}, err
 			}
+		}
+		if err := applyPatchSet(ctx, ps, sourceRoot, version); err != nil {
+			// Never leave a half-patched tree that a rerun would take for a
+			// cached materialisation.
+			_ = os.RemoveAll(filepath.Join(outBase, scope))
+			return SourceState{}, err
 		}
 		if err := writeSourceManifest(manifestPath, expectedManifest); err != nil {
 			return SourceState{}, err

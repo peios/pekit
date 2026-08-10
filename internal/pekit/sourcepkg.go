@@ -158,10 +158,12 @@ func sourceRecipeEntries(recipe RecipeConfig, root string) ([]payloadEntry, erro
 		name := item.Name()
 		if item.IsDir() {
 			destPrefix := ""
-			switch name {
-			case "packages.pekit", "keys":
+			switch {
+			case name == "packages.pekit" || name == "keys":
 				destPrefix = root + "/recipe/" + name
-			case "patches":
+			// The applied series ships under the fixed patches/ name even
+			// when [source].patches picks a different directory.
+			case name == "patches" || (recipe.Source.Patches != "" && name == recipe.Source.Patches):
 				destPrefix = root + "/patches"
 			default:
 				continue
