@@ -660,6 +660,13 @@ func extractTar(artifact, dst string) error {
 		if err != nil {
 			return wrapDiag("extract", artifact, err)
 		}
+		// git-archive tarballs (kernel.org releases among them) open with
+		// a pax global header recording the source commit. It is stream
+		// metadata, not a member; per-file 'x' records are already
+		// consumed transparently by archive/tar.
+		if hdr.Typeflag == tar.TypeXGlobalHeader {
+			continue
+		}
 		rel, err := cleanArchiveEntryPath(hdr.Name)
 		if err != nil {
 			return wrapDiag("unsafe_archive", hdr.Name, err)
@@ -759,6 +766,11 @@ func openExternalCompressedTar(path, name string, args ...string) (io.ReadCloser
 		return nil, wrapDiag("extract", path, err)
 	}
 	return archiveReadCloser{Reader: stdout, close: func() error {
+		// Close the pipe before waiting: an early Close — extraction
+		// aborted before EOF — must not deadlock on a decompressor
+		// that is itself blocked writing to us. EPIPE tells it to
+		// quit; at stream EOF the close is a no-op.
+		_ = stdout.Close()
 		err := cmd.Wait()
 		if err != nil {
 			msg := strings.TrimSpace(stderr.String())

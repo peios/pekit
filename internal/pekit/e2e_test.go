@@ -1833,6 +1833,41 @@ func TestSafeTarSymlinkSourcePreserved(t *testing.T) {
 	}
 }
 
+// TestExtractSkipsPaxGlobalHeader: git-archive tarballs (kernel.org
+// releases) open with a pax global header; it is stream metadata and must
+// be skipped, not rejected as an unsupported member.
+func TestExtractSkipsPaxGlobalHeader(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "gh.tar")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	if err := tw.WriteHeader(&tar.Header{Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "file.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	extractDir := filepath.Join(dir, "extract")
+	if err := extractArchive(tarPath, extractDir); err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(extractDir, "file.txt")); err != nil {
+		t.Fatalf("member after global header missing: %v", err)
+	}
+}
+
 // TestExtractPreservesArchiveMtimes guards the autotools contract: release
 // tarballs encode "generated outputs are newer than their inputs" in member
 // mtimes, and extraction must reproduce that rather than stamping files in
