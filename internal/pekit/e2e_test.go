@@ -519,6 +519,42 @@ command = 'printf "$TOOL_PATH" > "$PEKIT_OUT/tool_path"'
 	}
 }
 
+// Multi-word env values used to be emitted bare into the export prelude, so the
+// shell word-split them and `export CFLAGS=-O2 -pipe` failed outright. They are
+// the ordinary case for a distro flag set, and must coexist with the expansion
+// TestUserEnvValuesExpandManagedExports covers.
+func TestUserEnvValuesSurviveWordSplitting(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[env]
+CFLAGS = "-O2 -pipe -Wp,-D_FORTIFY_SOURCE=3"
+CXXFLAGS = "$CFLAGS -Wp,-D_GLIBCXX_ASSERTIONS"
+
+[build]
+command = 'printf "%s" "$CXXFLAGS" > "$PEKIT_OUT/cxxflags"'
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out", "build", "main", "cxxflags"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-O2 -pipe -Wp,-D_FORTIFY_SOURCE=3 -Wp,-D_GLIBCXX_ASSERTIONS"
+	if string(data) != want {
+		t.Fatalf("multi-word env value mangled:\n got %q\nwant %q", string(data), want)
+	}
+}
+
 func TestUserEnvValuesCanReferenceEarlierEnvValues(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

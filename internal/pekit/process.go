@@ -199,9 +199,37 @@ func exportScriptLayers(managed, keyring map[string]string, user []EnvVar) strin
 		b.WriteString("export ")
 		b.WriteString(env.Name)
 		b.WriteByte('=')
-		b.WriteString(env.Value)
+		b.WriteString(shellExpandable(env.Value))
 		b.WriteByte('\n')
 	}
+	return b.String()
+}
+
+// shellExpandable renders a user env value as a double-quoted shell word.
+//
+// User env values are shell expressions, not literals: a layer may build on an
+// earlier one (CFLAGS = "$CFLAGS -fPIC") or reference a managed variable
+// (TOOL_PATH = "$PEKIT_ROOT/tools"), so parameter expansion has to survive.
+// Emitting them bare — as this did originally — also let the shell word-split
+// them, which made every multi-word value a syntax error (`export CFLAGS=-O2
+// -pipe` → "export: -pipe: bad variable name"). Double quotes keep expansion
+// and drop word-splitting, so both forms work.
+//
+// Backslash, double quote and backtick are escaped; `$` deliberately is not.
+func shellExpandable(value string) string {
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; c {
+		case '\\', '"', '`':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
 	return b.String()
 }
 
