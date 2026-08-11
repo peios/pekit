@@ -24,8 +24,13 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			workspace = &ws
 		}
 	}
-	if err := validateNoBuildTargets(ctx.Inv, recipe.Targets[CommandBuild]); err != nil {
-		return err
+	// A delegate recipe borrows its build targets from the fetched source,
+	// which is not resolved yet — its names are validated per-version after
+	// mergeDelegatedRecipe instead of against the thin delegate stub here.
+	if !recipe.Delegate.AllowsBuild() {
+		if err := validateNoBuildTargets(ctx.Inv, recipe.Targets[CommandBuild]); err != nil {
+			return err
+		}
 	}
 	ctx.Renderer.Event(Event{Type: "recipe", Member: member, Command: string(ctx.Inv.EffectiveCommand()), Path: loc.Path, Message: "loaded recipe"})
 	if ctx.Inv.Verbose {
@@ -77,6 +82,11 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 		effectiveRecipe, err := mergeDelegatedRecipe(recipe, source)
 		if err != nil {
 			return err
+		}
+		if recipe.Delegate.AllowsBuild() {
+			if err := validateNoBuildTargets(ctx.Inv, effectiveRecipe.Targets[CommandBuild]); err != nil {
+				return err
+			}
 		}
 		switch cmd {
 		case CommandBuild, CommandTest, CommandInstall:
