@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -2339,5 +2340,78 @@ func runTestCmd(t *testing.T, dir, name string, args ...string) {
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, output)
+	}
+}
+
+func TestURLCrateSourceExtractsAsGzippedTar(t *testing.T) {
+	dir := t.TempDir()
+	serveDir := filepath.Join(dir, "serve")
+	if err := os.MkdirAll(serveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A .crate is cargo's publish format: a plain gzipped tarball.
+	cratePath := filepath.Join(serveDir, "widget-cli-1.0.crate")
+	f, err := os.Create(cratePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	payload := []byte("payload")
+	if err := tw.WriteHeader(&tar.Header{Name: "widget-cli-1.0/payload.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rawURL := "https://example.test/widget-cli-1.0.crate"
+	oldClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != rawURL {
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+		}
+		f, err := os.Open(cratePath)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: f, Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = oldClient })
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[source.url]
+url = "https://example.test/widget-cli-{{version}}.crate"
+extract = true
+root = "widget-cli-{{version}}"
+
+[build]
+command = "cat payload.txt > \"$PEKIT_OUT/value\""
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out", "url-"+shortHash(rawURL, "", "widget-cli-1.0"), "build", "main", "value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("unexpected build output %q", string(data))
 	}
 }

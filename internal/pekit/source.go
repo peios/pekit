@@ -719,7 +719,9 @@ func openTarStream(path string) (io.ReadCloser, error) {
 	switch {
 	case strings.HasSuffix(lower, ".tar"):
 		return file, nil
-	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+	// .crate is cargo's publish format: a plain gzipped tarball by definition
+	// (crates.io serves bindgen-cli-0.65.1.crate etc.).
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".crate"):
 		gr, err := gzip.NewReader(file)
 		if err != nil {
 			_ = file.Close()
