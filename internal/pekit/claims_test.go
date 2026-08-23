@@ -48,12 +48,12 @@ func TestParseClaims(t *testing.T) {
 		"provides": map[string]any{
 			"registryd": map[string]any{
 				"binary": map[string]any{
-					"target": "/usr/bin/loregd", "path": "/usr/bin/registryd"},
+					"target": "/usr/sbin/loregd", "path": "/usr/sbin/registryd"},
 			},
 		},
 		"dependencies": map[string]any{
 			"logsink": map[string]any{
-				"sink": map[string]any{"path": "/run/logsink.sock"},
+				"sink": map[string]any{"path": "/run/services/logsink/logsink.sock"},
 			},
 		},
 	}
@@ -61,11 +61,11 @@ func TestParseClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseClaims: %v", err)
 	}
-	if got := cm.Provides["registryd"]["binary"]; got.Target != "/usr/bin/loregd" ||
-		got.Path != "/usr/bin/registryd" {
+	if got := cm.Provides["registryd"]["binary"]; got.Target != "/usr/sbin/loregd" ||
+		got.Path != "/usr/sbin/registryd" {
 		t.Errorf("provider slot: got %+v", got)
 	}
-	if got := cm.Dependencies["logsink"]["sink"]; got.Path != "/run/logsink.sock" ||
+	if got := cm.Dependencies["logsink"]["sink"]; got.Path != "/run/services/logsink/logsink.sock" ||
 		got.Target != "" {
 		t.Errorf("consumer slot: got %+v", got)
 	}
@@ -91,16 +91,16 @@ func TestParseClaimsRejectsBadKeys(t *testing.T) {
 func TestPackClaimsConversion(t *testing.T) {
 	claims := ClaimsMeta{
 		Provides: map[string]map[string]ClaimSlot{
-			"registryd": {"binary": {Target: "/usr/bin/loregd"}}},
+			"registryd": {"binary": {Target: "/usr/sbin/loregd"}}},
 		Dependencies: map[string]map[string]ClaimSlot{
-			"logsink": {"sink": {Path: "/run/logsink.sock"}}},
+			"logsink": {"sink": {Path: "/run/services/logsink/logsink.sock"}}},
 	}
 	prov := packProvides(map[string]string{"registryd": "1.4"}, claims.Provides)
-	if len(prov) != 1 || prov[0].Claims["binary"].Target != "/usr/bin/loregd" {
+	if len(prov) != 1 || prov[0].Claims["binary"].Target != "/usr/sbin/loregd" {
 		t.Errorf("packProvides claims: got %+v", prov)
 	}
 	deps := packDeps(map[string]string{"logsink": "*"}, nil, claims.Dependencies)
-	if len(deps) != 1 || deps[0].Claims["sink"].Path != "/run/logsink.sock" {
+	if len(deps) != 1 || deps[0].Claims["sink"].Path != "/run/services/logsink/logsink.sock" {
 		t.Errorf("packDeps claims: got %+v", deps)
 	}
 	// A dependency with no claim carries a nil claims map.

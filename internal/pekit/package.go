@@ -349,6 +349,13 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	if over.DefaultRoot != "" {
 		out.DefaultRoot = over.DefaultRoot
 	}
+	// Declaring the exemption wins over a base that does not; the shared
+	// workspace defaults have no business un-declaring a package's own
+	// special_system_package, and "non-zero overrides" is the rule every
+	// other field here follows.
+	if over.SpecialSystemPackage {
+		out.SpecialSystemPackage = true
+	}
 	if len(over.Dependencies) > 0 {
 		out.Dependencies = cloneStringMap(over.Dependencies)
 	}
@@ -1229,7 +1236,10 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 		}
 	}
 	if len(validateFiles) > 0 {
-		if err := pack.ValidateFiles(inst.Architecture, validateFiles); err != nil {
+		if err := pack.ValidateFiles(pack.Manifest{
+			Architecture:         inst.Architecture,
+			SpecialSystemPackage: inst.Config.Package.SpecialSystemPackage,
+		}, validateFiles); err != nil {
 			return wrapDiag("payload_validation", instanceID(inst), err)
 		}
 	}
@@ -1251,6 +1261,7 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 		License:              meta.License,
 		Homepage:             meta.Homepage,
 		DefaultRoot:          meta.DefaultRoot,
+		SpecialSystemPackage: meta.SpecialSystemPackage,
 		Dependencies:         packDeps(meta.Dependencies, meta.DependencyRoots, meta.Claims.Dependencies),
 		OptionalDependencies: packDeps(meta.OptionalDependencies, meta.OptionalDependencyRoots, meta.Claims.Dependencies),
 		Conflicts:            packDeps(meta.Conflicts, nil, nil),
@@ -1285,6 +1296,17 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 	// claim targets in-root, so the materialised symlink can be relative.
 	if err := pack.ValidateClaimTargets(manifest.Provides, files); err != nil {
 		return wrapDiag("claim_target_validation", instanceID(inst), err)
+	}
+	// side_effects must agree with the payload in both directions (§5.24).
+	// Checked against the full file map rather than validateFiles: an
+	// override entry escapes the layout rules, but a kernel module still
+	// needs indexing wherever it was declared.
+	sideEffectWarnings, sideEffectErr := pack.ValidateSideEffects(manifest, files)
+	for _, w := range sideEffectWarnings {
+		fmt.Fprintf(ctx.App.Stderr, "warning: %s: %s\n", instanceID(inst), w)
+	}
+	if sideEffectErr != nil {
+		return wrapDiag("side_effect_validation", instanceID(inst), sideEffectErr)
 	}
 	if err := pack.Pack(pack.PackOptions{Manifest: manifest, Files: files, Out: f, SignKey: run.SignKey}); err != nil {
 		_ = f.Close()

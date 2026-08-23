@@ -203,6 +203,16 @@ type PackageMeta struct {
 	// (§3.3.6, DESIGN-named-roots.md): the named root a top-level install
 	// lands in. Empty for no preference.
 	DefaultRoot string
+	// SpecialSystemPackage declares the package exempt from the §3.4
+	// payload layout rules — fsbase's mountpoint tree, the kernel, and
+	// the few others that lay down the structure those rules protect.
+	// It disables pack-time layout validation for this package.
+	//
+	// It grants nothing at install time: the operator must also pass
+	// --dangerously-bypass-path-restrictions (or the compose
+	// equivalent). A recipe may propose its own exemption; only whoever
+	// installs the result can grant it.
+	SpecialSystemPackage bool
 
 	Dependencies         map[string]string
 	OptionalDependencies map[string]string
@@ -1293,7 +1303,7 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 	if err != nil {
 		return PackageMeta{}, err
 	}
-	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "homepage": true, "default_root": true}
+	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "homepage": true, "default_root": true, "special_system_package": true}
 	for key := range table {
 		if !known[key] {
 			return PackageMeta{}, diagAt("unknown_key", path, "unknown package metadata key %q", key)
@@ -1301,6 +1311,15 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 	}
 	meta := PackageMeta{}
 	for key, raw := range table {
+		// The one boolean in this table; everything else is a string.
+		if key == "special_system_package" {
+			b, err := expectBool(path, "package.special_system_package", raw)
+			if err != nil {
+				return PackageMeta{}, err
+			}
+			meta.SpecialSystemPackage = b
+			continue
+		}
 		s, err := expectString(path, "package."+key, raw)
 		if err != nil {
 			return PackageMeta{}, err
