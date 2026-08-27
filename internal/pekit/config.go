@@ -29,8 +29,12 @@ type TargetConfig struct {
 	Needs        []string
 	Dependencies map[string]map[string]string
 	ClearOut     bool
-	Owner        string
-	Path         string
+	// Sign holds the target's post-run signing tables, keyed by kind
+	// (`sign.<kind>`), each mapping an output-relative path or glob to
+	// the keyring leaf that names its private key. Build targets only.
+	Sign  map[string]map[string]string
+	Owner string
+	Path  string
 
 	// gen-only fields. VerifyCommand is the drift gate run by `pekit verify`
 	// and by the build/test/package/publish pre-flight. VerifyOnBuild and
@@ -841,7 +845,7 @@ func targetConfigKey(kind Command, key string) bool {
 	switch key {
 	case "command", "needs", "clear_out":
 		return true
-	case "dependencies":
+	case "dependencies", "sign":
 		return kind == CommandBuild
 	default:
 		return false
@@ -855,6 +859,7 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 	known := map[string]bool{"command": true, "needs": true, "clear_out": true}
 	if kind == CommandBuild {
 		known["dependencies"] = true
+		known["sign"] = true
 	}
 	for key := range table {
 		if !known[key] {
@@ -888,7 +893,65 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 			return TargetConfig{}, err
 		}
 	}
+	if v, ok := table["sign"]; ok {
+		t.Sign, err = parseTargetSign(path, string(kind)+"."+name+".sign", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
 	return t, nil
+}
+
+// signKinds lists the signature formats `sign.<kind>` accepts.
+var signKinds = map[string]bool{signKindPIP: true}
+
+// parseTargetSign parses a build target's `sign` table:
+//
+//	[build.main.sign.pip]
+//	"bin/peinit" = "tcb.priv"
+//
+// Each kind is a table mapping an output-relative path or glob to the
+// dotted keyring leaf that names the signing key. The kind decides the
+// signature format and where it is stored; the keys are looked up
+// through the ordinary keyring mechanism at run time.
+func parseTargetSign(path, prefix string, value any) (map[string]map[string]string, error) {
+	table, ok := value.(map[string]any)
+	if !ok {
+		return nil, diagAt("invalid_type", path, "%s must be a table", prefix)
+	}
+	out := map[string]map[string]string{}
+	for kind, raw := range table {
+		if !signKinds[kind] {
+			return nil, diagAt("unknown_key", path, "unknown signature kind %s.%s (known: %s)", prefix, kind, strings.Join(sortedKeys(signKinds), ", "))
+		}
+		entries, ok := raw.(map[string]any)
+		if !ok {
+			return nil, diagAt("invalid_type", path, "%s.%s must be a table of path = keyring entry", prefix, kind)
+		}
+		rules := map[string]string{}
+		for pattern, v := range entries {
+			key := prefix + "." + kind + "." + pattern
+			entry, err := expectString(path, key, v)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := cleanRelPath(pattern); err != nil {
+				return nil, diagAt("invalid_path", path, "%s: %v", key, err)
+			}
+			if strings.TrimSpace(entry) == "" {
+				return nil, diagAt("invalid_value", path, "%s must name a keyring entry", key)
+			}
+			rules[pattern] = entry
+		}
+		if len(rules) == 0 {
+			return nil, diagAt("invalid_value", path, "%s.%s is empty", prefix, kind)
+		}
+		out[kind] = rules
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 // parseGenTarget parses a [gen.NAME] target. Unlike build/test targets it has

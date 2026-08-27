@@ -48,6 +48,12 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 	if err := executeCommand(ctx, target.Command, env, cwd, member, version.Raw, string(target.Kind)+":"+target.Name); err != nil {
 		return wrapDiag("target_failed", string(target.Kind)+":"+target.Name, err)
 	}
+	// Signing is the last mutation of the target's output: it runs after
+	// the command has finished every strip/split/patch of its own, and
+	// before any dependent target or package sees the files.
+	if err := pipSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
+		return err
+	}
 	ctx.Renderer.Event(Event{Type: "target_success", Member: member, Target: target.Name, Version: version.Raw, DurationMS: time.Since(start).Milliseconds(), Message: "target succeeded"})
 	return nil
 }
