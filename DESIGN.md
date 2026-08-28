@@ -2497,6 +2497,7 @@ Manifest-only fields include:
 - architecture
 - description
 - license
+- license class
 - homepage
 - dependencies
 - optional dependencies
@@ -2537,6 +2538,7 @@ version = "1.0.0-1"
 architecture = "x86_64"
 description = "Example app"
 license = "MIT"
+license_class = "free"   # unknown | free | firmware | proprietary; absent = unknown
 homepage = "https://example.com"
 side_effects = ["reload-services"]
 

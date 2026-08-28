@@ -343,6 +343,9 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	if over.License != "" {
 		out.License = over.License
 	}
+	if over.LicenseClass != "" {
+		out.LicenseClass = over.LicenseClass
+	}
 	if over.Homepage != "" {
 		out.Homepage = over.Homepage
 	}
@@ -1018,7 +1021,7 @@ func validatePayloadDestinations(entries []payloadEntry) error {
 
 func validateTarPackageConfig(inst PackageInstance) error {
 	meta := inst.Config.Package
-	if meta.Version != "" || meta.Architecture != "" || meta.Description != "" || meta.License != "" || meta.Homepage != "" ||
+	if meta.Version != "" || meta.Architecture != "" || meta.Description != "" || meta.License != "" || meta.LicenseClass != "" || meta.Homepage != "" ||
 		len(meta.Dependencies) > 0 || len(meta.OptionalDependencies) > 0 || len(meta.Conflicts) > 0 ||
 		len(meta.Provides) > 0 || len(meta.Replaces) > 0 || len(meta.SideEffects) > 0 || len(meta.SDOverrides) > 0 {
 		return diag("unsupported_manifest_field", "tar package %s cannot express manifest metadata", instanceID(inst))
@@ -1259,6 +1262,7 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 		Architecture:         inst.Architecture,
 		Description:          meta.Description,
 		License:              meta.License,
+		LicenseClass:         meta.LicenseClass,
 		Homepage:             meta.Homepage,
 		DefaultRoot:          meta.DefaultRoot,
 		SpecialSystemPackage: meta.SpecialSystemPackage,

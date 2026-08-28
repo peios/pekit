@@ -40,6 +40,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 	versionText := members[0].Version
 	homepage := members[0].Config.Package.Homepage
 	licenses := map[string]bool{}
+	licenseClass := ""
 	for _, m := range members {
 		if m.Version != versionText {
 			return nil, diag("source_package_version_conflict",
@@ -52,6 +53,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 		if l := m.Config.Package.License; l != "" {
 			licenses[l] = true
 		}
+		licenseClass = worseLicenseClass(licenseClass, m.Config.Package.LicenseClass)
 	}
 	name := recipe.SourcePackage.Name
 	if name == "" {
@@ -69,6 +71,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 			Architecture: "noarch",
 			Description:  "Corresponding source for " + base + " " + versionText,
 			License:      license,
+			LicenseClass: licenseClass,
 			Homepage:     homepage,
 		},
 		Publish: members[0].Config.Publish,
@@ -211,4 +214,18 @@ func sourceTreeEntries(dir, destPrefix string) ([]payloadEntry, error) {
 		return nil, wrapDiag("walk", dir, err)
 	}
 	return entries, nil
+}
+
+// worseLicenseClass folds two members' licence classes into the class of
+// a package carrying both: the source package contains every member's
+// material, so it is as encumbered as its most encumbered member.
+// proprietary > firmware > unknown > free — unknown outranks free because
+// a member nobody has classified cannot vouch for the whole. An undeclared
+// class ("") is unknown, and stays "" so the manifest omits the key.
+func worseLicenseClass(a, b string) string {
+	rank := map[string]int{"": 2, "unknown": 2, "free": 1, "firmware": 3, "proprietary": 4}
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
 }

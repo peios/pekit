@@ -202,6 +202,11 @@ type PackageMeta struct {
 	Architecture string
 	Description  string
 	License      string
+	// LicenseClass is the §3.3.6 licence class: "unknown", "free",
+	// "firmware" or "proprietary". Empty when the recipe declares none,
+	// which the manifest reads as unknown — every recipe that predates
+	// the field packs exactly as before.
+	LicenseClass string
 	Homepage     string
 	// DefaultRoot is the package's top-level placement preference
 	// (§3.3.6, DESIGN-named-roots.md): the named root a top-level install
@@ -1366,7 +1371,7 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 	if err != nil {
 		return PackageMeta{}, err
 	}
-	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "homepage": true, "default_root": true, "special_system_package": true}
+	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "license_class": true, "homepage": true, "default_root": true, "special_system_package": true}
 	for key := range table {
 		if !known[key] {
 			return PackageMeta{}, diagAt("unknown_key", path, "unknown package metadata key %q", key)
@@ -1398,6 +1403,12 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 			meta.Description = s
 		case "license":
 			meta.License = s
+		case "license_class":
+			if !validLicenseClass(s) {
+				return PackageMeta{}, diagAt("invalid_license_class", path,
+					"package.license_class: %q is not one of unknown, free, firmware, proprietary", s)
+			}
+			meta.LicenseClass = s
 		case "homepage":
 			meta.Homepage = s
 		case "default_root":
@@ -1408,6 +1419,17 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 		}
 	}
 	return meta, nil
+}
+
+// validLicenseClass checks a license_class value against the closed set
+// of PSPU book 5 §3.3.6. Mirrors the consumer's check so a recipe author
+// sees the typo at plan time, not at install time.
+func validLicenseClass(s string) bool {
+	switch s {
+	case "unknown", "free", "firmware", "proprietary":
+		return true
+	}
+	return false
 }
 
 // validRootRef checks a root reference against the §3.3.6 grammar: dotted

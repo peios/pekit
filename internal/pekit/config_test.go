@@ -269,3 +269,25 @@ func writeFile(t *testing.T, path, data string) {
 		t.Fatal(err)
 	}
 }
+
+func TestPackageLicenseClass(t *testing.T) {
+	load := func(class string) (PackageConfig, error) {
+		path := filepath.Join(t.TempDir(), "package.pekit.toml")
+		if err := os.WriteFile(path, []byte("[package]\nlicense_class = \""+class+"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return LoadPackageFile(path)
+	}
+	for _, want := range []string{"unknown", "free", "firmware", "proprietary"} {
+		cfg, err := load(want)
+		if err != nil {
+			t.Fatalf("license_class %q: %v", want, err)
+		}
+		if cfg.Package.LicenseClass != want {
+			t.Errorf("license_class %q: got %q", want, cfg.Package.LicenseClass)
+		}
+	}
+	if _, err := load("nonfree"); err == nil {
+		t.Fatal("license_class = nonfree accepted")
+	}
+}

@@ -335,3 +335,22 @@ license = "MIT"
 		t.Fatalf("binary build.source_package = %q, want empty", got)
 	}
 }
+
+func TestWorseLicenseClass(t *testing.T) {
+	cases := []struct{ a, b, want string }{
+		{"", "", ""},
+		{"free", "free", "free"},
+		{"free", "", ""},          // an undeclared member makes the whole unknown
+		{"", "free", ""},          // ... regardless of order
+		{"free", "unknown", "unknown"},
+		{"free", "firmware", "firmware"},
+		{"firmware", "proprietary", "proprietary"},
+		{"proprietary", "free", "proprietary"},
+		{"unknown", "firmware", "firmware"},
+	}
+	for _, c := range cases {
+		if got := worseLicenseClass(c.a, c.b); got != c.want {
+			t.Errorf("worseLicenseClass(%q, %q) = %q, want %q", c.a, c.b, got, c.want)
+		}
+	}
+}
