@@ -291,3 +291,40 @@ func TestPackageLicenseClass(t *testing.T) {
 		t.Fatal("license_class = nonfree accepted")
 	}
 }
+
+// PEI-489: a test stage runs in a composed root like a build does, so it
+// must be able to declare what that root needs. install/clean still cannot.
+func TestTestTargetsAcceptDependencies(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = "make"
+
+[test.smoke]
+command = "./smoke.sh"
+
+[test.smoke.dependencies.peipkg]
+dash = "*"
+bash = "*"
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatalf("load recipe: %v", err)
+	}
+	if recipe.Targets[CommandTest]["smoke"].Dependencies["peipkg"]["dash"] != "*" {
+		t.Fatalf("test target dependencies not decoded: %#v", recipe.Targets[CommandTest]["smoke"])
+	}
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = "make"
+
+[install.main]
+command = "make install"
+
+[install.main.dependencies.peipkg]
+dash = "*"
+`)
+	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+		t.Fatal("install target accepted dependencies")
+	}
+}

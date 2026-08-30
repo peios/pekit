@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/peios/peipkg/pack"
@@ -196,6 +198,13 @@ type PackageConfig struct {
 	Publish   PublishConfig
 }
 
+// AlternateUpgradeMeta is the recipe's [package] alternate_upgrade
+// table (§5.18): `alternate_upgrade = { message = "..." }`, or the
+// equivalent `[package.alternate_upgrade]` sub-table.
+type AlternateUpgradeMeta struct {
+	Message string
+}
+
 type PackageMeta struct {
 	Name         string
 	Version      string
@@ -222,6 +231,18 @@ type PackageMeta struct {
 	// equivalent). A recipe may propose its own exemption; only whoever
 	// installs the result can grant it.
 	SpecialSystemPackage bool
+	// AlternateUpgrade declares that the package is meant to be installed
+	// and upgraded by some means other than a routine package operation
+	// (§5.18) — an operating-system edition moved by a dedicated tool,
+	// for example. nil when the recipe declares none. Message is
+	// required: non-empty UTF-8 of at most 1024 bytes, newlines permitted
+	// and no other control character.
+	//
+	// It grants nothing at install time: peipkg refuses a request naming
+	// the package and holds it back from an every-package upgrade unless
+	// the operator passes --bypass-alternate-upgrade. peipkg-compose
+	// ignores it — composing an image is not a system upgrade.
+	AlternateUpgrade *AlternateUpgradeMeta
 
 	Dependencies         map[string]string
 	OptionalDependencies map[string]string
@@ -850,7 +871,12 @@ func targetConfigKey(kind Command, key string) bool {
 	switch key {
 	case "command", "needs", "clear_out":
 		return true
-	case "dependencies", "sign":
+	case "dependencies":
+		// A test stage runs in a composed root just as a build does, and
+		// under --env peipkg that root holds nothing the stage does not
+		// name — not even a shell (PEI-489).
+		return kind == CommandBuild || kind == CommandTest
+	case "sign":
 		return kind == CommandBuild
 	default:
 		return false
@@ -862,8 +888,10 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 		return parseGenTarget(path, name, table)
 	}
 	known := map[string]bool{"command": true, "needs": true, "clear_out": true}
-	if kind == CommandBuild {
+	if kind == CommandBuild || kind == CommandTest {
 		known["dependencies"] = true
+	}
+	if kind == CommandBuild {
 		known["sign"] = true
 	}
 	for key := range table {
@@ -1371,7 +1399,7 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 	if err != nil {
 		return PackageMeta{}, err
 	}
-	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "license_class": true, "homepage": true, "default_root": true, "special_system_package": true}
+	known := map[string]bool{"name": true, "version": true, "architecture": true, "description": true, "license": true, "license_class": true, "homepage": true, "default_root": true, "special_system_package": true, "alternate_upgrade": true}
 	for key := range table {
 		if !known[key] {
 			return PackageMeta{}, diagAt("unknown_key", path, "unknown package metadata key %q", key)
@@ -1386,6 +1414,15 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 				return PackageMeta{}, err
 			}
 			meta.SpecialSystemPackage = b
+			continue
+		}
+		// The one table: alternate_upgrade carries only a message.
+		if key == "alternate_upgrade" {
+			alt, err := parseAlternateUpgrade(path, raw)
+			if err != nil {
+				return PackageMeta{}, err
+			}
+			meta.AlternateUpgrade = alt
 			continue
 		}
 		s, err := expectString(path, "package."+key, raw)
@@ -1419,6 +1456,56 @@ func parsePackageMeta(path string, value any) (PackageMeta, error) {
 		}
 	}
 	return meta, nil
+}
+
+// parseAlternateUpgrade parses the [package] alternate_upgrade table
+// (§5.18): a table whose only key is message, which mirrors the
+// consumer's rule — non-empty UTF-8 of at most 1024 bytes, newlines
+// permitted and no other control character — so a recipe author sees
+// a bad message at plan time, not at install time.
+func parseAlternateUpgrade(path string, value any) (*AlternateUpgradeMeta, error) {
+	table, err := expectMap(path, "package.alternate_upgrade", value)
+	if err != nil {
+		return nil, err
+	}
+	for key := range table {
+		if key != "message" {
+			return nil, diagAt("unknown_key", path, "unknown package.alternate_upgrade key %q", key)
+		}
+	}
+	raw, ok := table["message"]
+	if !ok {
+		return nil, diagAt("missing_package_field", path,
+			"package.alternate_upgrade requires message")
+	}
+	msg, err := expectString(path, "package.alternate_upgrade.message", raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := validAlternateUpgradeMessage(msg); err != nil {
+		return nil, diagAt("invalid_value", path, "package.alternate_upgrade.message: %v", err)
+	}
+	return &AlternateUpgradeMeta{Message: msg}, nil
+}
+
+// validAlternateUpgradeMessage checks an alternate_upgrade message
+// against §5.18.
+func validAlternateUpgradeMessage(s string) error {
+	if s == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if len(s) > 1024 {
+		return fmt.Errorf("is %d bytes, the limit is 1024", len(s))
+	}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("is not valid UTF-8")
+	}
+	for i, r := range s {
+		if r != '\n' && unicode.IsControl(r) {
+			return fmt.Errorf("contains the control character %#02x at offset %d", r, i)
+		}
+	}
+	return nil
 }
 
 // validLicenseClass checks a license_class value against the closed set
