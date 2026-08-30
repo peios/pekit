@@ -602,6 +602,16 @@ func pipSignTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig
 			if strings.HasSuffix(rel, pipSidecarSuffix) {
 				continue
 			}
+			// A symlink is signed through its target, never itself: the
+			// kernel reads the target's attribute, and peipkg rejects a
+			// sidecar whose target is a link. Firmware trees are full of
+			// version-alias links, so silently skipping is the useful
+			// behaviour, not an error.
+			if st, err := os.Lstat(filepath.Join(stage, filepath.FromSlash(rel))); err != nil {
+				return diagAt("sign_failed", rel, "%s: %v", label, err)
+			} else if st.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
 			if prev, done := signedBy[rel]; done {
 				if prev != entry {
 					return diag("sign_conflict", "%s: %s is matched by patterns naming different keys (%s and %s)", label, rel, prev, entry)

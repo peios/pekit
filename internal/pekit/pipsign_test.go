@@ -378,6 +378,7 @@ mkdir -p "$PEKIT_OUT/bin" "$PEKIT_OUT/lib"
 cp "$PEKIT_RECIPE_ROOT/app.elf" "$PEKIT_OUT/bin/app"
 cp "$PEKIT_RECIPE_ROOT/app.elf" "$PEKIT_OUT/lib/libapp.so.1"
 printf '#!/bin/sh\n' > "$PEKIT_OUT/bin/script"
+ln -s script "$PEKIT_OUT/bin/script-alias"
 """
 
 [build.sign.pip]
@@ -463,6 +464,10 @@ func TestBuildSignsNonELFDetached(t *testing.T) {
 	}
 	if _, err := os.Stat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script"))+pipSidecarSuffix+pipSidecarSuffix); err == nil {
 		t.Error("the sidecar was itself signed")
+	}
+	// The symlink matched by the same pattern is skipped: no sidecar, no event.
+	if _, err := os.Lstat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script-alias")) + pipSidecarSuffix); err == nil {
+		t.Error("symlink got a sidecar")
 	}
 	// The ELF file matched by the same pattern still takes the section.
 	data, err := os.ReadFile(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/app")))
