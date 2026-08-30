@@ -3,6 +3,7 @@ package pekit
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -186,5 +187,79 @@ peiosutils = { root = "/abs/path" }
 	}
 	if _, err := LoadPackageFile(path); err == nil {
 		t.Error("a dependency root that is a path (not a named reference) should be rejected")
+	}
+}
+
+// TestLoadPackageFileAlternateUpgrade exercises the [package]
+// alternate_upgrade table (§5.18) in both its inline and sub-table forms,
+// and the plan-time checks on its message.
+func TestLoadPackageFileAlternateUpgrade(t *testing.T) {
+	load := func(t *testing.T, body string) (PackageConfig, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "package.pekit.toml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return LoadPackageFile(path)
+	}
+	const head = `format = "peipkg"
+builds = ["main"]
+
+[files]
+"out/x" = "usr/bin/x"
+
+[package]
+version = "1.0-1"
+architecture = "x86_64"
+description = "test"
+`
+	const want = "Upgrade with upgrade-peios.\nSee the release notes."
+	for name, body := range map[string]string{
+		"inline":    head + "alternate_upgrade = { message = \"Upgrade with upgrade-peios.\\nSee the release notes.\" }\n",
+		"sub-table": head + "\n[package.alternate_upgrade]\nmessage = \"Upgrade with upgrade-peios.\\nSee the release notes.\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load(t, body)
+			if err != nil {
+				t.Fatalf("LoadPackageFile: %v", err)
+			}
+			if cfg.Package.AlternateUpgrade == nil || cfg.Package.AlternateUpgrade.Message != want {
+				t.Errorf("alternate_upgrade: got %+v, want message %q", cfg.Package.AlternateUpgrade, want)
+			}
+		})
+	}
+	// Absent means none.
+	if cfg, err := load(t, head); err != nil || cfg.Package.AlternateUpgrade != nil {
+		t.Errorf("absent alternate_upgrade: cfg %+v, err %v", cfg.Package.AlternateUpgrade, err)
+	}
+	for name, body := range map[string]string{
+		"not a table":     head + "alternate_upgrade = \"x\"\n",
+		"missing message": head + "alternate_upgrade = {}\n",
+		"empty message":   head + "alternate_upgrade = { message = \"\" }\n",
+		"unknown key":     head + "alternate_upgrade = { message = \"x\", tool = \"y\" }\n",
+		"control char":    head + "alternate_upgrade = { message = \"a\\tb\" }\n",
+		"too long":        head + "alternate_upgrade = { message = \"" + strings.Repeat("x", 1025) + "\" }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := load(t, body); err == nil {
+				t.Error("LoadPackageFile accepted an invalid alternate_upgrade")
+			}
+		})
+	}
+}
+
+// TestMergePackageMetaAlternateUpgrade: an override that declares the
+// table wins; one that says nothing keeps the base's.
+func TestMergePackageMetaAlternateUpgrade(t *testing.T) {
+	base := PackageMeta{AlternateUpgrade: &AlternateUpgradeMeta{Message: "base"}}
+	if got := mergePackageMeta(base, PackageMeta{}); got.AlternateUpgrade == nil || got.AlternateUpgrade.Message != "base" {
+		t.Errorf("silent override: got %+v", got.AlternateUpgrade)
+	}
+	over := PackageMeta{AlternateUpgrade: &AlternateUpgradeMeta{Message: "over"}}
+	if got := mergePackageMeta(base, over); got.AlternateUpgrade == nil || got.AlternateUpgrade.Message != "over" {
+		t.Errorf("declaring override: got %+v", got.AlternateUpgrade)
+	}
+	if got := mergePackageMeta(PackageMeta{}, over); got.AlternateUpgrade == nil || got.AlternateUpgrade.Message != "over" {
+		t.Errorf("override onto empty base: got %+v", got.AlternateUpgrade)
 	}
 }

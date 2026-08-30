@@ -359,6 +359,12 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	if over.SpecialSystemPackage {
 		out.SpecialSystemPackage = true
 	}
+	// Likewise an override that declares an alternate upgrade path wins;
+	// one that says nothing leaves the base's declaration in place.
+	if over.AlternateUpgrade != nil {
+		alt := *over.AlternateUpgrade
+		out.AlternateUpgrade = &alt
+	}
 	if len(over.Dependencies) > 0 {
 		out.Dependencies = cloneStringMap(over.Dependencies)
 	}
@@ -1220,6 +1226,15 @@ func copyToTar(tw *tar.Writer, path string) error {
 	return nil
 }
 
+// packAlternateUpgrade carries the recipe's alternate_upgrade table into
+// the manifest (§5.18); nil stays nil so the field is absent.
+func packAlternateUpgrade(alt *AlternateUpgradeMeta) *pack.AlternateUpgrade {
+	if alt == nil {
+		return nil
+	}
+	return &pack.AlternateUpgrade{Message: alt.Message}
+}
+
 func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance, source SourceState, entries []payloadEntry, run packRun) error {
 	if inst.Version == "" {
 		return diag("missing_package_field", "peipkg package %s requires [package].version", instanceID(inst))
@@ -1266,6 +1281,7 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 		Homepage:             meta.Homepage,
 		DefaultRoot:          meta.DefaultRoot,
 		SpecialSystemPackage: meta.SpecialSystemPackage,
+		AlternateUpgrade:     packAlternateUpgrade(meta.AlternateUpgrade),
 		Dependencies:         packDeps(meta.Dependencies, meta.DependencyRoots, meta.Claims.Dependencies),
 		OptionalDependencies: packDeps(meta.OptionalDependencies, meta.OptionalDependencyRoots, meta.Claims.Dependencies),
 		Conflicts:            packDeps(meta.Conflicts, nil, nil),
