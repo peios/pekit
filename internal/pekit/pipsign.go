@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
@@ -22,11 +24,18 @@ import (
 // kernel verifies at exec and library load, and stores it in the ELF
 // `.peios.sig` section.
 //
-// Only the ELF-section storage form is implemented. The alternative —
-// the security.peios.sig extended attribute — cannot be used for
-// anything pekit ships, because PSPU §5.11 forbids extended attributes
-// on package entries. A non-ELF signing target is therefore an error
-// rather than a fallback.
+// Both placements PSPK defines are produced, chosen by what the file
+// is. An ELF file carries the blob in its `.peios.sig` section. Any
+// other file cannot, and the alternative placement — the
+// security.peios.sig extended attribute — cannot travel inside a
+// package either, because PSPU §5.11 forbids extended attributes on
+// package entries. So a non-ELF target gets a detached sidecar,
+// `<file>.peios.sig`, holding the bare blob: peipkg's pack-time checks
+// tie it to its target, and the installer (peipkg install and
+// peipkg-compose alike) derives the xattr from it and never writes the
+// sidecar itself to the root. The hash is over the whole file as it
+// sits on disk — for a compressed firmware blob, the compressed bytes —
+// which is what the kernel verifies before it decompresses anything.
 //
 // The spec is explicit that a signer which gets any detail wrong loses
 // the property silently: an unverifiable binary executes with no tier
@@ -44,6 +53,11 @@ const pipSigSize = 1 + mldsa65.SignatureSize
 // pipSectionName is the ELF section that carries the signature. The
 // kernel compares all eleven bytes including the terminating NUL.
 const pipSectionName = ".peios.sig"
+
+// pipSidecarSuffix is appended to a non-ELF file's path to name its
+// detached signature. It is the section name on purpose: pekit emits
+// one thing, and only where it lands differs.
+const pipSidecarSuffix = pipSectionName
 
 // signKindPIP is the `sign.<kind>` key that selects this signer.
 const signKindPIP = "pip"
@@ -465,6 +479,75 @@ func verifyPIPFile(data []byte, pub *mldsa65.PublicKey) error {
 	return nil
 }
 
+// isELF reports whether data begins with the ELF magic — the whole
+// test that decides between the section and sidecar placements.
+func isELF(data []byte) bool {
+	return len(data) >= 4 && string(data[:4]) == "\x7fELF"
+}
+
+// signPIPDetached signs one non-ELF file: the blob over SHA-256 of the
+// entire file is written to `<path>.peios.sig`, through a temporary
+// file and rename so a crash leaves no truncated sidecar. The target is
+// not touched. Like signPIPFile it re-verifies through the independent
+// verifier before returning.
+func signPIPDetached(path string, key *pipSigningKey) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if isELF(data) {
+		return fmt.Errorf("%s is an ELF file; it carries its signature in a section, not a sidecar", path)
+	}
+	blob, err := key.signBlob(sha256.Sum256(data))
+	if err != nil {
+		return err
+	}
+	if err := verifyPIPDetached(data, blob, key.pub); err != nil {
+		return fmt.Errorf("post-sign verification failed: %v", err)
+	}
+	sidecar := path + pipSidecarSuffix
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(sidecar)+".pipsign-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, sidecar); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// verifyPIPDetached checks a sidecar blob against the file bytes it
+// claims to sign, exactly as the kernel does for the xattr placement.
+func verifyPIPDetached(data, blob []byte, pub *mldsa65.PublicKey) error {
+	if len(blob) != pipSigSize {
+		return fmt.Errorf("signature blob is %d bytes, want %d", len(blob), pipSigSize)
+	}
+	if blob[0] != pipSigVersion {
+		return fmt.Errorf("signature version byte is 0x%02x, want 0x%02x", blob[0], pipSigVersion)
+	}
+	hash := sha256.Sum256(data)
+	if !mldsa65.Verify(pub, hash[:], nil, blob[1:]) {
+		return fmt.Errorf("ML-DSA-65 signature does not verify")
+	}
+	return nil
+}
+
 // pipSignTarget runs a build target's `sign.pip` table over its staged
 // output: every pattern is expanded relative to stage, each match is
 // signed with the key its keyring entry names, and one `sign` event is
@@ -513,6 +596,12 @@ func pipSignTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig
 		}
 		sort.Strings(matches)
 		for _, rel := range matches {
+			// A broad pattern (`usr/lib/firmware/**`) sweeps up the
+			// sidecars this very loop writes; a signature is never a
+			// signing target.
+			if strings.HasSuffix(rel, pipSidecarSuffix) {
+				continue
+			}
 			if prev, done := signedBy[rel]; done {
 				if prev != entry {
 					return diag("sign_conflict", "%s: %s is matched by patterns naming different keys (%s and %s)", label, rel, prev, entry)
@@ -520,13 +609,33 @@ func pipSignTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig
 				continue
 			}
 			path := filepath.Join(stage, filepath.FromSlash(rel))
-			if err := signPIPFile(path, key); err != nil {
+			placement, err := pipSignPath(path, key)
+			if err != nil {
 				return diagAt("sign_failed", path, "%s: %v", label, err)
 			}
 			signedBy[rel] = entry
 			ctx.Renderer.Event(Event{Type: "sign", Member: member, Target: target.Name, Version: version, Path: path,
-				Message: fmt.Sprintf("pip-signed with key %s (%s)", entry, key.fingerprint)})
+				Message: fmt.Sprintf("pip-signed (%s) with key %s (%s)", placement, entry, key.fingerprint)})
 		}
 	}
 	return nil
+}
+
+// pipSignPath signs one file in whichever placement its contents
+// allow, returning a short name for the placement used in the event.
+func pipSignPath(path string, key *pipSigningKey) (string, error) {
+	head := make([]byte, 4)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	n, err := io.ReadFull(f, head)
+	f.Close()
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return "", err
+	}
+	if isELF(head[:n]) {
+		return "section", signPIPFile(path, key)
+	}
+	return "sidecar", signPIPDetached(path, key)
 }

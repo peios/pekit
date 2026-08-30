@@ -432,6 +432,55 @@ func TestBuildSignsTargetOutput(t *testing.T) {
 	}
 }
 
+// TestBuildSignsNonELFDetached: a non-ELF match gets a `<file>.peios.sig`
+// sidecar holding the bare blob over the whole file, the file itself is
+// untouched, and a `**` pattern that sweeps the sidecar back up does not
+// sign the signature.
+func TestBuildSignsNonELFDetached(t *testing.T) {
+	recipeText := strings.Replace(pipSignRecipe, `"bin/app" = "tcb.priv"`, `"bin/**" = "tcb.priv"`, 1)
+	recipe, key, keyPath := setupPIPSignRecipe(t, recipeText)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--version", "1.0", "--json", "--keyring.tcb.priv=" + keyPath}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	script, err := os.ReadFile(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(script, []byte("#!/bin/sh\n")) {
+		t.Errorf("script was modified: %q", script)
+	}
+	blob, err := os.ReadFile(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script"+pipSidecarSuffix)))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if err := verifyPIPDetached(script, blob, key.pub); err != nil {
+		t.Errorf("sidecar does not verify: %v", err)
+	}
+	if err := verifyPIPDetached([]byte("#!/bin/sh\n#"), blob, key.pub); err == nil {
+		t.Error("sidecar verified against different bytes")
+	}
+	if _, err := os.Stat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script"))+pipSidecarSuffix+pipSidecarSuffix); err == nil {
+		t.Error("the sidecar was itself signed")
+	}
+	// The ELF file matched by the same pattern still takes the section.
+	data, err := os.ReadFile(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/app")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	independentVerify(t, data, key.pub)
+	if _, err := os.Stat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/app")) + pipSidecarSuffix); err == nil {
+		t.Error("ELF target also got a sidecar")
+	}
+	if got := strings.Count(stdout.String(), `"type":"sign"`); got != 3 {
+		t.Errorf("expected 3 sign events, got %d:\n%s", got, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "pip-signed (sidecar)") || !strings.Contains(stdout.String(), "pip-signed (section)") {
+		t.Errorf("events should name the placement:\n%s", stdout.String())
+	}
+}
+
 func TestBuildSignFailures(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -442,7 +491,6 @@ func TestBuildSignFailures(t *testing.T) {
 		{"missing keyring entry", pipSignRecipe, nil, "signing_key"},
 		{"unloadable key", pipSignRecipe, []string{"--keyring.tcb.priv=/nonexistent/key"}, "signing_key"},
 		{"pattern matches nothing", strings.Replace(pipSignRecipe, `"bin/app" = "tcb.priv"`, `"bin/missing" = "tcb.priv"`, 1), nil, "sign_target_missing"},
-		{"non-ELF target", strings.Replace(pipSignRecipe, `"bin/app" = "tcb.priv"`, `"bin/script" = "tcb.priv"`, 1), nil, "sign_failed"},
 		{"unknown kind", strings.Replace(pipSignRecipe, "[build.sign.pip]", "[build.sign.gpg]", 1), nil, "unknown_key"},
 		{"sign on test target", strings.Replace(pipSignRecipe, "[build.sign.pip]", "[test]\ncommand = \"true\"\n[test.sign.pip]", 1), nil, "mixed_targets"},
 	}
