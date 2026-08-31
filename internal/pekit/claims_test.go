@@ -263,3 +263,99 @@ func TestMergePackageMetaAlternateUpgrade(t *testing.T) {
 		t.Errorf("override onto empty base: got %+v", got.AlternateUpgrade)
 	}
 }
+
+// §5.23 makes the two claim sides asymmetric: a provider names the
+// target it ships, a consumer names the well-known path the role is
+// reached at. peipkg enforces that at install, and pekit accepted the
+// wrong shape without complaint — so the recipe author got a successful
+// build, a signed package, and a failure on somebody else's machine
+// (PEI-445).
+func TestParseClaimsEnforcesTheSideAsymmetry(t *testing.T) {
+	cases := map[string]struct {
+		raw  map[string]any
+		want string
+	}{
+		"a dependencies slot setting target": {
+			raw: map[string]any{"dependencies": map[string]any{
+				"registryd": map[string]any{
+					"binary": map[string]any{"target": "/usr/sbin/loregd"}}}},
+			want: "only a provides claim may set",
+		},
+		"a dependencies slot with no path": {
+			raw: map[string]any{"dependencies": map[string]any{
+				"registryd": map[string]any{"binary": map[string]any{}}}},
+			want: "missing path",
+		},
+		"a provides slot with no target": {
+			raw: map[string]any{"provides": map[string]any{
+				"registryd": map[string]any{
+					"binary": map[string]any{"path": "/usr/sbin/registryd"}}}},
+			want: "missing target",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseClaims("recipe.toml", tc.raw)
+			if err == nil {
+				t.Fatal("the recipe was accepted and would build an uninstallable package")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not contain %q", err, tc.want)
+			}
+		})
+	}
+
+	// A provider MAY also give a default path, which is the shape
+	// TestParseClaims already covers; this is the guard that the new rule
+	// has not made it invalid.
+	if _, err := parseClaims("recipe.toml", map[string]any{
+		"provides": map[string]any{"registryd": map[string]any{
+			"binary": map[string]any{
+				"target": "/usr/sbin/loregd", "path": "/usr/sbin/registryd"}}}}); err != nil {
+		t.Errorf("a provider slot with target and default path was refused: %v", err)
+	}
+}
+
+// A [claims.*] stanza naming a role the package neither provides nor
+// depends on produced no diagnostic at all: packDeps and packProvides
+// attach claims only for roles in the dependency or provides maps, so
+// the claim simply did not reach the shipped manifest (PEI-445).
+func TestValidateClaimRolesRejectsAStanzaForAnUnknownRole(t *testing.T) {
+	meta := PackageMeta{
+		Provides:             map[string]string{"registryd": ""},
+		Dependencies:         map[string]string{"logsink": "*"},
+		OptionalDependencies: map[string]string{"metrics": "*"},
+		Claims: ClaimsMeta{
+			Provides: map[string]map[string]ClaimSlot{
+				"registrydd": {"binary": {Target: "/usr/sbin/loregd"}}, // typo
+			},
+		},
+	}
+	err := validateClaimRoles("pkg", meta)
+	if err == nil {
+		t.Fatal("a claims stanza for a role the package does not provide was accepted")
+	}
+	if !strings.Contains(err.Error(), "registrydd") {
+		t.Errorf("error %q does not name the offending role", err)
+	}
+
+	meta.Claims.Provides = map[string]map[string]ClaimSlot{
+		"registryd": {"binary": {Target: "/usr/sbin/loregd"}},
+	}
+	meta.Claims.Dependencies = map[string]map[string]ClaimSlot{
+		"logsinkk": {"sink": {Path: "/run/x.sock"}}, // typo
+	}
+	if err := validateClaimRoles("pkg", meta); err == nil {
+		t.Error("a claims stanza for a role the package does not depend on was accepted")
+	}
+
+	// Both dependency maps satisfy the dependencies side, since one
+	// claims.dependencies map serves them both.
+	meta.Claims.Dependencies = map[string]map[string]ClaimSlot{
+		"logsink": {"sink": {Path: "/run/logsink.sock"}},
+		"metrics": {"sink": {Path: "/run/metrics.sock"}},
+	}
+	if err := validateClaimRoles("pkg", meta); err != nil {
+		t.Errorf("a claim on an optional dependency was refused: %v", err)
+	}
+}

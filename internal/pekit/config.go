@@ -738,7 +738,7 @@ func parseClaims(path string, value any) (ClaimsMeta, error) {
 	}
 	var out ClaimsMeta
 	for side, raw := range table {
-		roles, err := parseClaimSide(path, "claims."+side, raw)
+		roles, err := parseClaimSide(path, "claims."+side, raw, side == "provides")
 		if err != nil {
 			return ClaimsMeta{}, err
 		}
@@ -756,7 +756,14 @@ func parseClaims(path string, value any) (ClaimsMeta, error) {
 }
 
 // parseClaimSide parses one side of [claims]: role -> slot -> descriptor.
-func parseClaimSide(path, key string, value any) (map[string]map[string]ClaimSlot, error) {
+//
+// provider decides which fields a slot may carry. §5.23 makes the two
+// sides asymmetric — a provider names a target, a consumer names a path
+// — and peipkg enforces that at install. Accepting the wrong shape here
+// meant a successful build, a signed package, and a failure on somebody
+// else's machine (PEI-445).
+func parseClaimSide(path, key string, value any, provider bool) (
+	map[string]map[string]ClaimSlot, error) {
 	roles, err := expectMap(path, key, value)
 	if err != nil {
 		return nil, err
@@ -787,6 +794,24 @@ func parseClaimSide(path, key string, value any) (map[string]map[string]ClaimSlo
 				default:
 					return nil, diagAt("unknown_key", path,
 						"%s.%s.%s.%s must be path or target", key, role, slot, fk)
+				}
+			}
+			label := key + "." + role + "." + slot
+			if provider {
+				if cs.Target == "" {
+					return nil, diagAt("invalid_claim", path,
+						"%s is missing target: a provides claim names the path this package "+
+							"ships (§5.23)", label)
+				}
+			} else {
+				if cs.Target != "" {
+					return nil, diagAt("invalid_claim", path,
+						"%s sets target, which only a provides claim may set (§5.23)", label)
+				}
+				if cs.Path == "" {
+					return nil, diagAt("invalid_claim", path,
+						"%s is missing path: a dependencies claim names the well-known path "+
+							"the role is reached at (§5.23)", label)
 				}
 			}
 			slotMap[slot] = cs

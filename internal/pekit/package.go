@@ -893,6 +893,9 @@ func validateSelectedPackageConfigs(packages []EffectivePackage) error {
 				return err
 			}
 		case "peipkg":
+			if err := validateClaimRoles(pkg.Selector, pkg.Config.Package); err != nil {
+				return err
+			}
 			if pkg.Config.Package.Version == "" {
 				return diag("missing_package_field", "peipkg package %s requires [package].version", pkg.Selector)
 			}
@@ -1539,6 +1542,38 @@ func instanceID(inst PackageInstance) string {
 		return inst.DefinitionSelector
 	}
 	return inst.DefinitionSelector + ":" + inst.InstanceSelector
+}
+
+// validateClaimRoles rejects a [claims.*] stanza naming a role the
+// package neither provides nor depends on.
+//
+// packDeps and packProvides attach claims[key] only for roles that
+// appear in the dependency or provides maps, so a mistyped role name
+// produced no diagnostic at all — the claim simply did not exist in the
+// shipped manifest. That is the same class of mistake pekit's otherwise
+// strict unknown-key rejection catches everywhere else, and it slipped
+// through because the key is a role name rather than a schema field
+// (PEI-445).
+func validateClaimRoles(selector string, meta PackageMeta) error {
+	for _, role := range sortedKeys(meta.Claims.Provides) {
+		if _, ok := meta.Provides[role]; !ok {
+			return diag("unknown_claim_role",
+				"package %s declares [claims.provides.%s] but does not provide %q",
+				selector, role, role)
+		}
+	}
+	// One claims.dependencies map serves both dependency maps, so a role
+	// in either satisfies it.
+	for _, role := range sortedKeys(meta.Claims.Dependencies) {
+		_, req := meta.Dependencies[role]
+		_, opt := meta.OptionalDependencies[role]
+		if !req && !opt {
+			return diag("unknown_claim_role",
+				"package %s declares [claims.dependencies.%s] but does not depend on %q",
+				selector, role, role)
+		}
+	}
+	return nil
 }
 
 func packDeps(values, roots map[string]string, claims map[string]map[string]ClaimSlot) []pack.Dependency {
