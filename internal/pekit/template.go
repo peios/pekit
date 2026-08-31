@@ -36,6 +36,21 @@ func RenderTemplate(raw string, ctx TemplateContext) (string, error) {
 			firstErr = fmt.Errorf("{{version}} is not available without a selected version")
 			return ""
 		}
+		// Every token but {{version}} is derived from decomposing Raw.
+		// A version that did not decompose has none of them, and
+		// substituting an empty string produced a silently wrong path —
+		// a publish destination missing its major number, say — with no
+		// diagnostic anywhere. This is reachable whenever a version
+		// pekit's own model does not describe reaches a template: a
+		// peipkg version carrying an epoch (`2:0.5.0-1`) or a tilde
+		// (`1.0~rc1-1`) is the case that found it (PEI-422).
+		if name != "version" && !ctx.Version.Parsed {
+			firstErr = fmt.Errorf(
+				"{{%s}} is not available: version %q does not decompose into "+
+					"major/minor/patch — only {{version}} can be rendered from it",
+				name, ctx.Version.Raw)
+			return ""
+		}
 		if value == "" && (name == "minor" || name == "patch") {
 			firstErr = fmt.Errorf("{{%s}} is not available for version %q", name, ctx.Version.Raw)
 			return ""

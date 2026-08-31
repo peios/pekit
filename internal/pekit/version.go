@@ -10,7 +10,13 @@ import (
 )
 
 type Version struct {
-	Raw        string
+	Raw string
+	// Parsed reports whether Raw decomposed into the fields below. A
+	// Version that did not parse still carries Raw — enough for
+	// {{version}} — but every derived token is meaningless, and
+	// rendering one is refused rather than substituting an empty string
+	// (PEI-422).
+	Parsed     bool
 	Major      string
 	Minor      string
 	Patch      string
@@ -26,7 +32,8 @@ func ParseVersion(raw string) (Version, error) {
 	if m == nil {
 		return Version{}, fmt.Errorf("invalid version %q", raw)
 	}
-	return Version{Raw: raw, Major: m[1], Minor: m[2], Patch: m[3], Prerelease: m[4], BuildMeta: m[5]}, nil
+	return Version{Raw: raw, Parsed: true,
+		Major: m[1], Minor: m[2], Patch: m[3], Prerelease: m[4], BuildMeta: m[5]}, nil
 }
 
 func (v Version) TemplateVars() map[string]string {

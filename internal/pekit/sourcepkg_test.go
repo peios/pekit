@@ -340,8 +340,8 @@ func TestWorseLicenseClass(t *testing.T) {
 	cases := []struct{ a, b, want string }{
 		{"", "", ""},
 		{"free", "free", "free"},
-		{"free", "", ""},          // an undeclared member makes the whole unknown
-		{"", "free", ""},          // ... regardless of order
+		{"free", "", ""}, // an undeclared member makes the whole unknown
+		{"", "free", ""}, // ... regardless of order
 		{"free", "unknown", "unknown"},
 		{"free", "firmware", "firmware"},
 		{"firmware", "proprietary", "proprietary"},

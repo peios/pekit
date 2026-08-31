@@ -462,7 +462,7 @@ func TestBuildSignsNonELFDetached(t *testing.T) {
 	if err := verifyPIPDetached([]byte("#!/bin/sh\n#"), blob, key.pub); err == nil {
 		t.Error("sidecar verified against different bytes")
 	}
-	if _, err := os.Stat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script"))+pipSidecarSuffix+pipSidecarSuffix); err == nil {
+	if _, err := os.Stat(globOne(t, filepath.Join(recipe, "out/*/build/main/bin/script")) + pipSidecarSuffix + pipSidecarSuffix); err == nil {
 		t.Error("the sidecar was itself signed")
 	}
 	// The symlink matched by the same pattern is skipped: no sidecar, no event.
