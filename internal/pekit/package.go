@@ -365,16 +365,26 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 		alt := *over.AlternateUpgrade
 		out.AlternateUpgrade = &alt
 	}
-	if len(over.Dependencies) > 0 {
+	// A dependency's constraint and its root are two projections of one
+	// [dependencies] entry, so they replace together. Merging them as
+	// independent maps let a base's root survive an override that meant
+	// to drop it: a base declaring
+	//
+	//	libfoo = { constraint = "*", root = "initramfs" }
+	//
+	// overridden by the plain form `libfoo = "1.2"` set Dependencies and
+	// left DependencyRoots empty, so the roots map was not replaced and
+	// the base's root was applied to the new constraint. The member's
+	// attempt to make it an ordinary same-root dependency silently
+	// failed, and there was no way to un-set a root once a base declared
+	// one. "Maps replace wholesale" is the right rule; splitting one
+	// logical field across two maps that can diverge was not.
+	if len(over.Dependencies) > 0 || len(over.DependencyRoots) > 0 {
 		out.Dependencies = cloneStringMap(over.Dependencies)
-	}
-	if len(over.DependencyRoots) > 0 {
 		out.DependencyRoots = cloneStringMap(over.DependencyRoots)
 	}
-	if len(over.OptionalDependencies) > 0 {
+	if len(over.OptionalDependencies) > 0 || len(over.OptionalDependencyRoots) > 0 {
 		out.OptionalDependencies = cloneStringMap(over.OptionalDependencies)
-	}
-	if len(over.OptionalDependencyRoots) > 0 {
 		out.OptionalDependencyRoots = cloneStringMap(over.OptionalDependencyRoots)
 	}
 	if len(over.Conflicts) > 0 {
