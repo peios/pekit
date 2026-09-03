@@ -95,14 +95,17 @@ func (d DelegateConfig) AllowsPackages() bool { return d.All || d.Packages }
 type SourceConfig struct {
 	Git   GitSourceConfig
 	URL   URLSourceConfig
+	PyPI  PyPISourceConfig
 	Local LocalSourceConfig
 	// Patches names a recipe-root directory whose series file pekit
 	// applies to the materialised source tree before any target runs.
 	Patches string
 }
 
-func (s SourceConfig) HasReproducible() bool { return s.Git.URL != "" || s.URL.URL != "" }
-func (s SourceConfig) HasExternal() bool     { return s.HasReproducible() || s.Local.Path != "" }
+func (s SourceConfig) HasReproducible() bool {
+	return s.Git.URL != "" || s.URL.URL != "" || s.PyPI.Project != ""
+}
+func (s SourceConfig) HasExternal() bool { return s.HasReproducible() || s.Local.Path != "" }
 
 type GitSourceConfig struct {
 	URL      string
@@ -120,6 +123,16 @@ type URLSourceConfig struct {
 	Checksum          string
 	ChecksumByVersion map[string]string
 	Signature         URLSignatureConfig
+}
+
+// PyPISourceConfig selects source distributions from PyPI's standardized
+// JSON Simple API. Artifact is deliberately explicit even though only sdists
+// are supported today, so adding another distribution kind cannot silently
+// change an existing recipe's source selection.
+type PyPISourceConfig struct {
+	Project  string
+	Artifact string
+	Versions string
 }
 
 // URLSignatureConfig pins upstream release-signature verification for a URL
@@ -1150,10 +1163,10 @@ func parseSource(path, root string, value any) (SourceConfig, error) {
 		return SourceConfig{}, err
 	}
 	cfg := SourceConfig{}
-	known := map[string]bool{"git": true, "url": true, "local": true, "patches": true}
+	known := map[string]bool{"git": true, "url": true, "pypi": true, "local": true, "patches": true}
 	for key := range table {
 		if !known[key] {
-			return SourceConfig{}, diagAt("unknown_key", path, "unknown source key %q; v2 uses [source.git], [source.url], and [source.local]", key)
+			return SourceConfig{}, diagAt("unknown_key", path, "unknown source key %q; v2 uses [source.git], [source.url], [source.pypi], and [source.local]", key)
 		}
 	}
 	if v, ok := table["patches"]; ok {
@@ -1191,6 +1204,17 @@ func parseSource(path, root string, value any) (SourceConfig, error) {
 			return SourceConfig{}, err
 		}
 	}
+	if v, ok := table["pypi"]; ok {
+		repro++
+		pypiTable, err := expectMap(path, "source.pypi", v)
+		if err != nil {
+			return SourceConfig{}, err
+		}
+		cfg.PyPI, err = parsePyPISource(path, pypiTable)
+		if err != nil {
+			return SourceConfig{}, err
+		}
+	}
 	if repro > 1 {
 		return SourceConfig{}, diagAt("mixed_source", path, "exactly one reproducible source table is allowed")
 	}
@@ -1205,7 +1229,40 @@ func parseSource(path, root string, value any) (SourceConfig, error) {
 		}
 	}
 	if cfg.Patches != "" && !cfg.HasReproducible() {
-		return SourceConfig{}, diagAt("patches_source", path, "source.patches requires [source.git] or [source.url]")
+		return SourceConfig{}, diagAt("patches_source", path, "source.patches requires [source.git], [source.url], or [source.pypi]")
+	}
+	return cfg, nil
+}
+
+func parsePyPISource(path string, table map[string]any) (PyPISourceConfig, error) {
+	known := map[string]bool{"project": true, "artifact": true, "versions": true}
+	for key := range table {
+		if !known[key] {
+			return PyPISourceConfig{}, diagAt("unknown_key", path, "unknown source.pypi key %q", key)
+		}
+	}
+	project, err := requiredString(path, "source.pypi.project", table)
+	if err != nil {
+		return PyPISourceConfig{}, err
+	}
+	if !pypiProjectNameRE.MatchString(project) {
+		return PyPISourceConfig{}, diagAt("invalid_pypi_project", path,
+			"source.pypi.project %q must start and end with an ASCII letter or digit and contain only letters, digits, '.', '_', or '-'", project)
+	}
+	artifact, err := requiredString(path, "source.pypi.artifact", table)
+	if err != nil {
+		return PyPISourceConfig{}, err
+	}
+	if artifact != "sdist" {
+		return PyPISourceConfig{}, diagAt("invalid_pypi_artifact", path,
+			"source.pypi.artifact must be \"sdist\", got %q", artifact)
+	}
+	cfg := PyPISourceConfig{Project: project, Artifact: artifact}
+	if v, ok := table["versions"]; ok {
+		cfg.Versions, err = expectString(path, "source.pypi.versions", v)
+		if err != nil {
+			return PyPISourceConfig{}, err
+		}
 	}
 	return cfg, nil
 }

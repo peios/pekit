@@ -97,6 +97,9 @@ func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceSt
 	if source.URL.URL != "" {
 		return resolveURLSource(ctx, recipe, outBase, source.URL, version)
 	}
+	if source.PyPI.Project != "" {
+		return resolvePyPISource(ctx, recipe, outBase, source.PyPI, version)
+	}
 	return sourcelessSource(recipe, outBase), nil
 }
 

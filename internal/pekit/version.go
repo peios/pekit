@@ -47,7 +47,8 @@ func (v Version) TemplateVars() map[string]string {
 	}
 }
 
-func ResolveVersions(inv Invocation, source SourceConfig) ([]Version, error) {
+func ResolveVersions(ctx *Context, source SourceConfig) ([]Version, error) {
+	inv := ctx.Inv
 	if willUseLocalSource(inv, source) {
 		if inv.Latest || inv.AllVersions || looksLikeConstraint(inv.Version) {
 			return nil, diag("unsupported_version_mode", "local sources require an exact --version")
@@ -63,7 +64,7 @@ func ResolveVersions(inv Invocation, source SourceConfig) ([]Version, error) {
 		return []Version{v}, nil
 	}
 	if inv.Latest || inv.AllVersions || looksLikeConstraint(inv.Version) {
-		versions, err := enumerateSourceVersions(source)
+		versions, err := enumerateSourceVersions(ctx, source)
 		if err != nil {
 			if inv.SuppressUnsupportedVersion && !source.HasReproducible() {
 				return []Version{{}}, nil
@@ -87,7 +88,7 @@ func ResolveVersions(inv Invocation, source SourceConfig) ([]Version, error) {
 	raws := []string{""}
 	if inv.Version != "" {
 		raws = strings.Split(inv.Version, ",")
-		raws = resolveExactVersionTexts(raws, source)
+		raws = resolveExactVersionTexts(ctx, raws, source)
 	}
 	if cap := sourceVersionCap(source); cap != "" && inv.Version != "" {
 		if err := validateConstraintString(cap); err != nil {
@@ -114,11 +115,17 @@ func ResolveVersions(inv Invocation, source SourceConfig) ([]Version, error) {
 	return out, nil
 }
 
-func resolveExactVersionTexts(raws []string, source SourceConfig) []string {
+func resolveExactVersionTexts(ctx *Context, raws []string, source SourceConfig) []string {
 	if !source.HasReproducible() {
 		return raws
 	}
-	available, err := enumerateSourceVersions(source)
+	// A PyPI lock already pins the exact sdist URL and hash. Do not contact the
+	// live index merely to apply the Git/templated-URL trailing-zero ladder;
+	// this keeps exact locked rebuilds fully replayable when the index is down.
+	if source.PyPI.Project != "" {
+		return raws
+	}
+	available, err := enumerateSourceVersions(ctx, source)
 	if err != nil || len(available) == 0 {
 		return raws
 	}
@@ -156,12 +163,14 @@ func trailingZeroCandidates(raw string) []string {
 	return candidates
 }
 
-func enumerateSourceVersions(source SourceConfig) ([]string, error) {
+func enumerateSourceVersions(ctx *Context, source SourceConfig) ([]string, error) {
 	switch {
 	case source.Git.URL != "":
 		return enumerateGitVersions(source.Git)
 	case source.URL.URL != "":
 		return enumerateURLVersions(source.URL)
+	case source.PyPI.Project != "":
+		return enumeratePyPIVersions(ctx, source.PyPI)
 	default:
 		return nil, diag("version_enumeration_unavailable", "selected source cannot enumerate versions")
 	}
@@ -421,7 +430,10 @@ func sourceVersionCap(source SourceConfig) string {
 	if source.Git.Versions != "" {
 		return source.Git.Versions
 	}
-	return source.URL.Versions
+	if source.URL.Versions != "" {
+		return source.URL.Versions
+	}
+	return source.PyPI.Versions
 }
 
 func filterVersions(values []string, constraint string) []string {

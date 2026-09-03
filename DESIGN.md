@@ -1050,10 +1050,19 @@ checksum = "sha256:..."
 path = "../gmp"
 ```
 
+PyPI source:
+
+```toml
+[source.pypi]
+project = "asciidoc"
+artifact = "sdist"
+versions = ">= 10.2.1"
+```
+
 Rules:
 
-- Exactly one reproducible source table may be present: `[source.git]` or
-  `[source.url]`.
+- Exactly one reproducible source table may be present: `[source.git]`,
+  `[source.url]`, or `[source.pypi]`.
 - `[source.local]` is optional and acts as a local override.
 - `[source.local]` alone is valid only for dev-only recipes. Commands that need
   a reproducible source must require `--local` when no reproducible source is
@@ -1295,6 +1304,10 @@ glibc that tag `2.43` while users may request `2.43.0`.
 
 If no source can be enumerated, use the exact version literally.
 
+PyPI exact selectors are literal and skip the ladder's live enumeration. A
+locked PyPI version must remain rebuildable from its pinned file URL and digest
+when the project index is unavailable.
+
 #### Source Version Caps
 
 Version caps belong to the reproducible source:
@@ -1356,6 +1369,14 @@ URL enumeration:
 - Matches candidates against the URL filename/path segment template.
 - Optionally applies `file_regex`.
 - Extracts semantic versions.
+
+PyPI enumeration:
+
+- Requests the project's JSON Simple API page with the versioned media type.
+- Considers only standardized `.tar.gz` sdists with a SHA-256.
+- Excludes yanked files, prereleases, legacy filenames, and versions Pekit's
+  version grammar cannot represent.
+- Caches the parsed project page for one invocation.
 
 Enumeration should be separate from materialization. Planning should be able to
 enumerate versions without cloning or downloading source archives.
@@ -1685,6 +1706,22 @@ Initial cache policy:
 - URL sources default to `trust` when no checksum is present.
 - URL sources default to `verify` when a checksum is present.
 - Local sources do not use a Pekit source cache.
+
+#### PyPI Materialization
+
+`[source.pypi]` is a standardized discovery adapter over verified URL
+materialization, not a separate archive cache. `project` is required;
+`artifact` is required and currently accepts only `"sdist"`; `versions` is the
+ordinary optional source cap. The index endpoint is PyPI's normalized
+`/simple/<project>/` page and is not recipe-configurable.
+
+For a selected version, Pekit requires exactly one eligible PEP 625 sdist.
+Zero exact candidates and ambiguous candidates are hard errors. The advertised
+SHA-256 is verified before extraction, and the exact selected URL and digest
+use the existing URL lock entry. Once locked, an exact build reads the URL and
+hash from `pekit.lock` without consulting the project index; selectors that
+discover versions still query the index. The standardized filename supplies
+the archive root.
 
 #### Local Materialization
 
@@ -3596,7 +3633,7 @@ Examples of ambiguous shapes:
 - bare `[build]` mixed with named `[build.main]`
 - both `delegate = true` and `[delegate]`
 - multiple reproducible source tables, such as `[source.git]` and
-  `[source.url]`
+  `[source.pypi]`
 
 ### Merge and Validation
 

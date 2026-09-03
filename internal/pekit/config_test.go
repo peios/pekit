@@ -60,6 +60,59 @@ func TestLoadRecipeRejectsCamelCaseOutDir(t *testing.T) {
 	}
 }
 
+func TestLoadRecipePyPISource(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.pypi]
+project = "AsciiDoc"
+artifact = "sdist"
+versions = ">= 10.2.1"
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatalf("load recipe: %v", err)
+	}
+	if recipe.Source.PyPI.Project != "AsciiDoc" || recipe.Source.PyPI.Artifact != "sdist" || recipe.Source.PyPI.Versions != ">= 10.2.1" {
+		t.Fatalf("unexpected PyPI source: %#v", recipe.Source.PyPI)
+	}
+}
+
+func TestLoadRecipeRejectsInvalidPyPISource(t *testing.T) {
+	for name, source := range map[string]string{
+		"missing artifact": `project = "demo"`,
+		"unknown artifact": `project = "demo"
+artifact = "wheel"`,
+		"invalid project": `project = "-demo"
+artifact = "sdist"`,
+		"unknown key": `project = "demo"
+artifact = "sdist"
+index = "https://example.test/simple/"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "pekit.toml"), "[source.pypi]\n"+source+"\n")
+			if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+				t.Fatal("expected invalid PyPI source to fail")
+			}
+		})
+	}
+}
+
+func TestLoadRecipeRejectsMixedPyPIAndURLSources(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.pypi]
+project = "demo"
+artifact = "sdist"
+
+[source.url]
+url = "https://example.test/demo.tar.gz"
+`)
+	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+		t.Fatal("expected mixed reproducible sources to fail")
+	}
+}
+
 func TestLoadPackageFileEntryOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package.pekit.toml")

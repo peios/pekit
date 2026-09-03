@@ -19,7 +19,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 	if !recipe.SourcePackage.IsEnabled() {
 		return nil, nil
 	}
-	if source.Local || (source.Kind != "git" && source.Kind != "url") {
+	if source.Local || (source.Kind != "git" && source.Kind != "url" && source.Kind != "pypi") {
 		return nil, nil
 	}
 	// A git source without a resolved commit is a bare branch ref — a
@@ -114,7 +114,7 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 	base := strings.TrimSuffix(inst.Name, "-source")
 	var entries []payloadEntry
 	switch source.Kind {
-	case "url":
+	case "url", "pypi":
 		if !fileExists(source.Artifact) {
 			return diag("missing_source_artifact", "cached source artifact %s does not exist", source.Artifact)
 		}

@@ -362,9 +362,9 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 		return nil
 	}
 	if !recipe.Source.HasReproducible() {
-		return diag("lock_unsupported", "recipe has no lockable source ([source.git] or [source.url])")
+		return diag("lock_unsupported", "recipe has no lockable source ([source.git], [source.url], or [source.pypi])")
 	}
-	versions, err := ResolveVersions(ctx.Inv, recipe.Source)
+	versions, err := ResolveVersions(ctx, recipe.Source)
 	if err != nil {
 		return err
 	}

@@ -110,6 +110,7 @@ type Context struct {
 	Renderer        Renderer
 	Start           time.Time
 	PublishRegistry *DestinationRegistry
+	PyPIProjects    map[string]pypiProjectIndex
 }
 
 type Diagnostic struct {
