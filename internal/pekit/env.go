@@ -18,8 +18,24 @@ type CommandEnv struct {
 func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut string) (CommandEnv, error) {
 	values := map[string]string{}
 	var userEnv []EnvVar
+	workspaceEnvFile := EnvFile{}
+	workspaceEnvFilePresent := false
 	if workspace != nil {
 		appendEnvLayer(&userEnv, values, workspace.Env)
+		// Named environments are normally workspace policy (for example the
+		// Peipkg and Debian build rungs). Load that profile once from the
+		// workspace root, then let member-local layers override it below.
+		if workspace.Root != recipe.Root {
+			var err error
+			workspaceEnvFile, err = selectedEnvFile(ctx.Inv, workspace.Root, true)
+			if err != nil {
+				return CommandEnv{}, err
+			}
+			workspaceEnvFilePresent = workspaceEnvFile.Path != "" && fileExists(workspaceEnvFile.Path)
+			if workspaceEnvFilePresent {
+				appendEnvLayer(&userEnv, values, workspaceEnvFile.Env)
+			}
+		}
 	}
 	sourceEnvFile := EnvFile{}
 	sourceDelegated := source.Kind != "recipe" && source.SourceRoot != "" && source.SourceRoot != recipe.Root
@@ -35,19 +51,31 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 		appendEnvLayer(&userEnv, values, sourceEnvFile.Env)
 	}
 	appendEnvLayer(&userEnv, values, recipe.Env)
-	envFile, err := selectedEnvFile(ctx.Inv, recipe.Root, false)
+	// A named member profile remains optional when the workspace supplied it.
+	// If neither location has that profile, selectedEnvFile preserves the
+	// existing missing_env_file error at the member path.
+	recipeEnvFile, err := selectedEnvFile(ctx.Inv, recipe.Root, workspaceEnvFilePresent)
 	if err != nil {
 		return CommandEnv{}, err
 	}
-	if envFile.Path != "" {
-		appendEnvLayer(&userEnv, values, envFile.Env)
+	// Existing workspaces commonly expose a shared profile through a symlink
+	// beside every member. During migration, do not apply that same underlying
+	// file once as the workspace default and again as a recipe override.
+	if workspaceEnvFilePresent && sameFile(workspaceEnvFile.Path, recipeEnvFile.Path) {
+		recipeEnvFile = EnvFile{}
+	}
+	if recipeEnvFile.Path != "" {
+		appendEnvLayer(&userEnv, values, recipeEnvFile.Env)
 	}
 	dependencyProvider := ""
+	if workspaceEnvFile.DependencyProvider != "" {
+		dependencyProvider = workspaceEnvFile.DependencyProvider
+	}
 	if sourceDelegated && recipe.Delegate.AllowsEnv() && sourceEnvFile.DependencyProvider != "" {
 		dependencyProvider = sourceEnvFile.DependencyProvider
 	}
-	if envFile.DependencyProvider != "" {
-		dependencyProvider = envFile.DependencyProvider
+	if recipeEnvFile.DependencyProvider != "" {
+		dependencyProvider = recipeEnvFile.DependencyProvider
 	}
 	for _, env := range userEnv {
 		if strings.HasPrefix(env.Name, "PEKIT_") {
@@ -80,14 +108,17 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 	if workspace != nil && !workspace.Wrap.Empty() {
 		wrap = workspace.Wrap
 	}
+	if !workspaceEnvFile.Wrap.Empty() {
+		wrap = workspaceEnvFile.Wrap
+	}
 	if sourceDelegated && recipe.Delegate.AllowsWrap() && !sourceEnvFile.Wrap.Empty() {
 		wrap = sourceEnvFile.Wrap
 	}
 	if recipe.Wrap.Empty() == false {
 		wrap = recipe.Wrap
 	}
-	if envFile.Wrap.Empty() == false {
-		wrap = envFile.Wrap
+	if recipeEnvFile.Wrap.Empty() == false {
+		wrap = recipeEnvFile.Wrap
 	}
 	if ctx.Inv.Verbose {
 		ctx.Renderer.Event(Event{
@@ -98,6 +129,18 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 		})
 	}
 	return CommandEnv{Values: all, Outer: managed, Script: exportScriptLayers(managed, keyringEnv, userEnv), Wrap: wrap}, nil
+}
+
+func sameFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	return err == nil && os.SameFile(aInfo, bInfo)
 }
 
 func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut, dependencyProvider string) (map[string]string, error) {

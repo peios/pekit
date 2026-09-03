@@ -375,6 +375,166 @@ libtool-dev = "*"
 	}
 }
 
+func TestWorkspaceNamedEnvFileIsInheritedByMember(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)
+	writeFile(t, filepath.Join(dir, "ci.env.pekit.toml"), `
+dependency_provider = "workspace"
+
+[env]
+FROM_WORKSPACE_PROFILE = "yes"
+
+[wrap]
+command = ["env", "WRAPPED_BY=workspace-profile", "sh", "-euc", "{{command}}"]
+`)
+	member := filepath.Join(dir, "member")
+	writeFile(t, filepath.Join(member, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = 'printf "%s|%s|%s" "$FROM_WORKSPACE_PROFILE" "$WRAPPED_BY" "$PEKIT_DEPENDENCY_PROVIDER" > "$PEKIT_OUT/result"'
+
+[build.dependencies.workspace]
+tool = "*"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(member); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--env", "ci"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(member, "out", "build", "main", "result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "yes|workspace-profile|workspace" {
+		t.Fatalf("workspace profile was not inherited: %q", string(data))
+	}
+}
+
+func TestRecipeNamedEnvFileOverridesWorkspaceEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)
+	writeFile(t, filepath.Join(dir, "ci.env.pekit.toml"), `
+dependency_provider = "workspace"
+
+[env]
+WORKSPACE_ONLY = "preserved"
+SHARED = "workspace"
+
+[wrap]
+command = ["env", "WRAPPED_BY=workspace", "sh", "-euc", "{{command}}"]
+`)
+	member := filepath.Join(dir, "member")
+	writeFile(t, filepath.Join(member, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = 'printf "%s|%s|%s|%s" "$WORKSPACE_ONLY" "$SHARED" "$WRAPPED_BY" "$PEKIT_DEPENDENCY_PROVIDER" > "$PEKIT_OUT/result"'
+
+[build.dependencies.workspace]
+workspace-tool = "*"
+
+[build.dependencies.recipe]
+recipe-tool = "*"
+`)
+	writeFile(t, filepath.Join(member, "ci.env.pekit.toml"), `
+dependency_provider = "recipe"
+
+[env]
+SHARED = "recipe"
+
+[wrap]
+command = ["env", "WRAPPED_BY=recipe", "sh", "-euc", "{{command}}"]
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(member); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--env", "ci"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(member, "out", "build", "main", "result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "preserved|recipe|recipe|recipe" {
+		t.Fatalf("recipe profile did not override workspace profile: %q", string(data))
+	}
+}
+
+func TestWorkspaceEnvFileSymlinkIsNotAppliedTwice(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `
+include = ["./*"]
+
+[env]
+CHAIN = "base"
+`)
+	workspaceProfile := filepath.Join(dir, "ci.env.pekit.toml")
+	writeFile(t, workspaceProfile, `
+[env]
+CHAIN = "$CHAIN/workspace"
+`)
+	member := filepath.Join(dir, "member")
+	writeFile(t, filepath.Join(member, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = 'printf "%s" "$CHAIN" > "$PEKIT_OUT/result"'
+`)
+	if err := os.Symlink(filepath.Join("..", "ci.env.pekit.toml"), filepath.Join(member, "ci.env.pekit.toml")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(member); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--env", "ci"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(member, "out", "build", "main", "result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "base/workspace" {
+		t.Fatalf("shared profile applied more than once: %q", string(data))
+	}
+}
+
+func TestNamedEnvMustExistInWorkspaceOrRecipe(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)
+	member := filepath.Join(dir, "member")
+	writeFile(t, filepath.Join(member, "pekit.toml"), `
+out_dir = "out"
+
+[build]
+command = "true"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(member); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run([]string{"build", "--env", "ci"})
+	if diagCode(err) != "missing_env_file" {
+		t.Fatalf("err = %v, want missing_env_file", err)
+	}
+}
+
 func TestBuildDependenciesRequireSelectedProvider(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

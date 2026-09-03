@@ -3279,9 +3279,13 @@ Env file selection:
 - The default env name is `main`.
 - `main` maps to `env.pekit.toml`.
 - Any other name maps to `<name>.env.pekit.toml`.
-- Missing `env.pekit.toml` for `main` is a no-op.
-- Missing `<name>.env.pekit.toml` for a non-main env name is an error.
-- `--env=none` disables env file loading and wrapping for that invocation.
+- In a workspace, the selected file is loaded first from the workspace root
+  and then from the recipe root; the recipe file overlays the workspace file.
+- Missing `env.pekit.toml` for `main` at either root is a no-op.
+- A named `<name>.env.pekit.toml` must exist at least at one root.
+- Outside a workspace, only the recipe root participates.
+- `--env=none` disables both env-file layers and their wrapping for that
+  invocation.
 
 Decision: `[wrap].command` supports both string and array forms.
 
@@ -3328,14 +3332,16 @@ Common rules:
   that selected env name.
 - `dependency_provider` selects which build dependency provider is exposed as
   the active dependency set for target wrappers and commands.
+- Workspace env files are defaults for every member; recipe env files override
+  their `[env]`, `[wrap]`, and `dependency_provider` values.
 - Source env-file `[env]` values participate only when env delegation is
   enabled.
 - Source env-file `[wrap]` values participate only when wrap delegation is
   enabled.
 - Source env-file `dependency_provider` values participate only when env
   delegation is enabled.
-- Recipe env files override delegated source env files for `[env]`, `[wrap]`,
-  and `dependency_provider`.
+- Precedence is workspace config, workspace env file, delegated source, member
+  recipe, then member env file; later layers override earlier ones.
 
 ### Keyring Files
 
