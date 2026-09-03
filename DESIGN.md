@@ -1343,7 +1343,11 @@ Git enumeration:
 - Lists remote tags.
 - Matches tags against the source ref template.
 - Optionally applies `tag_regex`.
-- Extracts semantic versions.
+- Extracts semantic versions. A named `version` capture supplies the complete
+  version. Named `major`, `minor`, and `patch` captures compose a dotted
+  version, with optional `prerelease` and `buildmeta` suffixes. Without named
+  version captures, extraction falls back to the ref template or an embedded
+  semantic version; unnamed captures are filtering-only.
 
 URL enumeration:
 

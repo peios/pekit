@@ -190,15 +190,91 @@ func enumerateGitVersions(cfg GitSourceConfig) ([]string, error) {
 			continue
 		}
 		ref := strings.TrimSuffix(strings.TrimPrefix(fields[1], "refs/tags/"), "^{}")
-		if tagFilter != nil && !tagFilter.MatchString(ref) {
-			continue
+		version, err := extractGitTagVersion(ref, tagFilter, refPattern)
+		if err != nil {
+			return nil, err
 		}
-		version := extractVersion(ref, refPattern)
 		if version != "" {
 			seen[version] = true
 		}
 	}
 	return sortedVersions(seen), nil
+}
+
+// extractGitTagVersion maps an upstream tag to the version Pekit exposes.
+// Named captures make transformations explicit: `version` supplies a complete
+// version, while major/minor/patch (plus optional prerelease/buildmeta) compose
+// one. Regexes without those names retain the historical ref-template
+// extraction behaviour, so a filtering-only capture group cannot accidentally
+// change a package's versions.
+func extractGitTagVersion(tag string, tagFilter, refPattern *regexp.Regexp) (string, error) {
+	if tagFilter != nil {
+		match := tagFilter.FindStringSubmatch(tag)
+		if match == nil {
+			return "", nil
+		}
+		version, configured, err := versionFromNamedTagCaptures(tag, tagFilter, match)
+		if err != nil {
+			return "", err
+		}
+		if configured {
+			return version, nil
+		}
+	}
+	return extractVersion(tag, refPattern), nil
+}
+
+func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) (string, bool, error) {
+	capture := func(name string) (string, bool) {
+		idx := re.SubexpIndex(name)
+		if idx < 0 {
+			return "", false
+		}
+		return match[idx], true
+	}
+	if version, ok := capture("version"); ok {
+		if version == "" {
+			return "", true, diag("git_versions", "tag %q has an empty named version capture", tag)
+		}
+		if _, err := ParseVersion(version); err != nil {
+			return "", true, wrapDiag("git_versions", "tag "+tag+" named version capture", err)
+		}
+		return version, true, nil
+	}
+
+	major, hasMajor := capture("major")
+	minor, hasMinor := capture("minor")
+	patch, hasPatch := capture("patch")
+	prerelease, hasPrerelease := capture("prerelease")
+	buildmeta, hasBuildmeta := capture("buildmeta")
+	configured := hasMajor || hasMinor || hasPatch || hasPrerelease || hasBuildmeta
+	if !configured {
+		return "", false, nil
+	}
+	if !hasMajor || major == "" {
+		return "", true, diag("git_versions", "tag %q uses named version components but has no non-empty major capture", tag)
+	}
+	if hasPatch && patch != "" && (!hasMinor || minor == "") {
+		return "", true, diag("git_versions", "tag %q has a patch capture without a minor capture", tag)
+	}
+
+	version := major
+	if hasMinor && minor != "" {
+		version += "." + minor
+	}
+	if hasPatch && patch != "" {
+		version += "." + patch
+	}
+	if hasPrerelease && prerelease != "" {
+		version += "-" + prerelease
+	}
+	if hasBuildmeta && buildmeta != "" {
+		version += "+" + buildmeta
+	}
+	if _, err := ParseVersion(version); err != nil {
+		return "", true, wrapDiag("git_versions", "tag "+tag+" named version components", err)
+	}
+	return version, true, nil
 }
 
 func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {

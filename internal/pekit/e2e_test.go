@@ -1319,6 +1319,69 @@ command = 'printf "$PEKIT_VERSION" > "$PEKIT_OUT/version.txt"'
 	}
 }
 
+func TestGitLatestVersionSelectionFromNamedTagComponents(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "src")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runTestCmd(t, repo, "git", "init")
+	runTestCmd(t, repo, "git", "config", "user.email", "test@example.invalid")
+	runTestCmd(t, repo, "git", "config", "user.name", "Test")
+	writeFile(t, filepath.Join(repo, "payload.txt"), "payload")
+	runTestCmd(t, repo, "git", "add", ".")
+	runTestCmd(t, repo, "git", "commit", "-m", "initial")
+	runTestCmd(t, repo, "git", "tag", "20260810")
+	writeFile(t, filepath.Join(repo, "payload.txt"), "payload2")
+	runTestCmd(t, repo, "git", "commit", "-am", "second")
+	runTestCmd(t, repo, "git", "tag", "20260905")
+
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+
+[source.git]
+url = "`+repo+`"
+ref = "{{major}}{{minor}}{{patch}}"
+tag_regex = '^(?P<major>[0-9]{4})(?P<minor>[0-9]{2})(?P<patch>[0-9]{2})$'
+
+[build]
+command = 'printf "$PEKIT_VERSION" > "$PEKIT_OUT/version.txt"'
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(recipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--latest"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(recipe, "out", "git-*", "build", "main", "version.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one version output, got %v", matches)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "2026.09.05" {
+		t.Fatalf("latest version = %q, want 2026.09.05", string(data))
+	}
+	lock, err := LoadLockFile(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.Find("2026.09.05")
+	if entry == nil || entry.Ref != "20260905" || entry.Commit == "" {
+		t.Fatalf("dotted version was not locked to its compact tag: %#v", entry)
+	}
+}
+
 func TestVersionTemplateRequiresSelectedVersion(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `
