@@ -142,7 +142,8 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			break
 		}
 	}
-	var publishOps []plannedPublish
+	var publishOps publishPlan
+	var repositoryKeys map[string]resolvedPeipkgSigningKey
 	if publish {
 		if source.Unanchored && !ctx.Inv.AllowUnanchored {
 			return diag("unanchored_provenance", "publish from unanchored source provenance requires --allow-unanchored")
@@ -155,6 +156,10 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			return err
 		}
 		if err := reservePublishDestinations(ctx, publishOps, member); err != nil {
+			return err
+		}
+		repositoryKeys, err = resolvePeipkgSigningKeys(ctx, recipe, workspace, publishOps.Peipkg)
+		if err != nil {
 			return err
 		}
 	}
@@ -176,21 +181,31 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			return err
 		}
 	}
-	for _, op := range publishOps {
+	for _, op := range publishOps.LocalDir {
 		if err := publishLocalDir(ctx, op, member); err != nil {
+			return err
+		}
+	}
+	for _, op := range publishOps.Peipkg {
+		if err := publishPeipkgRepository(ctx, op, repositoryKeys[op.Dir], signKey, member); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func reservePublishDestinations(ctx *Context, ops []plannedPublish, member string) error {
-	for _, op := range ops {
+func reservePublishDestinations(ctx *Context, ops publishPlan, member string) error {
+	for _, op := range ops.LocalDir {
 		owner := instanceID(op.Instance)
 		if member != "" {
 			owner = member + ":" + owner
 		}
 		if err := ctx.PublishRegistry.Reserve(op.Dest, owner); err != nil {
+			return err
+		}
+	}
+	for _, op := range ops.Peipkg {
+		if err := ctx.PublishRegistry.ReservePeipkg(op.Dir, op.Name, op.SigningKey); err != nil {
 			return err
 		}
 	}
@@ -320,8 +335,15 @@ func mergePackageConfig(base, over PackageConfig) PackageConfig {
 	if len(over.Multipack.Enum) > 0 || over.Multipack.EnumFiles.Path != "" {
 		out.Multipack = over.Multipack
 	}
-	if len(over.Publish.LocalDir) > 0 {
-		out.Publish = over.Publish
+	if over.Publish.Defined {
+		out.Publish = PublishConfig{
+			Defined:  true,
+			LocalDir: append([]LocalDirPublish(nil), over.Publish.LocalDir...),
+		}
+		if over.Publish.Peipkg != nil {
+			target := *over.Publish.Peipkg
+			out.Publish.Peipkg = &target
+		}
 	}
 	return out
 }
@@ -1361,33 +1383,101 @@ type plannedPublish struct {
 	Overwrite bool
 }
 
-func planPublishOps(workspace *WorkspaceConfig, recipe RecipeConfig, instances []PackageInstance) ([]plannedPublish, error) {
-	var ops []plannedPublish
+type plannedPeipkgPublish struct {
+	Dir        string
+	Name       string
+	SigningKey string
+	Instances  []PackageInstance
+}
+
+type publishPlan struct {
+	LocalDir []plannedPublish
+	Peipkg   []plannedPeipkgPublish
+}
+
+func planPublishOps(workspace *WorkspaceConfig, recipe RecipeConfig, instances []PackageInstance) (publishPlan, error) {
+	var plan publishPlan
 	seen := map[string]plannedPublish{}
+	repositories := map[string]int{}
 	for _, inst := range instances {
-		if len(inst.Config.Publish.LocalDir) == 0 {
-			return nil, diag("missing_publish_target", "package %s has no publish target", inst.DefinitionSelector)
+		if len(inst.Config.Publish.LocalDir) == 0 && inst.Config.Publish.Peipkg == nil {
+			return publishPlan{}, diag("missing_publish_target", "package %s has no publish target", inst.DefinitionSelector)
 		}
 		for _, target := range inst.Config.Publish.LocalDir {
 			dst, overwrite, err := renderLocalDirDestination(workspace, recipe, inst, target)
 			if err != nil {
-				return nil, err
+				return publishPlan{}, err
 			}
 			if prev, ok := seen[dst]; ok {
 				if prev.Instance.Artifact == inst.Artifact {
 					continue
 				}
-				return nil, diagAt("publish_collision", dst, "publish destination collision between %s and %s", instanceID(prev.Instance), instanceID(inst))
+				return publishPlan{}, diagAt("publish_collision", dst, "publish destination collision between %s and %s", instanceID(prev.Instance), instanceID(inst))
 			}
 			if !overwrite && fileExists(dst) {
-				return nil, diagAt("publish_exists", dst, "publish destination exists")
+				return publishPlan{}, diagAt("publish_exists", dst, "publish destination exists")
 			}
 			op := plannedPublish{Instance: inst, Target: target, Dest: dst, Overwrite: overwrite}
 			seen[dst] = op
-			ops = append(ops, op)
+			plan.LocalDir = append(plan.LocalDir, op)
+		}
+		if target := inst.Config.Publish.Peipkg; target != nil {
+			if inst.Format != "peipkg" {
+				return publishPlan{}, diag("invalid_publish_target",
+					"package %s uses format %q; publish.peipkg accepts only peipkg artifacts",
+					inst.DefinitionSelector, inst.Format)
+			}
+			dir, name, err := renderPeipkgRepository(workspace, recipe, *target)
+			if err != nil {
+				return publishPlan{}, err
+			}
+			if idx, ok := repositories[dir]; ok {
+				op := &plan.Peipkg[idx]
+				if op.Name != name || op.SigningKey != target.SigningKey {
+					return publishPlan{}, diagAt("publish_collision", dir,
+						"peipkg repository target has conflicting name or signing_key settings")
+				}
+				duplicate := false
+				for _, previous := range op.Instances {
+					if previous.Artifact == inst.Artifact {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					op.Instances = append(op.Instances, inst)
+				}
+				continue
+			}
+			repositories[dir] = len(plan.Peipkg)
+			plan.Peipkg = append(plan.Peipkg, plannedPeipkgPublish{
+				Dir: dir, Name: name, SigningKey: target.SigningKey,
+				Instances: []PackageInstance{inst},
+			})
 		}
 	}
-	return ops, nil
+	return plan, nil
+}
+
+func renderPeipkgRepository(workspace *WorkspaceConfig, recipe RecipeConfig, target PeipkgPublish) (string, string, error) {
+	base := recipe.Root
+	if workspace != nil {
+		base = workspace.Root
+	}
+	rel, err := cleanRelPath(target.Path)
+	if err != nil {
+		return "", "", diagAt("invalid_path", target.Path, "invalid publish.peipkg path: %v", err)
+	}
+	dir := filepath.Join(base, filepath.FromSlash(rel))
+	name := target.Name
+	if name == "" {
+		name = filepath.Base(filepath.Clean(dir))
+	}
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return "", "", diagAt("invalid_repository_name", target.Path,
+			"publish.peipkg cannot derive a repository name from path; set name explicitly")
+	}
+	return dir, name, nil
 }
 
 func renderLocalDirDestination(workspace *WorkspaceConfig, recipe RecipeConfig, inst PackageInstance, target LocalDirPublish) (string, bool, error) {

@@ -304,12 +304,23 @@ type MultipackEnumFiles struct {
 }
 
 type PublishConfig struct {
+	Defined  bool
 	LocalDir []LocalDirPublish
+	Peipkg   *PeipkgPublish
 }
 
 type LocalDirPublish struct {
 	Path      string
 	Overwrite *bool
+}
+
+// PeipkgPublish names a repository state directory maintained through
+// peipkg/repopub. Name is used only when the directory needs initialising;
+// an existing repository's signed descriptor remains authoritative.
+type PeipkgPublish struct {
+	Path       string
+	Name       string
+	SigningKey string
 }
 
 func LoadRecipe(path string) (RecipeConfig, error) {
@@ -1787,38 +1798,66 @@ func parsePublish(path string, value any) (PublishConfig, error) {
 	if err != nil {
 		return PublishConfig{}, err
 	}
-	cfg := PublishConfig{}
+	cfg := PublishConfig{Defined: true}
 	for key, raw := range table {
-		if key != "localdir" {
-			return PublishConfig{}, diagAt("unknown_key", path, "unknown publish target %q", key)
-		}
-		items, err := expectArray(path, "publish.localdir", raw)
-		if err != nil {
-			return PublishConfig{}, err
-		}
-		for idx, item := range items {
-			sub, err := expectMap(path, fmt.Sprintf("publish.localdir[%d]", idx), item)
+		switch key {
+		case "localdir":
+			items, err := expectArray(path, "publish.localdir", raw)
+			if err != nil {
+				return PublishConfig{}, err
+			}
+			for idx, item := range items {
+				sub, err := expectMap(path, fmt.Sprintf("publish.localdir[%d]", idx), item)
+				if err != nil {
+					return PublishConfig{}, err
+				}
+				for k := range sub {
+					if k != "path" && k != "overwrite" {
+						return PublishConfig{}, diagAt("unknown_key", path, "unknown publish.localdir key %q", k)
+					}
+				}
+				p, err := requiredString(path, "publish.localdir.path", sub)
+				if err != nil {
+					return PublishConfig{}, err
+				}
+				target := LocalDirPublish{Path: p}
+				if v, ok := sub["overwrite"]; ok {
+					b, err := expectBool(path, "publish.localdir.overwrite", v)
+					if err != nil {
+						return PublishConfig{}, err
+					}
+					target.Overwrite = &b
+				}
+				cfg.LocalDir = append(cfg.LocalDir, target)
+			}
+		case "peipkg":
+			sub, err := expectMap(path, "publish.peipkg", raw)
 			if err != nil {
 				return PublishConfig{}, err
 			}
 			for k := range sub {
-				if k != "path" && k != "overwrite" {
-					return PublishConfig{}, diagAt("unknown_key", path, "unknown publish.localdir key %q", k)
+				if k != "path" && k != "name" && k != "signing_key" {
+					return PublishConfig{}, diagAt("unknown_key", path, "unknown publish.peipkg key %q", k)
 				}
 			}
-			p, err := requiredString(path, "publish.localdir.path", sub)
+			p, err := requiredString(path, "publish.peipkg.path", sub)
 			if err != nil {
 				return PublishConfig{}, err
 			}
-			target := LocalDirPublish{Path: p}
-			if v, ok := sub["overwrite"]; ok {
-				b, err := expectBool(path, "publish.localdir.overwrite", v)
+			key, err := requiredString(path, "publish.peipkg.signing_key", sub)
+			if err != nil {
+				return PublishConfig{}, err
+			}
+			target := PeipkgPublish{Path: p, SigningKey: key}
+			if v, ok := sub["name"]; ok {
+				target.Name, err = expectString(path, "publish.peipkg.name", v)
 				if err != nil {
 					return PublishConfig{}, err
 				}
-				target.Overwrite = &b
 			}
-			cfg.LocalDir = append(cfg.LocalDir, target)
+			cfg.Peipkg = &target
+		default:
+			return PublishConfig{}, diagAt("unknown_key", path, "unknown publish target %q", key)
 		}
 	}
 	return cfg, nil

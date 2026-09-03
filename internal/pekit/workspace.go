@@ -130,31 +130,31 @@ func preflightMemberPublishDestinations(ctx *Context, ws WorkspaceConfig, member
 	return nil
 }
 
-func planKnownPublishOps(inv Invocation, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version) ([]plannedPublish, error) {
+func planKnownPublishOps(inv Invocation, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version) (publishPlan, error) {
 	packages, err := loadEffectivePackages(recipe, workspace, source)
 	if err != nil {
 		if diagCode(err) == "missing_package" && recipe.Delegate.AllowsPackages() && source.SourceRoot != recipe.Root && !dirExists(source.SourceRoot) {
-			return nil, nil
+			return publishPlan{}, nil
 		}
-		return nil, err
+		return publishPlan{}, err
 	}
 	selected, err := selectPackages(inv, packages)
 	if err != nil {
-		return nil, err
+		return publishPlan{}, err
 	}
 	var instances []PackageInstance
 	for _, def := range selected {
 		expanded, err := expandPackageInstances(def, source, recipe, workspace, version)
 		if err != nil {
-			return nil, nil
+			return publishPlan{}, nil
 		}
 		instances = append(instances, expanded...)
 	}
 	if len(instances) == 0 {
-		return nil, nil
+		return publishPlan{}, nil
 	}
 	if err := validateEmittedPackageNames(instances); err != nil {
-		return nil, err
+		return publishPlan{}, err
 	}
 	return planPublishOps(workspace, recipe, instances)
 }

@@ -2673,14 +2673,29 @@ are normalized and re-validated before execution.
 
 Publish target types should be pluggable.
 
+The Peipkg repository target is:
+
+```toml
+[publish.peipkg]
+path = "dist/repository"
+name = "experimental"
+signing_key = "keyring:signing.repository_key"
+```
+
+It accepts only peipkg artifacts, initializes missing repository state through
+the public `peipkg/repopub` API, and batches artifacts by repository path within
+each package/version plan before updating the signed active and archive
+indexes. `name` defaults to the final path component and is
+initialization-only. `signing_key` is either a direct key-file path or a
+`keyring:<dotted.entry>` reference. Existing repository identity and trust
+remain authoritative. Concurrent workspace members sharing one target are
+serialized around the repository state transition.
+
 Future publish targets might include:
 
 - object storage
 - HTTP upload
-- repository index update
 - signing/promotion workflows
-
-Do not design those until the farm/repository requirements are clearer.
 
 ### Provenance
 
