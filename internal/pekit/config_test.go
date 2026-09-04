@@ -77,6 +77,23 @@ versions = ">= 10.2.1"
 	}
 }
 
+func TestLoadRecipeURLListingURL(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.url]
+url = "https://example.invalid/download/v{{version}}/demo-{{version}}.tar.gz"
+listing_url = "https://example.invalid/releases"
+file_regex = 'v[0-9]+\\.[0-9]+\\.[0-9]+'
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatalf("load recipe: %v", err)
+	}
+	if got := recipe.Source.URL.ListingURL; got != "https://example.invalid/releases" {
+		t.Fatalf("listing_url = %q", got)
+	}
+}
+
 func TestLoadRecipeRejectsInvalidPyPISource(t *testing.T) {
 	for name, source := range map[string]string{
 		"missing artifact": `project = "demo"`,

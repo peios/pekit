@@ -116,6 +116,7 @@ type GitSourceConfig struct {
 
 type URLSourceConfig struct {
 	URL               string
+	ListingURL        string
 	Extract           bool
 	Root              string
 	Versions          string
@@ -1316,7 +1317,7 @@ func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) 
 }
 
 func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) {
-	known := map[string]bool{"url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true, "patch_series": true}
+	known := map[string]bool{"url": true, "listing_url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true, "patch_series": true}
 	for key := range table {
 		if !known[key] {
 			return URLSourceConfig{}, diagAt("unknown_key", path, "unknown source.url key %q", key)
@@ -1327,6 +1328,12 @@ func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) 
 		return URLSourceConfig{}, err
 	}
 	cfg := URLSourceConfig{URL: url, Root: ".", ChecksumByVersion: map[string]string{}}
+	if v, ok := table["listing_url"]; ok {
+		cfg.ListingURL, err = expectString(path, "source.url.listing_url", v)
+		if err != nil {
+			return URLSourceConfig{}, err
+		}
+	}
 	if v, ok := table["extract"]; ok {
 		cfg.Extract, err = expectBool(path, "source.url.extract", v)
 		if err != nil {

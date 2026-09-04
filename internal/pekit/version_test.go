@@ -29,6 +29,25 @@ func TestTemplateExtractRegexMatchesFilenameListing(t *testing.T) {
 	}
 }
 
+func TestEnumerateURLVersionsUsesExplicitListingURL(t *testing.T) {
+	const listingURL = "https://example.test/releases"
+	serveURLs(t, map[string][]byte{
+		listingURL: []byte(`<a href="/tag/v3.2.14">stable</a><a href="/tag/v3.2.15-pre1">pre</a>`),
+	})
+
+	got, err := enumerateBaseURLVersions(URLSourceConfig{
+		URL:        "https://example.test/download/v{{version}}/demo-{{version}}.tar.gz",
+		ListingURL: listingURL,
+		FileRegex:  `v[0-9]+\.[0-9]+\.[0-9]+[^0-9A-Za-z.+-]`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "3.2.14" {
+		t.Fatalf("versions = %v, want [3.2.14]", got)
+	}
+}
+
 func TestGitTagNamedComponentsComposeCanonicalVersion(t *testing.T) {
 	tagFilter := regexp.MustCompile(`^(?P<major>[0-9]{4})(?P<minor>[0-9]{2})(?P<patch>[0-9]{2})$`)
 	refPattern, err := templateExtractRegex("{{major}}{{minor}}{{patch}}")

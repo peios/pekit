@@ -320,9 +320,13 @@ func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {
 }
 
 func enumerateBaseURLVersions(cfg URLSourceConfig) ([]string, error) {
-	listURL, err := urlListingBase(cfg.URL)
-	if err != nil {
-		return nil, err
+	listURL := cfg.ListingURL
+	if listURL == "" {
+		var err error
+		listURL, err = urlListingBase(cfg.URL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	req, err := http.NewRequest(http.MethodGet, listURL, nil)
 	if err != nil {
