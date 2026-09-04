@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
@@ -310,6 +311,18 @@ func detachSign(t *testing.T, entity *openpgp.Entity, data []byte) []byte {
 	return buf.Bytes()
 }
 
+func detachSignAt(t *testing.T, entity *openpgp.Entity, data []byte, at time.Time, lifetime uint32) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := openpgp.DetachSign(&buf, entity, bytes.NewReader(data), &packet.Config{
+		Time:            func() time.Time { return at },
+		SigLifetimeSecs: lifetime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 const signedRecipe = `
 out_dir = "out"
 
@@ -355,6 +368,71 @@ func TestURLSignatureVerifiedAndPinned(t *testing.T) {
 	wantFpr := hex.EncodeToString(signer.PrimaryKey.Fingerprint)
 	if entry == nil || entry.SignatureKey != wantFpr {
 		t.Fatalf("expected signature_key %s, got %+v", wantFpr, entry)
+	}
+}
+
+func TestURLSignatureMadeBeforeKeyExpiryIsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	created := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
+	signer, err := openpgp.NewEntity("Historical Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm:       packet.PubKeyAlgoEdDSA,
+		Time:            func() time.Time { return created },
+		KeyLifetimeSecs: uint32((24 * time.Hour) / time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := makeTarGz(t, "app-1.0", "payload")
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz":     artifact,
+		"https://example.test/app-1.0.tar.gz.sig": detachSignAt(t, signer, artifact, created.Add(time.Hour), 0),
+	}
+	serveURLs(t, responses)
+	writeFile(t, filepath.Join(dir, "pekit.toml"), signedRecipe)
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
+		t.Fatalf("historical signature failed: %v\nstderr=%s", err, stderr.String())
+	}
+}
+
+func TestExpiredSignatureIsRejectedEvenWhenKeyAlsoExpired(t *testing.T) {
+	dir := t.TempDir()
+	created := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
+	signer, err := openpgp.NewEntity("Historical Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm:       packet.PubKeyAlgoEdDSA,
+		Time:            func() time.Time { return created },
+		KeyLifetimeSecs: uint32((24 * time.Hour) / time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := makeTarGz(t, "app-1.0", "payload")
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz":     artifact,
+		"https://example.test/app-1.0.tar.gz.sig": detachSignAt(t, signer, artifact, created.Add(time.Hour), uint32((time.Hour)/time.Second)),
+	}
+	serveURLs(t, responses)
+	writeFile(t, filepath.Join(dir, "pekit.toml"), signedRecipe)
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	err = app.Run([]string{"build", "--version", "1.0"})
+	if err == nil || diagCode(err) != "signature_invalid" || !strings.Contains(err.Error(), "signature expired") {
+		t.Fatalf("expected expired signature rejection, got %v", err)
 	}
 }
 

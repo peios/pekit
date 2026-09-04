@@ -3,12 +3,18 @@ package pekit
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
 // Upstream signature verification closes the trust-on-first-use gap for the
@@ -53,16 +59,30 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 	if err != nil {
 		return "", wrapDiag("signature_invalid", sigPath, err)
 	}
-	signed, err := openSignedData(artifact, sigCfg.Of)
-	if err != nil {
-		return "", err
+	verify := func(config *packet.Config) (*packet.Signature, *openpgp.Entity, error) {
+		signed, openErr := openSignedData(artifact, sigCfg.Of)
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		defer signed.Close()
+		return verifyDetachedSignature(keyring, signed, sigBytes, config)
 	}
-	defer signed.Close()
-	var signer *openpgp.Entity
-	if bytes.Contains(sigBytes, []byte(armoredSigMarker)) {
-		signer, err = openpgp.CheckArmoredDetachedSignature(keyring, signed, bytes.NewReader(sigBytes), nil)
-	} else {
-		signer, err = openpgp.CheckDetachedSignature(keyring, signed, bytes.NewReader(sigBytes), nil)
+	sig, signer, err := verify(nil)
+	if errors.Is(err, pgperrors.ErrKeyExpired) && sig != nil {
+		// Key expiry retires a key for new signatures; it does not invalidate
+		// releases signed while that key was valid. First-time publication still
+		// requires the pinned fingerprint and the lock records the exact bytes.
+		// Present-time revocation and explicit signature expiry are deliberately
+		// checked above and are never relaxed by this historical retry.
+		now := time.Now().Truncate(time.Second)
+		if sig.CreationTime.After(now.Add(5 * time.Minute)) {
+			err = fmt.Errorf("signature creation time %s is in the future", sig.CreationTime.UTC().Format(time.RFC3339))
+		} else if sig.SigExpired(now) {
+			err = pgperrors.ErrSignatureExpired
+		} else {
+			signedAt := sig.CreationTime
+			sig, signer, err = verify(&packet.Config{Time: func() time.Time { return signedAt }})
+		}
 	}
 	if err != nil {
 		return "", diag("signature_invalid",
@@ -74,6 +94,25 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 			"signature verifies but signer %s is not in %s.fingerprints", fpr, field)
 	}
 	return fpr, nil
+}
+
+// verifyDetachedSignature exposes the parsed signature packet as well as the
+// signer. CheckDetachedSignature intentionally hides it, but the signed
+// creation time is needed to distinguish a historical signature from a new
+// signature attempted after a key expired.
+func verifyDetachedSignature(keyring openpgp.KeyRing, signed io.Reader, sigBytes []byte, config *packet.Config) (*packet.Signature, *openpgp.Entity, error) {
+	signature := io.Reader(bytes.NewReader(sigBytes))
+	if bytes.Contains(sigBytes, []byte(armoredSigMarker)) {
+		block, err := armor.Decode(signature)
+		if err != nil {
+			return nil, nil, err
+		}
+		if block.Type != openpgp.SignatureType {
+			return nil, nil, fmt.Errorf("invalid armored signature type %q", block.Type)
+		}
+		signature = block.Body
+	}
+	return openpgp.VerifyDetachedSignature(keyring, signed, signature, config)
 }
 
 // renderSignatureURL resolves the signature URL template. {{source_url}} is
