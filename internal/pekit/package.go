@@ -814,7 +814,7 @@ func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig,
 		clearOut = *inst.Config.ClearOut
 	}
 	if clearOut {
-		if err := os.RemoveAll(inst.Stage); err != nil {
+		if err := removeStage(inst.Stage); err != nil {
 			return wrapDiag("clean_stage", inst.Stage, err)
 		}
 	}

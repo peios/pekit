@@ -104,7 +104,7 @@ func sourcePayloadRoot(inst PackageInstance) string {
 // carries the recipe directory's build-controlling files, and patches/
 // carries the recipe's patch series when one exists.
 func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, run packRun) error {
-	if err := os.RemoveAll(inst.Stage); err != nil {
+	if err := removeStage(inst.Stage); err != nil {
 		return wrapDiag("clean_stage", inst.Stage, err)
 	}
 	if err := os.MkdirAll(inst.Stage, 0o755); err != nil {

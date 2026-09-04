@@ -17,15 +17,32 @@ var execCommand = exec.Command
 func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, member string) error {
 	stage := targetStage(source, target.Kind, target.Name)
 	if shouldReuseBuild(ctx.Inv, target, stage) {
-		ctx.Renderer.Event(Event{Type: "target_reuse", Member: member, Target: target.Name, Version: version.Raw, Message: "reusing staged build target"})
+		status, recorded := readStageStatus(source, target.Kind, target.Name)
+		switch {
+		case recorded && status != stageStatusOK:
+			// The stage exists but the target that wrote it did not finish.
+			// Reusing it is what turns one failure into a second, unrelated
+			// one several stages later (PEI-551), so refuse and say why.
+			return wrapDiag("stage_incomplete", string(target.Kind)+":"+target.Name,
+				fmt.Errorf("stage %s is left over from a run that did not finish; drop %q from --no-build to re-stage it", stage, target.Name))
+		case !recorded:
+			ctx.Renderer.Event(Event{Type: "target_reuse", Member: member, Target: target.Name, Version: version.Raw, Message: "reusing staged build target (staged before completion tracking; state unverified)"})
+		default:
+			ctx.Renderer.Event(Event{Type: "target_reuse", Member: member, Target: target.Name, Version: version.Raw, Message: "reusing staged build target"})
+		}
 		return nil
 	}
 	if ctx.Inv.DryRun {
 		ctx.Renderer.Event(Event{Type: "target_plan", Member: member, Target: target.Name, Version: version.Raw, Path: stage, Message: "would run target"})
 		return nil
 	}
+	// Recorded before the stage is touched, so a clean or a command that fails
+	// leaves the stage marked incomplete rather than merely present.
+	if err := markStageRunning(source, target.Kind, target.Name); err != nil {
+		return err
+	}
 	if target.ClearOut {
-		if err := os.RemoveAll(stage); err != nil {
+		if err := removeStage(stage); err != nil {
 			return wrapDiag("clean_stage", stage, err)
 		}
 	}
@@ -52,6 +69,9 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 	// the command has finished every strip/split/patch of its own, and
 	// before any dependent target or package sees the files.
 	if err := pipSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
+		return err
+	}
+	if err := markStageComplete(source, target.Kind, target.Name); err != nil {
 		return err
 	}
 	ctx.Renderer.Event(Event{Type: "target_success", Member: member, Target: target.Name, Version: version.Raw, DurationMS: time.Since(start).Milliseconds(), Message: "target succeeded"})
