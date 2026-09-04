@@ -81,7 +81,9 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 			err = pgperrors.ErrSignatureExpired
 		} else {
 			signedAt := sig.CreationTime
+			restore := selectIdentitySelfSignaturesAt(keyring, signedAt)
 			sig, signer, err = verify(&packet.Config{Time: func() time.Time { return signedAt }})
+			restore()
 		}
 	}
 	if err != nil {
@@ -94,6 +96,45 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 			"signature verifies but signer %s is not in %s.fingerprints", fpr, field)
 	}
 	return fpr, nil
+}
+
+// selectIdentitySelfSignaturesAt makes the v4 keyring describe the identity
+// state that existed when a historical release was signed. The OpenPGP parser
+// retains every certification in Identity.Signatures but ordinarily selects
+// only the newest self-signature, which may itself postdate the release.
+// The returned closure restores the current selections after the one retry.
+func selectIdentitySelfSignaturesAt(keyring openpgp.EntityList, at time.Time) func() {
+	type selection struct {
+		identity *openpgp.Identity
+		current  *packet.Signature
+	}
+	var changed []selection
+	for _, entity := range keyring {
+		if entity.PrimaryKey.Version != 4 {
+			continue
+		}
+		for _, identity := range entity.Identities {
+			var historical *packet.Signature
+			for _, candidate := range identity.Signatures {
+				if candidate.SigType == packet.SigTypeCertificationRevocation ||
+					!candidate.CheckKeyIdOrFingerprint(entity.PrimaryKey) ||
+					candidate.CreationTime.After(at) || candidate.SigExpired(at) ||
+					entity.PrimaryKey.KeyExpired(candidate, at) {
+					continue
+				}
+				if historical == nil || candidate.CreationTime.After(historical.CreationTime) {
+					historical = candidate
+				}
+			}
+			changed = append(changed, selection{identity: identity, current: identity.SelfSignature})
+			identity.SelfSignature = historical
+		}
+	}
+	return func() {
+		for _, item := range changed {
+			item.identity.SelfSignature = item.current
+		}
+	}
 }
 
 // verifyDetachedSignature exposes the parsed signature packet as well as the

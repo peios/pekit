@@ -403,6 +403,49 @@ func TestURLSignatureMadeBeforeKeyExpiryIsAccepted(t *testing.T) {
 	}
 }
 
+func TestHistoricalVerificationSelectsSelfSignatureValidAtSigningTime(t *testing.T) {
+	created := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
+	signer, err := openpgp.NewEntity("Renewed Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm: packet.PubKeyAlgoEdDSA,
+		Time:      func() time.Time { return created },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identityName string
+	var original *packet.Signature
+	for name, identity := range signer.Identities {
+		identityName = name
+		original = identity.SelfSignature
+		break
+	}
+	renewedAt := created.Add(48 * time.Hour)
+	if err := signer.SignIdentity(identityName, signer, &packet.Config{
+		Time: func() time.Time { return renewedAt },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := openpgp.ReadKeyRing(bytes.NewReader(publicKeyBytes(t, signer)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := parsed[0].Identities[identityName]
+	current := identity.SelfSignature
+	if !current.CreationTime.Equal(renewedAt) {
+		t.Fatalf("expected parser to select renewed self-signature at %s, got %s", renewedAt, current.CreationTime)
+	}
+
+	restore := selectIdentitySelfSignaturesAt(parsed, original.CreationTime.Add(time.Minute))
+	if !identity.SelfSignature.CreationTime.Equal(original.CreationTime) {
+		t.Fatalf("expected historical self-signature at %s, got %s", original.CreationTime, identity.SelfSignature.CreationTime)
+	}
+	restore()
+	if identity.SelfSignature != current {
+		t.Fatal("expected current self-signature to be restored")
+	}
+}
+
 func TestExpiredSignatureIsRejectedEvenWhenKeyAlsoExpired(t *testing.T) {
 	dir := t.TempDir()
 	created := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
