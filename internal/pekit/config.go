@@ -123,7 +123,22 @@ type URLSourceConfig struct {
 	Checksum          string
 	ChecksumByVersion map[string]string
 	Signature         URLSignatureConfig
+	PatchSeries       URLPatchSeriesConfig
 }
+
+// URLPatchSeriesConfig describes an upstream-maintained, incremental patch
+// series layered over a URL release archive. A selected x.y.N version uses the
+// x.y base archive and patches 1 through N; enumeration discovers both the
+// base releases and every contiguous patchlevel exposed by the series URL.
+type URLPatchSeriesConfig struct {
+	URL        string
+	FileRegex  string
+	PatchWidth int
+	Strip      int
+	Signature  URLSignatureConfig
+}
+
+func (c URLPatchSeriesConfig) Configured() bool { return c.URL != "" }
 
 // PyPISourceConfig selects source distributions from PyPI's standardized
 // JSON Simple API. Artifact is deliberately explicit even though only sdists
@@ -1301,7 +1316,7 @@ func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) 
 }
 
 func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) {
-	known := map[string]bool{"url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true}
+	known := map[string]bool{"url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true, "patch_series": true}
 	for key := range table {
 		if !known[key] {
 			return URLSourceConfig{}, diagAt("unknown_key", path, "unknown source.url key %q", key)
@@ -1348,7 +1363,13 @@ func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) 
 		}
 	}
 	if v, ok := table["signature"]; ok {
-		cfg.Signature, err = parseURLSignature(path, v)
+		cfg.Signature, err = parseURLSignature(path, "source.url.signature", v)
+		if err != nil {
+			return URLSourceConfig{}, err
+		}
+	}
+	if v, ok := table["patch_series"]; ok {
+		cfg.PatchSeries, err = parseURLPatchSeries(path, v)
 		if err != nil {
 			return URLSourceConfig{}, err
 		}
@@ -1356,44 +1377,95 @@ func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) 
 	return cfg, nil
 }
 
-func parseURLSignature(path string, value any) (URLSignatureConfig, error) {
-	table, err := expectMap(path, "source.url.signature", value)
+func parseURLPatchSeries(path string, value any) (URLPatchSeriesConfig, error) {
+	table, err := expectMap(path, "source.url.patch_series", value)
+	if err != nil {
+		return URLPatchSeriesConfig{}, err
+	}
+	known := map[string]bool{"url": true, "file_regex": true, "patch_width": true, "strip": true, "signature": true}
+	for key := range table {
+		if !known[key] {
+			return URLPatchSeriesConfig{}, diagAt("unknown_key", path, "unknown source.url.patch_series key %q", key)
+		}
+	}
+	url, err := requiredString(path, "source.url.patch_series.url", table)
+	if err != nil {
+		return URLPatchSeriesConfig{}, err
+	}
+	if !strings.Contains(url, "{{patch}}") {
+		return URLPatchSeriesConfig{}, diagAt("invalid_patch_series", path, "source.url.patch_series.url must contain {{patch}}")
+	}
+	cfg := URLPatchSeriesConfig{URL: url}
+	if v, ok := table["file_regex"]; ok {
+		cfg.FileRegex, err = expectString(path, "source.url.patch_series.file_regex", v)
+		if err != nil {
+			return URLPatchSeriesConfig{}, err
+		}
+		if re, compileErr := regexp.Compile(cfg.FileRegex); compileErr != nil {
+			return URLPatchSeriesConfig{}, wrapDiag("invalid_regex", "source.url.patch_series.file_regex", compileErr)
+		} else if re.SubexpIndex("patch") < 0 {
+			return URLPatchSeriesConfig{}, diagAt("invalid_patch_series", path, "source.url.patch_series.file_regex must contain a named patch capture")
+		}
+	}
+	if v, ok := table["patch_width"]; ok {
+		cfg.PatchWidth, err = expectNonnegativeInt(path, "source.url.patch_series.patch_width", v)
+		if err != nil {
+			return URLPatchSeriesConfig{}, err
+		}
+	}
+	if v, ok := table["strip"]; ok {
+		cfg.Strip, err = expectNonnegativeInt(path, "source.url.patch_series.strip", v)
+		if err != nil {
+			return URLPatchSeriesConfig{}, err
+		}
+	}
+	if v, ok := table["signature"]; ok {
+		cfg.Signature, err = parseURLSignature(path, "source.url.patch_series.signature", v)
+		if err != nil {
+			return URLPatchSeriesConfig{}, err
+		}
+	}
+	return cfg, nil
+}
+
+func parseURLSignature(path, field string, value any) (URLSignatureConfig, error) {
+	table, err := expectMap(path, field, value)
 	if err != nil {
 		return URLSignatureConfig{}, err
 	}
 	known := map[string]bool{"url": true, "of": true, "key_files": true, "fingerprints": true}
 	for key := range table {
 		if !known[key] {
-			return URLSignatureConfig{}, diagAt("unknown_key", path, "unknown source.url.signature key %q", key)
+			return URLSignatureConfig{}, diagAt("unknown_key", path, "unknown %s key %q", field, key)
 		}
 	}
 	cfg := URLSignatureConfig{}
 	if v, ok := table["url"]; ok {
-		cfg.URL, err = expectString(path, "source.url.signature.url", v)
+		cfg.URL, err = expectString(path, field+".url", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}
 	}
 	if v, ok := table["of"]; ok {
-		cfg.Of, err = expectString(path, "source.url.signature.of", v)
+		cfg.Of, err = expectString(path, field+".of", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}
 		if cfg.Of != "artifact" && cfg.Of != "decompressed" {
-			return URLSignatureConfig{}, diagAt("invalid_signature", path, "source.url.signature.of must be \"artifact\" or \"decompressed\"")
+			return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.of must be \"artifact\" or \"decompressed\"", field)
 		}
 	}
 	if v, ok := table["key_files"]; ok {
-		cfg.KeyFiles, err = expectStringSlice(path, "source.url.signature.key_files", v)
+		cfg.KeyFiles, err = expectStringSlice(path, field+".key_files", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}
 	}
 	if len(cfg.KeyFiles) == 0 {
-		return URLSignatureConfig{}, diagAt("missing_key", path, "source.url.signature requires a non-empty key_files")
+		return URLSignatureConfig{}, diagAt("missing_key", path, "%s requires a non-empty key_files", field)
 	}
 	if v, ok := table["fingerprints"]; ok {
-		cfg.Fingerprints, err = expectStringSlice(path, "source.url.signature.fingerprints", v)
+		cfg.Fingerprints, err = expectStringSlice(path, field+".fingerprints", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}
@@ -2075,6 +2147,17 @@ func expectBool(path, key string, value any) (bool, error) {
 		return false, diagAt("invalid_type", path, "%s must be a bool", key)
 	}
 	return b, nil
+}
+
+func expectNonnegativeInt(path, key string, value any) (int, error) {
+	n, ok := value.(int64)
+	if !ok {
+		return 0, diagAt("invalid_type", path, "%s must be an integer", key)
+	}
+	if n < 0 || n > int64(^uint(0)>>1) {
+		return 0, diagAt("invalid_value", path, "%s must be a non-negative integer", key)
+	}
+	return int(n), nil
 }
 
 func expectStringSlice(path, key string, value any) ([]string, error) {

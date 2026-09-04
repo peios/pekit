@@ -287,6 +287,39 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 }
 
 func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {
+	baseVersions, err := enumerateBaseURLVersions(cfg)
+	if err != nil || !cfg.PatchSeries.Configured() {
+		return baseVersions, err
+	}
+	seen := map[string]bool{}
+	for _, raw := range baseVersions {
+		base, err := ParseVersion(raw)
+		if err != nil || base.Minor == "" || base.Prerelease != "" || base.BuildMeta != "" {
+			continue
+		}
+		// A patch series is based on the upstream major.minor release, not a
+		// later roll-up archive that happens to be present in the same listing.
+		if base.Patch != "" && base.Patch != "0" {
+			continue
+		}
+		base.Raw = base.Major + "." + base.Minor + ".0"
+		base.Patch = "0"
+		if !versionBranchCanMatch(base, cfg.Versions) {
+			continue
+		}
+		seen[base.Raw] = true
+		levels, err := enumerateURLPatchLevels(cfg.PatchSeries, base)
+		if err != nil {
+			return nil, err
+		}
+		for _, level := range levels {
+			seen[base.Major+"."+base.Minor+"."+strconv.Itoa(level)] = true
+		}
+	}
+	return sortedVersions(seen), nil
+}
+
+func enumerateBaseURLVersions(cfg URLSourceConfig) ([]string, error) {
 	listURL, err := urlListingBase(cfg.URL)
 	if err != nil {
 		return nil, err
@@ -336,6 +369,168 @@ func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {
 		}
 	}
 	return sortedVersions(seen), nil
+}
+
+// enumerateURLPatchLevels discovers the contiguous numbered patches for one
+// major.minor base release. A missing series directory is normal for a newly
+// published base release and therefore means no patches; gaps are an error
+// because version N cannot be materialised without every patch before it.
+func enumerateURLPatchLevels(cfg URLPatchSeriesConfig, base Version) ([]int, error) {
+	rendered, err := renderURLPatch(cfg, base, 0)
+	if err != nil {
+		return nil, err
+	}
+	listURL, err := urlListingBase(rendered)
+	if err != nil {
+		return nil, err
+	}
+	body, status, err := fetchURLListing(listURL)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, wrapDiag("url_patch_versions", "fetch patch-series listing", err)
+	}
+	re, err := urlPatchLevelRegex(cfg, base)
+	if err != nil {
+		return nil, err
+	}
+	patchIndex := re.SubexpIndex("patch")
+	seen := map[int]bool{}
+	for _, match := range re.FindAllStringSubmatch(body, -1) {
+		if patchIndex < 0 || patchIndex >= len(match) || match[patchIndex] == "" {
+			continue
+		}
+		level, err := strconv.Atoi(match[patchIndex])
+		if err != nil || level <= 0 {
+			return nil, diag("url_patch_versions", "patch-series listing %s contains invalid patchlevel %q", listURL, match[patchIndex])
+		}
+		seen[level] = true
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	max := 0
+	for level := range seen {
+		if level > max {
+			max = level
+		}
+	}
+	levels := make([]int, 0, max)
+	for level := 1; level <= max; level++ {
+		if !seen[level] {
+			return nil, diag("url_patch_gap", "patch-series listing %s is missing patchlevel %d before %d", listURL, level, max)
+		}
+		levels = append(levels, level)
+	}
+	return levels, nil
+}
+
+func urlPatchLevelRegex(cfg URLPatchSeriesConfig, base Version) (*regexp.Regexp, error) {
+	if cfg.FileRegex != "" {
+		re, err := regexp.Compile(cfg.FileRegex)
+		if err != nil {
+			return nil, wrapDiag("invalid_regex", "source.url.patch_series.file_regex", err)
+		}
+		return re, nil
+	}
+	name := cfg.URL
+	if slash := strings.LastIndex(name, "/"); slash >= 0 {
+		name = name[slash+1:]
+	}
+	quoted := regexp.QuoteMeta(name)
+	quoted = strings.ReplaceAll(quoted, regexp.QuoteMeta("{{major}}"), regexp.QuoteMeta(base.Major))
+	quoted = strings.ReplaceAll(quoted, regexp.QuoteMeta("{{minor}}"), regexp.QuoteMeta(base.Minor))
+	width := "+"
+	if cfg.PatchWidth > 0 {
+		width = fmt.Sprintf("{%d}", cfg.PatchWidth)
+	}
+	quoted = strings.ReplaceAll(quoted, regexp.QuoteMeta("{{patch}}"), `(?P<patch>[0-9]`+width+`)`)
+	quoted = strings.ReplaceAll(quoted, regexp.QuoteMeta("{{version}}"), regexp.QuoteMeta(base.Raw))
+	re, err := regexp.Compile(quoted)
+	if err != nil {
+		return nil, wrapDiag("template_regex", "build patch-series extraction regex", err)
+	}
+	return re, nil
+}
+
+func renderURLPatch(cfg URLPatchSeriesConfig, selected Version, level int) (string, error) {
+	patchVersion := urlPatchVersion(cfg, selected, level)
+	rendered, err := RenderTemplate(cfg.URL, TemplateContext{Version: patchVersion})
+	if err != nil {
+		return "", wrapDiag("template", "render source.url.patch_series.url", err)
+	}
+	return rendered, nil
+}
+
+func urlPatchVersion(cfg URLPatchSeriesConfig, selected Version, level int) Version {
+	patchVersion := selected
+	patchVersion.Patch = strconv.Itoa(level)
+	if cfg.PatchWidth > 0 {
+		patchVersion.Patch = fmt.Sprintf("%0*d", cfg.PatchWidth, level)
+	}
+	return patchVersion
+}
+
+func fetchURLListing(listURL string) (string, int, error) {
+	req, err := http.NewRequest(http.MethodGet, listURL, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("User-Agent", "pekit/2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", resp.StatusCode, fmt.Errorf("fetch URL listing %s: HTTP %s", listURL, resp.Status)
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return "", resp.StatusCode, err
+	}
+	return string(bodyBytes), resp.StatusCode, nil
+}
+
+// versionBranchCanMatch avoids probing old patch directories that cannot
+// possibly satisfy the source cap. Patchlevels cannot move a version out of
+// its major.minor branch, so comparing just those components is conservative.
+func versionBranchCanMatch(base Version, constraint string) bool {
+	for _, part := range splitConstraintParts(constraint) {
+		if part == "" || part == "*" {
+			continue
+		}
+		op := "="
+		raw := part
+		for _, candidate := range constraintOperators {
+			if strings.HasPrefix(part, candidate) {
+				op = candidate
+				raw = strings.TrimSpace(strings.TrimPrefix(part, candidate))
+				break
+			}
+		}
+		rhs, err := ParseVersion(raw)
+		if err != nil || rhs.Minor == "" {
+			continue
+		}
+		cmp := compareVersionText(base.Major+"."+base.Minor, rhs.Major+"."+rhs.Minor)
+		switch op {
+		case ">", ">=":
+			if cmp < 0 {
+				return false
+			}
+		case "<", "<=":
+			if cmp > 0 {
+				return false
+			}
+		case "=":
+			if cmp != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func applyVersionSelector(available []string, inv Invocation, cap string) ([]string, error) {

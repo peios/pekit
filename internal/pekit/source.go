@@ -38,6 +38,10 @@ type SourceState struct {
 	// upstream bytes, exactly what the lock hash covers. Empty for other
 	// kinds and on dry runs.
 	Artifact string
+	// AdditionalArtifacts are ordered upstream inputs layered over Artifact,
+	// currently the incremental files in a URL patch series. Corresponding-
+	// source packages carry them alongside the base archive.
+	AdditionalArtifacts []string
 	// GitRepo and Commit identify a git source's mirror clone and the
 	// resolved commit, so a consumer can re-export the exact tree (git
 	// archive) without trusting the mutable checkout. Empty for other
@@ -291,11 +295,15 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 }
 
 func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URLSourceConfig, version Version) (SourceState, error) {
-	renderedURL, err := RenderTemplate(cfg.URL, TemplateContext{Version: version})
+	baseVersion, err := urlBaseVersion(cfg, version)
+	if err != nil {
+		return SourceState{}, err
+	}
+	renderedURL, err := RenderTemplate(cfg.URL, TemplateContext{Version: baseVersion})
 	if err != nil {
 		return SourceState{}, wrapDiag("template", "render source.url.url", err)
 	}
-	root, err := RenderTemplate(cfg.Root, TemplateContext{Version: version})
+	root, err := RenderTemplate(cfg.Root, TemplateContext{Version: baseVersion})
 	if err != nil {
 		return SourceState{}, wrapDiag("template", "render source.url.root", err)
 	}
@@ -304,11 +312,11 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		return SourceState{}, wrapDiag("invalid_path", "source.url.root", err)
 	}
 	checksum := cfg.Checksum
-	if version.Raw != "" && len(cfg.ChecksumByVersion) > 0 {
+	if baseVersion.Raw != "" && len(cfg.ChecksumByVersion) > 0 {
 		var ok bool
-		checksum, ok = cfg.ChecksumByVersion[version.Raw]
+		checksum, ok = cfg.ChecksumByVersion[baseVersion.Raw]
 		if !ok {
-			return SourceState{}, diag("missing_checksum", "source.url.checksum has no entry for version %s", version.Raw)
+			return SourceState{}, diag("missing_checksum", "source.url.checksum has no entry for base version %s", baseVersion.Raw)
 		}
 	}
 	ps, err := loadPatchSet(recipe, ctx.Inv.AllowUnused)
@@ -320,6 +328,9 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 	// series hash joins the scope and an edited patch lands in a fresh
 	// extraction. Unpatched recipes keep their existing scopes.
 	scopeParts := []string{renderedURL, checksum, root}
+	if cfg.PatchSeries.Configured() {
+		scopeParts = append(scopeParts, cfg.PatchSeries.URL, version.Raw, fmt.Sprintf("strip=%d", cfg.PatchSeries.Strip))
+	}
 	if ps != nil && ps.Hash != "" {
 		scopeParts = append(scopeParts, ps.Hash)
 	}
@@ -377,9 +388,13 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			}
 		}
 	}
+	remotePatches, err := fetchURLPatchArtifacts(ctx, outBase, cfg.PatchSeries, version)
+	if err != nil {
+		return SourceState{}, err
+	}
 	// The lock runs on every resolve, cache hits included, so a poisoned
 	// cache entry is caught the same as a changed upstream.
-	lockState, err := applyURLLock(ctx, recipe, cfg, renderedURL, artifact, version)
+	lockState, err := applyURLLockWithPatches(ctx, recipe, cfg, renderedURL, artifact, version, baseVersion, remotePatches)
 	if err != nil {
 		return SourceState{}, err
 	}
@@ -396,9 +411,15 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 	} else if lockState.Locked {
 		provenance += "#sha256:" + lockState.Hash
 	}
+	if lockState.PatchHash != "" {
+		provenance += "+patches:sha256:" + lockState.PatchHash
+	}
 	patchesHash := ""
 	if ps != nil {
 		patchesHash = ps.Hash
+	}
+	if lockState.PatchHash != "" {
+		patchesHash = lockState.PatchHash + ":" + patchesHash
 	}
 	expectedManifest := SourceManifest{
 		Kind:          "url",
@@ -449,6 +470,10 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 				return SourceState{}, err
 			}
 		}
+		if err := applyURLPatchArtifacts(ctx, remotePatches, sourceRoot, version); err != nil {
+			_ = os.RemoveAll(filepath.Join(outBase, scope))
+			return SourceState{}, err
+		}
 		if err := applyPatchSet(ctx, ps, sourceRoot, version); err != nil {
 			// Never leave a half-patched tree that a rerun would take for a
 			// cached materialisation.
@@ -459,18 +484,88 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			return SourceState{}, err
 		}
 	}
+	additionalArtifacts := make([]string, 0, len(remotePatches))
+	for _, patch := range remotePatches {
+		additionalArtifacts = append(additionalArtifacts, patch.Artifact)
+	}
 	return SourceState{
-		Kind:          "url",
-		Scope:         scope,
-		OutBase:       outBase,
-		WorkBase:      filepath.Join(outBase, scope),
-		SourceRoot:    sourceRoot,
-		LiteralRoot:   sourceRoot,
-		ProvenanceRef: provenance,
-		Timestamp:     sourceTimestamp,
-		Unanchored:    unanchored,
-		Artifact:      artifact,
+		Kind:                "url",
+		Scope:               scope,
+		OutBase:             outBase,
+		WorkBase:            filepath.Join(outBase, scope),
+		SourceRoot:          sourceRoot,
+		LiteralRoot:         sourceRoot,
+		ProvenanceRef:       provenance,
+		Timestamp:           sourceTimestamp,
+		Unanchored:          unanchored,
+		Artifact:            artifact,
+		AdditionalArtifacts: additionalArtifacts,
 	}, nil
+}
+
+func urlBaseVersion(cfg URLSourceConfig, selected Version) (Version, error) {
+	if !cfg.PatchSeries.Configured() {
+		return selected, nil
+	}
+	if !selected.Parsed || selected.Minor == "" || selected.Patch == "" || selected.Prerelease != "" || selected.BuildMeta != "" {
+		return Version{}, diag("invalid_patch_series_version", "source.url.patch_series requires a stable major.minor.patch version, got %q", selected.Raw)
+	}
+	base := selected
+	base.Raw = selected.Major + "." + selected.Minor
+	base.Patch = ""
+	return base, nil
+}
+
+func fetchURLPatchArtifacts(ctx *Context, outBase string, cfg URLPatchSeriesConfig, version Version) ([]urlPatchArtifact, error) {
+	if !cfg.Configured() {
+		return nil, nil
+	}
+	if !version.Parsed || version.Minor == "" || version.Patch == "" || version.Prerelease != "" || version.BuildMeta != "" {
+		return nil, diag("invalid_patch_series_version", "source.url.patch_series requires a stable major.minor.patch version, got %q", version.Raw)
+	}
+	level := 0
+	if version.Patch != "" {
+		var err error
+		level, err = strconv.Atoi(version.Patch)
+		if err != nil || level < 0 {
+			return nil, diag("invalid_patch_series_version", "source.url.patch_series requires a numeric patch component, got %q", version.Raw)
+		}
+	}
+	patches := make([]urlPatchArtifact, 0, level)
+	for current := 1; current <= level; current++ {
+		rendered, err := renderURLPatch(cfg, version, current)
+		if err != nil {
+			return nil, err
+		}
+		rawDir := filepath.Join(outBase, "_source_cache", "url", shortHash(rendered))
+		artifact := filepath.Join(rawDir, urlArtifactName(rendered))
+		if ctx.Inv.RefreshSource || ctx.Inv.Repin {
+			_ = os.RemoveAll(rawDir)
+		}
+		if !fileExists(artifact) {
+			if err := os.MkdirAll(rawDir, 0o755); err != nil {
+				return nil, wrapDiag("mkdir", rawDir, err)
+			}
+			if err := downloadFile(rendered, artifact); err != nil {
+				return nil, wrapDiag("download", rendered, err)
+			}
+		}
+		patches = append(patches, urlPatchArtifact{URL: rendered, Artifact: artifact, Config: cfg, Version: urlPatchVersion(cfg, version, current)})
+	}
+	return patches, nil
+}
+
+func applyURLPatchArtifacts(ctx *Context, patches []urlPatchArtifact, tree string, version Version) error {
+	for i, patchArtifact := range patches {
+		strip := fmt.Sprintf("-p%d", patchArtifact.Config.Strip)
+		if err := runSimple(tree, "patch", "--batch", "--forward", "--fuzz=0", "--no-backup-if-mismatch", strip, "-i", patchArtifact.Artifact); err != nil {
+			return wrapDiag("patch_apply", fmt.Sprintf("apply upstream patch %d (%s)", i+1, patchArtifact.URL), err)
+		}
+	}
+	if len(patches) > 0 {
+		ctx.Renderer.Event(Event{Type: "patch", Version: version.Raw, Path: tree, Message: fmt.Sprintf("applied %d upstream patches", len(patches))})
+	}
+	return nil
 }
 
 func urlArtifactName(raw string) string {
@@ -960,7 +1055,8 @@ func sourceManifestMatches(path string, expected SourceManifest) bool {
 		actual.Extract == expected.Extract &&
 		actual.Root == expected.Root &&
 		actual.ProvenanceRef == expected.ProvenanceRef &&
-		actual.Timestamp == expected.Timestamp
+		actual.Timestamp == expected.Timestamp &&
+		actual.Patches == expected.Patches
 }
 
 func writeSourceManifest(path string, manifest SourceManifest) error {

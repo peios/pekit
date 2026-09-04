@@ -1046,6 +1046,11 @@ versions = ">= 6.3"
 file_regex = '^gmp-\d+\.\d+\.\d+\.tar\.xz$'
 checksum = "sha256:..."
 
+[source.url.patch_series]
+url = "https://example.com/app-{{major}}.{{minor}}-patches/app{{major}}{{minor}}-{{patch}}"
+patch_width = 3
+strip = 1
+
 [source.local]
 path = "../gmp"
 ```
@@ -1168,6 +1173,7 @@ Initial templated fields:
 - `[source.git].ref`
 - `[source.url].url`
 - `[source.url].root`
+- `[source.url.patch_series].url`
 - `[package].version`
 - selected package metadata strings where version text is useful, such as
   `[package].description`
@@ -1651,6 +1657,38 @@ should support at least the formats current Pekit handles where practical:
 Prefer structured archive readers over shelling out. If an implementation has
 to shell out for a compressor, extraction must still happen in a temporary
 directory and be validated before becoming the source root.
+
+Incremental URL patch series:
+
+```toml
+[source.url]
+url = "https://example.com/app-{{version}}.tar.xz"
+extract = true
+root = "app-{{version}}"
+
+[source.url.patch_series]
+url = "https://example.com/app-{{major}}.{{minor}}-patches/app{{major}}{{minor}}-{{patch}}"
+patch_width = 3
+strip = 1
+```
+
+Rules:
+
+- A patch-series version is always an explicit stable `major.minor.patch`.
+  Patchlevel zero uses the upstream `major.minor` base archive; patchlevel N
+  applies every numbered patch from 1 through N in order.
+- `url` must contain `{{patch}}`. `patch_width` controls zero-padding, and
+  `strip` is the non-negative `patch -pN` level.
+- Enumeration starts from base URL releases, probes the corresponding patch
+  listing, emits patchlevel zero and every contiguous patchlevel, and errors on
+  a gap. A missing patch directory means that the base is currently at zero.
+- Every patch is fetched, optionally verified against its own nested detached-
+  signature policy, and included with the base archive in one lock entry.
+- Materialization applies remote patches strictly before recipe-local patches.
+  The patch URLs, bytes, order, and strip level participate in materialization
+  identity so a changed input cannot reuse a stale prepared tree.
+- Corresponding-source packages carry the base archive and all applied remote
+  patch artifacts.
 
 Default URL policies:
 

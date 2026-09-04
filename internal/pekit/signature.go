@@ -27,7 +27,13 @@ const armoredSigMarker = "-----BEGIN PGP SIGNATURE-----"
 // a URL artifact and verifies it against the recipe's pinned keys, returning
 // the hex fingerprint of the signing key's primary key.
 func verifySourceSignature(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, renderedURL, artifact string, version Version) (string, error) {
-	sigCfg := cfg.Signature
+	return verifyURLSignature(ctx, recipe, cfg.Signature, renderedURL, artifact, version, "source.url.signature")
+}
+
+// verifyURLSignature is shared by the base URL artifact and every artifact in
+// a remote patch series. The field name keeps diagnostics pointed at the
+// configuration block that supplied the trust policy.
+func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureConfig, renderedURL, artifact string, version Version, field string) (string, error) {
 	sigURL, err := renderSignatureURL(sigCfg.URL, renderedURL, version)
 	if err != nil {
 		return "", err
@@ -65,7 +71,7 @@ func verifySourceSignature(ctx *Context, recipe RecipeConfig, cfg URLSourceConfi
 	fpr := hex.EncodeToString(signer.PrimaryKey.Fingerprint)
 	if len(sigCfg.Fingerprints) > 0 && !fingerprintAllowed(fpr, sigCfg.Fingerprints) {
 		return "", diag("signature_untrusted_key",
-			"signature verifies but signer %s is not in source.url.signature.fingerprints", fpr)
+			"signature verifies but signer %s is not in %s.fingerprints", fpr, field)
 	}
 	return fpr, nil
 }

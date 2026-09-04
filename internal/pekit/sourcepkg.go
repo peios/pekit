@@ -119,6 +119,12 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 			return diag("missing_source_artifact", "cached source artifact %s does not exist", source.Artifact)
 		}
 		entries = append(entries, payloadEntry{Source: source.Artifact, Dest: root + "/upstream/" + filepath.Base(source.Artifact)})
+		for _, artifact := range source.AdditionalArtifacts {
+			if !fileExists(artifact) {
+				return diag("missing_source_artifact", "cached source artifact %s does not exist", artifact)
+			}
+			entries = append(entries, payloadEntry{Source: artifact, Dest: root + "/upstream/patches/" + filepath.Base(artifact)})
+		}
 	case "git":
 		// git archive re-exports the exact locked commit from the mirror
 		// clone — deterministic for a commit, independent of the mutable

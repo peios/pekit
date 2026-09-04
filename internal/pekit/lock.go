@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,8 +49,17 @@ type LockSource struct {
 	// SignatureKey is the hex fingerprint of the pinned upstream key that
 	// verified this entry at lock time; empty when no [source.url.signature]
 	// block is configured.
+	SignatureKey string      `toml:"signature_key,omitempty"`
+	Patches      []LockPatch `toml:"patch,omitempty"`
+	LockedAt     string      `toml:"locked_at,omitempty"`
+}
+
+// LockPatch is one upstream patch artifact in the ordered, cumulative series
+// used to materialise a URL source version.
+type LockPatch struct {
+	URL          string `toml:"url"`
+	SHA256       string `toml:"sha256"`
 	SignatureKey string `toml:"signature_key,omitempty"`
-	LockedAt     string `toml:"locked_at,omitempty"`
 }
 
 func (e LockSource) kind() string {
@@ -156,8 +166,16 @@ func fileSHA256(path string) (string, error) {
 }
 
 type urlLockState struct {
-	Hash   string
-	Locked bool
+	Hash      string
+	PatchHash string
+	Locked    bool
+}
+
+type urlPatchArtifact struct {
+	URL      string
+	Artifact string
+	Config   URLPatchSeriesConfig
+	Version  Version
 }
 
 // applyURLLock enforces the lockfile against a fetched URL artifact: a locked
@@ -165,6 +183,10 @@ type urlLockState struct {
 // (signature first, when configured) and pinned. Returns the artifact hash so
 // provenance can carry the anchor.
 func applyURLLock(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, renderedURL, artifact string, version Version) (urlLockState, error) {
+	return applyURLLockWithPatches(ctx, recipe, cfg, renderedURL, artifact, version, version, nil)
+}
+
+func applyURLLockWithPatches(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, renderedURL, artifact string, version, baseVersion Version, patches []urlPatchArtifact) (urlLockState, error) {
 	lock, err := LoadLockFile(recipe.Root)
 	if err != nil {
 		return urlLockState{}, err
@@ -173,6 +195,15 @@ func applyURLLock(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, render
 	if err != nil {
 		return urlLockState{}, wrapDiag("lock_hash", artifact, err)
 	}
+	patchLocks := make([]LockPatch, 0, len(patches))
+	for _, patch := range patches {
+		patchHash, err := fileSHA256(patch.Artifact)
+		if err != nil {
+			return urlLockState{}, wrapDiag("lock_hash", patch.Artifact, err)
+		}
+		patchLocks = append(patchLocks, LockPatch{URL: patch.URL, SHA256: patchHash})
+	}
+	patchHash := lockPatchSetHash(patchLocks)
 	entry := lock.Find(version.Raw)
 	repin := ctx.Inv.Repin
 	if entry != nil && !repin {
@@ -186,35 +217,71 @@ func applyURLLock(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, render
 				"artifact for version %q hashes to sha256:%s but is locked to sha256:%s — upstream's published bytes changed; if that change is legitimate, run `pekit lock --repin --version %s`",
 				version.Raw, hash, entry.SHA256, version.Raw)
 		}
+		if len(entry.Patches) != len(patchLocks) {
+			return urlLockState{}, diag("lock_mismatch",
+				"source for version %q has %d upstream patches but is locked with %d — the resolved patch series changed; if that change is legitimate, run `pekit lock --repin --version %s`",
+				version.Raw, len(patchLocks), len(entry.Patches), version.Raw)
+		}
+		for i := range patchLocks {
+			if entry.Patches[i].SHA256 != patchLocks[i].SHA256 {
+				return urlLockState{}, diag("lock_mismatch",
+					"upstream patch %d for version %q hashes to sha256:%s but is locked to sha256:%s — upstream's published bytes changed; if that change is legitimate, run `pekit lock --repin --version %s`",
+					i+1, version.Raw, patchLocks[i].SHA256, entry.Patches[i].SHA256, version.Raw)
+			}
+		}
 		// Upgrade path: a signature block added after the version was locked
 		// verifies on the next resolve and is recorded.
+		lockChanged := false
 		if cfg.Signature.Configured() && entry.SignatureKey == "" {
-			fpr, err := verifySourceSignature(ctx, recipe, cfg, renderedURL, artifact, version)
+			fpr, err := verifySourceSignature(ctx, recipe, cfg, renderedURL, artifact, baseVersion)
 			if err != nil {
 				return urlLockState{}, err
 			}
 			entry.SignatureKey = fpr
+			lockChanged = true
+		}
+		for i, patch := range patches {
+			if patch.Config.Signature.Configured() && entry.Patches[i].SignatureKey == "" {
+				fpr, err := verifyURLSignature(ctx, recipe, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
+				if err != nil {
+					return urlLockState{}, err
+				}
+				entry.Patches[i].SignatureKey = fpr
+				lockChanged = true
+			}
+		}
+		if lockChanged {
 			entry.LockedAt = lockTimestamp(ctx)
 			if err := SaveLockFile(recipe.Root, lock); err != nil {
 				return urlLockState{}, err
 			}
-			ctx.Renderer.Event(Event{Type: "lock", Version: version.Raw, Message: "recorded signature by " + shortFingerprint(fpr)})
+			ctx.Renderer.Event(Event{Type: "lock", Version: version.Raw, Message: "recorded upstream signatures"})
 		}
-		return urlLockState{Hash: hash, Locked: true}, nil
+		return urlLockState{Hash: hash, PatchHash: patchHash, Locked: true}, nil
 	}
 	signatureKey := ""
 	if cfg.Signature.Configured() {
-		fpr, err := verifySourceSignature(ctx, recipe, cfg, renderedURL, artifact, version)
+		fpr, err := verifySourceSignature(ctx, recipe, cfg, renderedURL, artifact, baseVersion)
 		if err != nil {
 			return urlLockState{}, err
 		}
 		signatureKey = fpr
+	}
+	for i, patch := range patches {
+		if patch.Config.Signature.Configured() {
+			fpr, err := verifyURLSignature(ctx, recipe, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
+			if err != nil {
+				return urlLockState{}, err
+			}
+			patchLocks[i].SignatureKey = fpr
+		}
 	}
 	newEntry := LockSource{
 		Version:      version.Raw,
 		URL:          renderedURL,
 		SHA256:       hash,
 		SignatureKey: signatureKey,
+		Patches:      patchLocks,
 		LockedAt:     lockTimestamp(ctx),
 	}
 	message := "pinned sha256:" + hash
@@ -230,12 +297,29 @@ func applyURLLock(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, render
 	if signatureKey != "" {
 		message += ", signed by " + shortFingerprint(signatureKey)
 	}
+	if len(patchLocks) > 0 {
+		message += fmt.Sprintf(", %d upstream patches (series sha256:%s)", len(patchLocks), patchHash)
+	}
 	lock.Put(newEntry)
 	if err := SaveLockFile(recipe.Root, lock); err != nil {
 		return urlLockState{}, err
 	}
 	ctx.Renderer.Event(Event{Type: "lock", Version: version.Raw, Path: lockFilePath(recipe.Root), Message: message})
-	return urlLockState{Hash: hash, Locked: true}, nil
+	return urlLockState{Hash: hash, PatchHash: patchHash, Locked: true}, nil
+}
+
+func lockPatchSetHash(patches []LockPatch) string {
+	if len(patches) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, patch := range patches {
+		_, _ = io.WriteString(h, patch.URL)
+		_, _ = h.Write([]byte{0})
+		_, _ = io.WriteString(h, patch.SHA256)
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // applyGitLock enforces the lockfile against a resolved git commit. A moved
@@ -355,6 +439,9 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 				msg = "url sha256:" + entry.SHA256
 				if entry.SignatureKey != "" {
 					msg += " signed by " + shortFingerprint(entry.SignatureKey)
+				}
+				if len(entry.Patches) > 0 {
+					msg += fmt.Sprintf(" with %d upstream patches", len(entry.Patches))
 				}
 			}
 			ctx.Renderer.Event(Event{Type: "lock_status", Member: member, Version: entry.Version, Message: msg})
