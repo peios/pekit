@@ -21,6 +21,7 @@ version = "{{version}}-1"
 architecture = "x86_64"
 description = "app"
 license = "MIT"
+license_class = "free"
 
 [files]
 "@source:payload.txt" = "usr/share/app/payload.txt"
@@ -97,6 +98,9 @@ func TestURLSourceEmitsSourcePackage(t *testing.T) {
 	srcManifest := readPeipkgManifest(t, srcArtifact)
 	if srcManifest.License != "MIT" {
 		t.Fatalf("source package license = %q, want MIT", srcManifest.License)
+	}
+	if srcManifest.LicenseClass != "free" {
+		t.Fatalf("source package license_class = %q, want free", srcManifest.LicenseClass)
 	}
 	if srcManifest.Description != "Corresponding source for app 1.0-1" {
 		t.Fatalf("source package description = %q", srcManifest.Description)

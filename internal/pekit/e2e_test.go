@@ -2497,6 +2497,7 @@ type peipkgManifestDoc struct {
 	Version      string `json:"version"`
 	Description  string `json:"description"`
 	License      string `json:"license"`
+	LicenseClass string `json:"license_class"`
 	Dependencies []struct {
 		Name       string `json:"name"`
 		Constraint string `json:"constraint"`

@@ -40,8 +40,8 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 	versionText := members[0].Version
 	homepage := members[0].Config.Package.Homepage
 	licenses := map[string]bool{}
-	licenseClass := ""
-	for _, m := range members {
+	licenseClass := members[0].Config.Package.LicenseClass
+	for i, m := range members {
 		if m.Version != versionText {
 			return nil, diag("source_package_version_conflict",
 				"source package needs one version but members disagree (%s vs %s); align member versions or set source_package.enabled = false",
@@ -53,7 +53,9 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 		if l := m.Config.Package.License; l != "" {
 			licenses[l] = true
 		}
-		licenseClass = worseLicenseClass(licenseClass, m.Config.Package.LicenseClass)
+		if i > 0 {
+			licenseClass = worseLicenseClass(licenseClass, m.Config.Package.LicenseClass)
+		}
 	}
 	name := recipe.SourcePackage.Name
 	if name == "" {
