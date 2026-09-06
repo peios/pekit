@@ -28,8 +28,9 @@ const lockFileName = "pekit.lock"
 const lockSchema = 1
 
 const lockFileHeader = `# pekit.lock — machine-written by pekit; records pinned source inputs.
-# Do not edit by hand. To accept changed upstream bytes for a version, run:
+# Do not edit by hand. For ordinary URL/Git sources, accept changed bytes with:
 #   pekit lock --repin --version <version>
+# Tracked-path Git histories are append-only; discover their next version with --latest.
 `
 
 type LockFile struct {
