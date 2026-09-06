@@ -258,6 +258,9 @@ func TestTrackedGitSourcePackageArchivesOnlyTrackedPath(t *testing.T) {
 			if hdr.Typeflag != tar.TypeReg || hdr.Mode != 0o644 {
 				t.Fatalf("tracked archive mode/type = %#o/%d", hdr.Mode, hdr.Typeflag)
 			}
+			if hdr.Format != tar.FormatUSTAR {
+				t.Fatalf("tracked archive format = %v, want USTAR", hdr.Format)
+			}
 			if hdr.Uid != 0 || hdr.Gid != 0 || hdr.Uname != "" || hdr.Gname != "" {
 				t.Fatalf("tracked archive owner = %d:%d %q:%q", hdr.Uid, hdr.Gid, hdr.Uname, hdr.Gname)
 			}
