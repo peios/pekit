@@ -111,6 +111,7 @@ type Context struct {
 	Start           time.Time
 	PublishRegistry *DestinationRegistry
 	PyPIProjects    map[string]pypiProjectIndex
+	TrackedGit      map[string]trackedGitSnapshot
 }
 
 type Diagnostic struct {

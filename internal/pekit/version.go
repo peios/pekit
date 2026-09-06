@@ -68,6 +68,18 @@ func (v Version) TemplateVars() map[string]string {
 }
 
 func ResolveVersions(ctx *Context, source SourceConfig) ([]Version, error) {
+	return resolveVersions(ctx, source, nil)
+}
+
+// resolveRecipeVersions is the recipe-aware form used by commands. Ordinary
+// sources need only their source table; tracked-path git snapshots also need
+// the recipe root because their append-only version history lives in
+// pekit.lock.
+func resolveRecipeVersions(ctx *Context, recipe RecipeConfig) ([]Version, error) {
+	return resolveVersions(ctx, recipe.Source, &recipe)
+}
+
+func resolveVersions(ctx *Context, source SourceConfig, recipe *RecipeConfig) ([]Version, error) {
 	inv := ctx.Inv
 	if willUseLocalSource(inv, source) {
 		if inv.Latest || inv.AllVersions || looksLikeConstraint(inv.Version) {
@@ -84,7 +96,7 @@ func ResolveVersions(ctx *Context, source SourceConfig) ([]Version, error) {
 		return []Version{v}, nil
 	}
 	if inv.Latest || inv.AllVersions || looksLikeConstraint(inv.Version) {
-		versions, err := enumerateSourceVersions(ctx, source)
+		versions, err := enumerateSourceVersions(ctx, source, recipe)
 		if err != nil {
 			if inv.SuppressUnsupportedVersion && !source.HasReproducible() {
 				return []Version{{}}, nil
@@ -108,7 +120,7 @@ func ResolveVersions(ctx *Context, source SourceConfig) ([]Version, error) {
 	raws := []string{""}
 	if inv.Version != "" {
 		raws = strings.Split(inv.Version, ",")
-		raws = resolveExactVersionTexts(ctx, raws, source)
+		raws = resolveExactVersionTexts(ctx, raws, source, recipe)
 	}
 	if cap := sourceVersionCap(source); cap != "" && inv.Version != "" {
 		if err := validateConstraintString(cap); err != nil {
@@ -135,17 +147,17 @@ func ResolveVersions(ctx *Context, source SourceConfig) ([]Version, error) {
 	return out, nil
 }
 
-func resolveExactVersionTexts(ctx *Context, raws []string, source SourceConfig) []string {
+func resolveExactVersionTexts(ctx *Context, raws []string, source SourceConfig, recipes ...*RecipeConfig) []string {
 	if !source.HasReproducible() {
 		return raws
 	}
 	// A PyPI lock already pins the exact sdist URL and hash. Do not contact the
 	// live index merely to apply the Git/templated-URL trailing-zero ladder;
 	// this keeps exact locked rebuilds fully replayable when the index is down.
-	if source.PyPI.Project != "" {
+	if source.PyPI.Project != "" || source.Git.TrackedPath != "" {
 		return raws
 	}
-	available, err := enumerateSourceVersions(ctx, source)
+	available, err := enumerateSourceVersions(ctx, source, recipes...)
 	if err != nil || len(available) == 0 {
 		return raws
 	}
@@ -179,9 +191,19 @@ func trailingZeroCandidates(raw string) []string {
 	return candidates
 }
 
-func enumerateSourceVersions(ctx *Context, source SourceConfig) ([]string, error) {
+func enumerateSourceVersions(ctx *Context, source SourceConfig, recipes ...*RecipeConfig) ([]string, error) {
+	var recipe *RecipeConfig
+	if len(recipes) > 0 {
+		recipe = recipes[0]
+	}
 	switch {
 	case source.Git.URL != "":
+		if source.Git.TrackedPath != "" {
+			if recipe == nil {
+				return nil, diag("tracked_git_recipe", "tracked-path git version discovery requires a loaded recipe")
+			}
+			return enumerateTrackedGitVersions(ctx, *recipe, source.Git)
+		}
 		return enumerateGitVersions(source.Git)
 	case source.URL.URL != "":
 		return enumerateURLVersions(source.URL)

@@ -1035,6 +1035,22 @@ tag_regex = '^v\d+\.\d+\.\d+$'
 path = "../app"
 ```
 
+A bounded tracked-path variant follows one independently versioned file on a
+fixed moving ref:
+
+```toml
+[source.git]
+url = "https://github.com/example/upstream.git"
+ref = "refs/heads/release"
+tracked_path = "security/trust/certdata.txt"
+```
+
+`tracked_path` requires a literal ref and cannot be combined with `tag_regex`.
+Discovery synthesizes append-only `YYYY.MM.DD[.N]` versions only when the blob
+bytes change. Its lock assertion binds repository, ref, path, commit, Git blob
+ID, and blob SHA-256. Locked exact versions resolve the pinned commit without
+consulting the moving ref.
+
 URL source:
 
 ```toml
@@ -1106,6 +1122,8 @@ Capability rules:
 
 - Git sources can materialize, enumerate tags, cache by ref/version, and provide
   git provenance.
+- Tracked-path git sources enumerate their matching lock history plus at most
+  one changed current blob, and materialize only the selected regular file.
 - URL sources can materialize, enumerate from directory listings when the URL is
   templated, cache by rendered URL, and usually cannot provide upstream git
   provenance.
@@ -1509,6 +1527,7 @@ Within `out_dir`:
 ```text
 _source_cache/
   git/<repo_key>/repo.git
+  git-tracked/<source_key>/repo.git
   url/<url_key>/artifact
 
 <source_scope>/
@@ -1573,6 +1592,13 @@ Verification:
 - Recreates the prepared source root for the resolved commit.
 
 Submodules are not enabled by default.
+
+Tracked-path git uses a separate shallow, partial bare cache. Discovery fetches
+the configured fixed ref, but a locked resolve fetches at most its immutable
+commit ID and never the ref. The prepared source root preserves the configured
+relative path and contains only that upstream regular file. Corresponding
+source uses `git archive <commit> -- <tracked_path>` rather than exporting the
+whole commit.
 
 Future explicit field:
 

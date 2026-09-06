@@ -94,6 +94,42 @@ file_regex = 'v[0-9]+\\.[0-9]+\\.[0-9]+'
 	}
 }
 
+func TestLoadRecipeTrackedGitSource(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.git]
+url = "https://example.invalid/repo.git"
+ref = "refs/heads/release"
+tracked_path = "security/trust/certdata.txt"
+versions = ">= 2026.01.01"
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatalf("load recipe: %v", err)
+	}
+	if got := recipe.Source.Git.TrackedPath; got != "security/trust/certdata.txt" {
+		t.Fatalf("tracked_path = %q", got)
+	}
+}
+
+func TestLoadRecipeRejectsUnsafeOrTemplatedTrackedGitSource(t *testing.T) {
+	for name, source := range map[string]string{
+		"escape":    "ref = \"release\"\ntracked_path = \"../certdata.txt\"",
+		"directory": "ref = \"release\"\ntracked_path = \".\"",
+		"template":  "ref = \"v{{version}}\"\ntracked_path = \"certdata.txt\"",
+		"tags":      "ref = \"release\"\ntracked_path = \"certdata.txt\"\ntag_regex = \".*\"",
+		"refspec":   "ref = \"release:refs/heads/other\"\ntracked_path = \"certdata.txt\"",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "pekit.toml"), "[source.git]\nurl = \"https://example.invalid/repo.git\"\n"+source+"\n")
+			if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+				t.Fatal("expected invalid tracked git source to fail")
+			}
+		})
+	}
+}
+
 func TestLoadRecipeRejectsInvalidPyPISource(t *testing.T) {
 	for name, source := range map[string]string{
 		"missing artifact": `project = "demo"`,

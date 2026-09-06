@@ -132,8 +132,11 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 		// clone — deterministic for a commit, independent of the mutable
 		// checkout, and the commit id rides along in a pax comment.
 		archive := filepath.Join(inst.Stage, base+"-"+inst.Version+".tar")
-		if err := runSimple(source.GitRepo, "git", "archive", "--format=tar",
-			"--prefix="+base+"-"+inst.Version+"/", "-o", archive, source.Commit); err != nil {
+		args := []string{"archive", "--format=tar", "--prefix=" + base + "-" + inst.Version + "/", "-o", archive, source.Commit}
+		if source.TrackedPath != "" {
+			args = append(args, "--", source.TrackedPath)
+		}
+		if err := runSimple(source.GitRepo, "git", args...); err != nil {
 			return wrapDiag("git_archive", "export source tree", err)
 		}
 		entries = append(entries, payloadEntry{Source: archive, Dest: root + "/upstream/" + filepath.Base(archive)})

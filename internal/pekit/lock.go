@@ -46,6 +46,13 @@ type LockSource struct {
 	// Git-source assertion: the commit the rendered ref resolved to.
 	Ref    string `toml:"ref,omitempty"`
 	Commit string `toml:"commit,omitempty"`
+	// Tracked git snapshots additionally bind the repository, fixed ref,
+	// relative path, Git blob object, and a transport-independent SHA-256 of
+	// the blob bytes. These fields are absent for ordinary tag-based git.
+	Repository string `toml:"repository,omitempty"`
+	Path       string `toml:"path,omitempty"`
+	Blob       string `toml:"blob,omitempty"`
+	BlobSHA256 string `toml:"blob_sha256,omitempty"`
 	// SignatureKey is the hex fingerprint of the pinned upstream key that
 	// verified this entry at lock time; empty when no [source.url.signature]
 	// block is configured.
@@ -333,10 +340,10 @@ func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit string,
 	entry := lock.Find(version.Raw)
 	repin := ctx.Inv.Repin
 	if entry != nil && !repin {
-		if entry.kind() != "git" {
+		if entry.kind() != "git" || entry.isTrackedGit() {
 			return diag("lock_kind_mismatch",
-				"version %q is locked as a %s source but the recipe now fetches git; run `pekit lock --repin --version %s` to accept the change",
-				version.Raw, entry.kind(), version.Raw)
+				"version %q is not locked as an ordinary git source; run `pekit lock --repin --version %s` to accept the source-mode change",
+				version.Raw, version.Raw)
 		}
 		if entry.Commit != commit {
 			return diag("lock_mismatch",
@@ -383,7 +390,7 @@ func lockedMirroredCommit(recipe RecipeConfig, ref string, version Version, rawR
 		return ""
 	}
 	entry := lock.Find(version.Raw)
-	if entry == nil || entry.kind() != "git" || entry.Ref != ref || entry.Commit == "" {
+	if entry == nil || entry.kind() != "git" || entry.isTrackedGit() || entry.Ref != ref || entry.Commit == "" {
 		return ""
 	}
 	if err := runSimple(rawRepo, "git", "cat-file", "-e", entry.Commit+"^{commit}"); err != nil {
@@ -415,6 +422,9 @@ func shortFingerprint(fpr string) string {
 func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 	statusOnly := ctx.Inv.Version == "" && !ctx.Inv.Latest && !ctx.Inv.AllVersions
 	if ctx.Inv.Repin {
+		if recipe.Source.Git.TrackedPath != "" {
+			return diag("invalid_flags", "tracked-path git snapshots are append-only; discover changed bytes with --latest instead of repinning a version")
+		}
 		if statusOnly {
 			return diag("invalid_flags", "--repin requires an exact --version")
 		}
@@ -434,7 +444,11 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 		for _, entry := range lock.Sources {
 			msg := ""
 			if entry.kind() == "git" {
-				msg = "git " + entry.Ref + " commit " + entry.Commit
+				if entry.isTrackedGit() {
+					msg = "tracked git " + entry.Ref + ":" + entry.Path + " commit " + entry.Commit + " blob " + entry.Blob + " sha256:" + entry.BlobSHA256
+				} else {
+					msg = "git " + entry.Ref + " commit " + entry.Commit
+				}
 			} else {
 				msg = "url sha256:" + entry.SHA256
 				if entry.SignatureKey != "" {
@@ -451,7 +465,7 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 	if !recipe.Source.HasReproducible() {
 		return diag("lock_unsupported", "recipe has no lockable source ([source.git], [source.url], or [source.pypi])")
 	}
-	versions, err := ResolveVersions(ctx, recipe.Source)
+	versions, err := resolveRecipeVersions(ctx, recipe)
 	if err != nil {
 		return err
 	}

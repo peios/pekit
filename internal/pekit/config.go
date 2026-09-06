@@ -108,10 +108,11 @@ func (s SourceConfig) HasReproducible() bool {
 func (s SourceConfig) HasExternal() bool { return s.HasReproducible() || s.Local.Path != "" }
 
 type GitSourceConfig struct {
-	URL      string
-	Ref      string
-	Versions string
-	TagRegex string
+	URL         string
+	Ref         string
+	Versions    string
+	TagRegex    string
+	TrackedPath string
 }
 
 type URLSourceConfig struct {
@@ -1284,7 +1285,7 @@ func parsePyPISource(path string, table map[string]any) (PyPISourceConfig, error
 }
 
 func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) {
-	known := map[string]bool{"url": true, "ref": true, "versions": true, "tag_regex": true}
+	known := map[string]bool{"url": true, "ref": true, "versions": true, "tag_regex": true, "tracked_path": true}
 	for key := range table {
 		if !known[key] {
 			return GitSourceConfig{}, diagAt("unknown_key", path, "unknown source.git key %q", key)
@@ -1311,6 +1312,25 @@ func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) 
 		cfg.TagRegex, err = expectString(path, "source.git.tag_regex", v)
 		if err != nil {
 			return GitSourceConfig{}, err
+		}
+	}
+	if v, ok := table["tracked_path"]; ok {
+		cfg.TrackedPath, err = expectString(path, "source.git.tracked_path", v)
+		if err != nil {
+			return GitSourceConfig{}, err
+		}
+		cfg.TrackedPath, err = cleanRelPath(cfg.TrackedPath)
+		if err != nil || cfg.TrackedPath == "." {
+			return GitSourceConfig{}, diagAt("invalid_path", path, "source.git.tracked_path must name one relative file within the repository")
+		}
+		if strings.Contains(cfg.Ref, "{{") || strings.Contains(cfg.Ref, "}}") {
+			return GitSourceConfig{}, diagAt("invalid_value", path, "source.git.tracked_path requires a fixed, non-templated source.git.ref")
+		}
+		if strings.TrimSpace(cfg.Ref) == "" || strings.HasPrefix(cfg.Ref, "-") || strings.ContainsAny(cfg.Ref, ":\r\n") {
+			return GitSourceConfig{}, diagAt("invalid_value", path, "source.git.tracked_path requires one fixed ref name, not an option or refspec")
+		}
+		if cfg.TagRegex != "" {
+			return GitSourceConfig{}, diagAt("invalid_value", path, "source.git.tag_regex cannot be combined with source.git.tracked_path")
 		}
 	}
 	return cfg, nil

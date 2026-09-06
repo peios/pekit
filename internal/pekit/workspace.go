@@ -106,7 +106,7 @@ func preflightMemberPublishDestinations(ctx *Context, ws WorkspaceConfig, member
 	if err != nil {
 		return nil
 	}
-	versions, err := ResolveVersions(ctx, recipe.Source)
+	versions, err := resolveRecipeVersions(ctx, recipe)
 	if err != nil {
 		return nil
 	}

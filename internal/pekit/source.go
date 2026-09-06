@@ -48,6 +48,10 @@ type SourceState struct {
 	// kinds and on dry runs.
 	GitRepo string
 	Commit  string
+	// TrackedPath is non-empty for a sparse tracked-path git snapshot. The
+	// materialised tree and corresponding-source archive contain only this
+	// path, while GitRepo and Commit still identify its immutable origin.
+	TrackedPath string
 }
 
 type SourceManifest struct {
@@ -96,6 +100,9 @@ func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceSt
 		}
 	}
 	if source.Git.URL != "" {
+		if source.Git.TrackedPath != "" {
+			return resolveTrackedGitSource(ctx, recipe, outBase, source.Git, version)
+		}
 		return resolveGitSource(ctx, recipe, outBase, source.Git, version)
 	}
 	if source.URL.URL != "" {

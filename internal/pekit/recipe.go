@@ -64,7 +64,7 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
 		return err
 	}
-	versions, err := ResolveVersions(ctx, recipe.Source)
+	versions, err := resolveRecipeVersions(ctx, recipe)
 	if err != nil {
 		return err
 	}
