@@ -1224,7 +1224,7 @@ clearer.
 Version forms:
 
 ```text
-MAJOR[.MINOR[.PATCH]][-prerelease][+buildmeta]
+NUMERIC_COMPONENT[.NUMERIC_COMPONENT...][-prerelease][+buildmeta]
 ```
 
 Examples:
@@ -1233,6 +1233,7 @@ Examples:
 5
 2.43
 0.34.0
+0.5.13.5
 1.36.0-rc1+build5
 ```
 
@@ -1248,8 +1249,16 @@ Template variables:
 Rules:
 
 - `{{version}}` renders the original version text.
+- Numeric cores may contain any positive number of dot-separated components.
+- `{{major}}`, `{{minor}}`, and `{{patch}}` retain their compatibility meaning:
+  they expose the first three components. Use `{{version}}` when an upstream
+  fourth or later component is significant.
 - Partial versions are allowed.
 - Referencing a missing `minor` or `patch` component is an error.
+- Version selection compares every numeric component as an arbitrary-precision
+  decimal value. Missing components compare as zero, so `1.2`, `1.2.0`, and
+  `1.2.0.0` have the same numeric core; prerelease and build-metadata handling
+  retains Pekit's existing policy.
 - Unknown template variables are errors.
 
 #### Version CLI
@@ -1363,7 +1372,8 @@ Git enumeration:
 - Matches tags against the source ref template.
 - Optionally applies `tag_regex`.
 - Extracts semantic versions. A named `version` capture supplies the complete
-  version. Named `major`, `minor`, and `patch` captures compose a dotted
+  version, including any fourth or later numeric components. Named `major`,
+  `minor`, and `patch` captures compose a dotted
   version, with optional `prerelease` and `buildmeta` suffixes. Without named
   version captures, extraction falls back to the ref template or an embedded
   semantic version; unnamed captures are filtering-only.
@@ -2969,7 +2979,9 @@ PEKIT_VERSION_BUILDMETA=<build metadata, if present>
 
 Missing optional version components export as empty strings. This keeps shell
 commands simple while templated config fields remain strict about referencing
-missing components.
+missing components. `PEKIT_VERSION` preserves the complete original version,
+including fourth and later numeric components; the three component-specific
+variables retain their first-three compatibility meaning.
 
 Every target with a managed output root gets:
 

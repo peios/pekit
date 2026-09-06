@@ -56,3 +56,14 @@ func TestRenderTemplateStillRendersADecomposableVersion(t *testing.T) {
 		t.Errorf("RenderTemplate = %q", out)
 	}
 }
+
+func TestRenderTemplatePreservesArbitraryNumericCoreAndFirstThreeCompatibility(t *testing.T) {
+	v := mustParseVersion("0.5.13.10")
+	out, err := RenderTemplate("dash-{{version}}/{{major}}.{{minor}}.{{patch}}", TemplateContext{Version: v})
+	if err != nil {
+		t.Fatalf("RenderTemplate: %v", err)
+	}
+	if out != "dash-0.5.13.10/0.5.13" {
+		t.Errorf("RenderTemplate = %q", out)
+	}
+}

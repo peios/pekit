@@ -1,9 +1,41 @@
 package pekit
 
 import (
+	"reflect"
 	"regexp"
 	"testing"
 )
+
+func TestParseVersionPreservesArbitraryNumericCore(t *testing.T) {
+	v, err := ParseVersion("0.5.13.5.10-rc1+build.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Raw != "0.5.13.5.10-rc1+build.7" || v.Major != "0" || v.Minor != "5" || v.Patch != "13" || v.Prerelease != "rc1" || v.BuildMeta != "build.7" {
+		t.Fatalf("unexpected parsed version: %#v", v)
+	}
+	if want := []string{"0", "5", "13", "5", "10"}; !reflect.DeepEqual(v.Components, want) {
+		t.Fatalf("components = %v, want %v", v.Components, want)
+	}
+}
+
+func TestCompareVersionTextUsesAllNumericComponents(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0.5.13.9", "0.5.13.10", -1},
+		{"1.2.3.4.5", "1.2.3.4.4", 1},
+		{"1.2", "1.2.0.0", 0},
+		{"1.1000000000000000000000000000001", "1.999999999999999999999999999", 1},
+		{"1.0009", "1.9", 0},
+	}
+	for _, tt := range tests {
+		if got := compareVersionText(tt.a, tt.b); got != tt.want {
+			t.Errorf("compareVersionText(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
 
 func TestTrailingZeroCandidates(t *testing.T) {
 	got := trailingZeroCandidates("2.43.0")
@@ -18,6 +50,14 @@ func TestTrailingZeroCandidates(t *testing.T) {
 	}
 }
 
+func TestTrailingZeroCandidatesArbitraryNumericCore(t *testing.T) {
+	got := trailingZeroCandidates("2.43.7.0.0")
+	want := []string{"2.43.7.0.0", "2.43.7.0", "2.43.7"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
 func TestTemplateExtractRegexMatchesFilenameListing(t *testing.T) {
 	re, err := templateExtractRegex("foo-{{version}}.tar.gz")
 	if err != nil {
@@ -25,6 +65,17 @@ func TestTemplateExtractRegexMatchesFilenameListing(t *testing.T) {
 	}
 	version := extractVersion(`<a href="foo-1.2.3.tar.gz">foo</a>`, re)
 	if version != "1.2.3" {
+		t.Fatalf("version = %q", version)
+	}
+}
+
+func TestTemplateExtractRegexMatchesArbitraryNumericCore(t *testing.T) {
+	re, err := templateExtractRegex("foo-{{version}}.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := extractVersion(`<a href="foo-0.5.13.10.tar.gz">foo</a>`, re)
+	if version != "0.5.13.10" {
 		t.Fatalf("version = %q", version)
 	}
 }
@@ -48,6 +99,25 @@ func TestEnumerateURLVersionsUsesExplicitListingURL(t *testing.T) {
 	}
 }
 
+func TestEnumerateURLVersionsExtractsAndSortsArbitraryNumericCore(t *testing.T) {
+	const listingURL = "https://example.test/releases"
+	serveURLs(t, map[string][]byte{
+		listingURL: []byte(`<a href="dash-0.5.13.10.tar.gz">new</a><a href="dash-0.5.13.9.tar.gz">old</a>`),
+	})
+
+	got, err := enumerateBaseURLVersions(URLSourceConfig{
+		URL:        "https://example.test/dash-{{version}}.tar.gz",
+		ListingURL: listingURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"0.5.13.9", "0.5.13.10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("versions = %v, want %v", got, want)
+	}
+}
+
 func TestGitTagNamedComponentsComposeCanonicalVersion(t *testing.T) {
 	tagFilter := regexp.MustCompile(`^(?P<major>[0-9]{4})(?P<minor>[0-9]{2})(?P<patch>[0-9]{2})$`)
 	refPattern, err := templateExtractRegex("{{major}}{{minor}}{{patch}}")
@@ -64,7 +134,7 @@ func TestGitTagNamedComponentsComposeCanonicalVersion(t *testing.T) {
 }
 
 func TestGitTagNamedVersionCaptureSuppliesWholeVersion(t *testing.T) {
-	tagFilter := regexp.MustCompile(`^release-(?P<version>[0-9]+\.[0-9]+\.[0-9]+)$`)
+	tagFilter := regexp.MustCompile(`^release-(?P<version>[0-9]+(?:\.[0-9]+)*)$`)
 	refPattern, err := templateExtractRegex("release-{{version}}")
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +145,21 @@ func TestGitTagNamedVersionCaptureSuppliesWholeVersion(t *testing.T) {
 	}
 	if version != "1.2.3" {
 		t.Fatalf("version = %q, want 1.2.3", version)
+	}
+}
+
+func TestGitTagNamedVersionCaptureSuppliesArbitraryNumericCore(t *testing.T) {
+	tagFilter := regexp.MustCompile(`^v(?P<version>[0-9]+(?:\.[0-9]+)*)$`)
+	refPattern, err := templateExtractRegex("v{{version}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := extractGitTagVersion("v0.5.13.10", tagFilter, refPattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "0.5.13.10" {
+		t.Fatalf("version = %q, want 0.5.13.10", version)
 	}
 }
 
@@ -119,5 +204,14 @@ func TestFilterVersionsAcceptsSpaceSeparatedConstraints(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v want %v", got, want)
 		}
+	}
+}
+
+func TestFilterVersionsOrdersArbitraryNumericCore(t *testing.T) {
+	available := []string{"0.5.13.8", "0.5.13.9", "0.5.13.10", "0.5.14"}
+	got := filterVersions(available, ">=0.5.13.9 <0.5.14")
+	want := []string{"0.5.13.9", "0.5.13.10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

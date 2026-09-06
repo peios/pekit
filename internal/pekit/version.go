@@ -16,7 +16,11 @@ type Version struct {
 	// {{version}} — but every derived token is meaningless, and
 	// rendering one is refused rather than substituting an empty string
 	// (PEI-422).
-	Parsed     bool
+	Parsed bool
+	// Components preserves every numeric component in the upstream core.
+	// Major, Minor, and Patch remain the first three components for recipe
+	// compatibility; recipes that need the complete value use Raw/{{version}}.
+	Components []string
 	Major      string
 	Minor      string
 	Patch      string
@@ -24,16 +28,32 @@ type Version struct {
 	BuildMeta  string
 }
 
-var versionRE = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
-var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){0,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
+var versionRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
 
 func ParseVersion(raw string) (Version, error) {
 	m := versionRE.FindStringSubmatch(raw)
 	if m == nil {
 		return Version{}, fmt.Errorf("invalid version %q", raw)
 	}
-	return Version{Raw: raw, Parsed: true,
-		Major: m[1], Minor: m[2], Patch: m[3], Prerelease: m[4], BuildMeta: m[5]}, nil
+	components := strings.Split(m[1], ".")
+	v := Version{
+		Raw:        raw,
+		Parsed:     true,
+		Components: components,
+		Prerelease: m[2],
+		BuildMeta:  m[3],
+	}
+	if len(components) > 0 {
+		v.Major = components[0]
+	}
+	if len(components) > 1 {
+		v.Minor = components[1]
+	}
+	if len(components) > 2 {
+		v.Patch = components[2]
+	}
+	return v, nil
 }
 
 func (v Version) TemplateVars() map[string]string {
@@ -150,15 +170,11 @@ func trailingZeroCandidates(raw string) []string {
 	if err != nil || v.Prerelease != "" || v.BuildMeta != "" {
 		return []string{raw}
 	}
+	components := append([]string(nil), v.Components...)
 	candidates := []string{raw}
-	if v.Patch == "0" {
-		candidates = append(candidates, v.Major+"."+v.Minor)
-	}
-	if v.Minor == "0" && v.Patch == "0" {
-		candidates = append(candidates, v.Major)
-	}
-	if v.Minor == "0" && v.Patch == "" {
-		candidates = append(candidates, v.Major)
+	for len(components) > 1 && components[len(components)-1] == "0" {
+		components = components[:len(components)-1]
+		candidates = append(candidates, strings.Join(components, "."))
 	}
 	return candidates
 }
@@ -761,22 +777,39 @@ func compareVersionText(a, b string) int {
 	if ea != nil || eb != nil {
 		return strings.Compare(a, b)
 	}
-	for _, pair := range [][2]string{{va.Major, vb.Major}, {va.Minor, vb.Minor}, {va.Patch, vb.Patch}} {
-		ai, _ := strconv.Atoi(defaultZero(pair[0]))
-		bi, _ := strconv.Atoi(defaultZero(pair[1]))
-		if ai < bi {
-			return -1
+	componentCount := len(va.Components)
+	if len(vb.Components) > componentCount {
+		componentCount = len(vb.Components)
+	}
+	for i := 0; i < componentCount; i++ {
+		ac, bc := "0", "0"
+		if i < len(va.Components) {
+			ac = va.Components[i]
 		}
-		if ai > bi {
-			return 1
+		if i < len(vb.Components) {
+			bc = vb.Components[i]
+		}
+		if cmp := compareNumericComponent(ac, bc); cmp != 0 {
+			return cmp
 		}
 	}
 	return strings.Compare(va.Prerelease, vb.Prerelease)
 }
 
-func defaultZero(s string) string {
-	if s == "" {
-		return "0"
+func compareNumericComponent(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if a == "" {
+		a = "0"
 	}
-	return s
+	if b == "" {
+		b = "0"
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return strings.Compare(a, b)
 }

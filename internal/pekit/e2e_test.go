@@ -1137,7 +1137,7 @@ license = "MIT"
 	}
 }
 
-func TestPeipkgMetadataTemplatesAreRendered(t *testing.T) {
+func TestPeipkgMetadataTemplatesPreserveArbitraryNumericCore(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `
 out_dir = "out"
@@ -1168,10 +1168,10 @@ runtime = "{{version}}"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.Run([]string{"package", "--version", "2.43"}); err != nil {
+	if err := app.Run([]string{"package", "--version", "0.5.13.10"}); err != nil {
 		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
 	}
-	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main_2.43-1_x86_64.peipkg"))
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main_0.5.13.10-1_x86_64.peipkg"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1179,13 +1179,13 @@ runtime = "{{version}}"
 		t.Fatalf("expected peipkg artifact, got %v", artifacts)
 	}
 	manifest := readPeipkgManifest(t, artifacts[0])
-	if manifest.Description != "runtime 2.43" {
+	if manifest.Description != "runtime 0.5.13.10" {
 		t.Fatalf("description = %q", manifest.Description)
 	}
-	if len(manifest.Dependencies) != 1 || manifest.Dependencies[0].Name != "runtime" || manifest.Dependencies[0].Constraint != "2.43" {
+	if len(manifest.Dependencies) != 1 || manifest.Dependencies[0].Name != "runtime" || manifest.Dependencies[0].Constraint != "0.5.13.10" {
 		t.Fatalf("dependencies = %#v", manifest.Dependencies)
 	}
-	if len(manifest.Provides) != 1 || manifest.Provides[0].Name != "runtime-2.43" || manifest.Provides[0].Version != "2.43" {
+	if len(manifest.Provides) != 1 || manifest.Provides[0].Name != "runtime-0.5.13.10" || manifest.Provides[0].Version != "0.5.13.10" {
 		t.Fatalf("provides = %#v", manifest.Provides)
 	}
 }
@@ -1276,10 +1276,10 @@ func TestGitLatestVersionSelection(t *testing.T) {
 	writeFile(t, filepath.Join(repo, "payload.txt"), "payload")
 	runTestCmd(t, repo, "git", "add", ".")
 	runTestCmd(t, repo, "git", "commit", "-m", "initial")
-	runTestCmd(t, repo, "git", "tag", "v1.0.0")
+	runTestCmd(t, repo, "git", "tag", "v0.5.13.9")
 	writeFile(t, filepath.Join(repo, "payload.txt"), "payload2")
 	runTestCmd(t, repo, "git", "commit", "-am", "second")
-	runTestCmd(t, repo, "git", "tag", "v1.2.0")
+	runTestCmd(t, repo, "git", "tag", "v0.5.13.10")
 
 	recipe := filepath.Join(dir, "recipe")
 	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
@@ -1288,10 +1288,10 @@ out_dir = "out"
 [source.git]
 url = "`+repo+`"
 ref = "v{{version}}"
-tag_regex = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+tag_regex = '^v[0-9]+(?:\.[0-9]+)*$'
 
 [build]
-command = 'printf "$PEKIT_VERSION" > "$PEKIT_OUT/version.txt"'
+command = 'printf "$PEKIT_VERSION|$PEKIT_VERSION_MAJOR|$PEKIT_VERSION_MINOR|$PEKIT_VERSION_PATCH" > "$PEKIT_OUT/version.txt"'
 `)
 	var stdout, stderr bytes.Buffer
 	app := &App{Stdout: &stdout, Stderr: &stderr}
@@ -1314,8 +1314,16 @@ command = 'printf "$PEKIT_VERSION" > "$PEKIT_OUT/version.txt"'
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "1.2.0" {
+	if string(data) != "0.5.13.10|0|5|13" {
 		t.Fatalf("latest version = %q", string(data))
+	}
+	lock, err := LoadLockFile(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.Find("0.5.13.10")
+	if entry == nil || entry.Ref != "v0.5.13.10" || entry.Commit == "" {
+		t.Fatalf("arbitrary-core version was not locked to its tag: %#v", entry)
 	}
 }
 

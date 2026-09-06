@@ -623,6 +623,8 @@ func TestLockFileRoundTripSortsEntries(t *testing.T) {
 	lock.Put(LockSource{Version: "2.10.0", URL: "u", SHA256: "b"})
 	lock.Put(LockSource{Version: "2.2.0", URL: "u", SHA256: "a"})
 	lock.Put(LockSource{Version: "2.2.0", URL: "u", SHA256: "c"}) // replace
+	lock.Put(LockSource{Version: "2.2.0.10", URL: "u", SHA256: "e"})
+	lock.Put(LockSource{Version: "2.2.0.9", URL: "u", SHA256: "d"})
 	if err := SaveLockFile(dir, lock); err != nil {
 		t.Fatal(err)
 	}
@@ -630,13 +632,13 @@ func TestLockFileRoundTripSortsEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Sources) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(loaded.Sources))
+	if len(loaded.Sources) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(loaded.Sources))
 	}
 	if loaded.Sources[0].Version != "2.2.0" || loaded.Sources[0].SHA256 != "c" {
 		t.Fatalf("expected replaced 2.2.0 entry first, got %+v", loaded.Sources)
 	}
-	if loaded.Sources[1].Version != "2.10.0" {
+	if loaded.Sources[1].Version != "2.2.0.9" || loaded.Sources[2].Version != "2.2.0.10" || loaded.Sources[3].Version != "2.10.0" {
 		t.Fatalf("expected version-ordered entries, got %+v", loaded.Sources)
 	}
 }
