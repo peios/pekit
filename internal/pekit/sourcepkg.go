@@ -1,7 +1,10 @@
 package pekit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,16 +131,19 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 			entries = append(entries, payloadEntry{Source: artifact, Dest: root + "/upstream/patches/" + filepath.Base(artifact)})
 		}
 	case "git":
-		// git archive re-exports the exact locked commit from the mirror
-		// clone — deterministic for a commit, independent of the mutable
-		// checkout, and the commit id rides along in a pax comment.
 		archive := filepath.Join(inst.Stage, base+"-"+inst.Version+".tar")
-		args := []string{"archive", "--format=tar", "--prefix=" + base + "-" + inst.Version + "/", "-o", archive, source.Commit}
 		if source.TrackedPath != "" {
-			args = append(args, "--", source.TrackedPath)
-		}
-		if err := runSimple(source.GitRepo, "git", args...); err != nil {
-			return wrapDiag("git_archive", "export source tree", err)
+			if err := writeTrackedGitSourceArchive(archive, base+"-"+inst.Version, source); err != nil {
+				return err
+			}
+		} else {
+			// Ordinary git sources retain git archive semantics: they export
+			// the exact commit from the mirror clone, including Git's normal
+			// attribute handling and deterministic commit metadata.
+			args := []string{"archive", "--format=tar", "--prefix=" + base + "-" + inst.Version + "/", "-o", archive, source.Commit}
+			if err := runSimple(source.GitRepo, "git", args...); err != nil {
+				return wrapDiag("git_archive", "export source tree", err)
+			}
 		}
 		entries = append(entries, payloadEntry{Source: archive, Dest: root + "/upstream/" + filepath.Base(archive)})
 	default:
@@ -158,6 +164,68 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 		ctx.Renderer.Event(Event{Type: "sign", Member: member, Package: instanceID(inst), Path: inst.Artifact, Message: "signed with key " + pack.SigningKeyFingerprint(run.SignKey)})
 	}
 	ctx.Renderer.Event(Event{Type: "artifact", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "wrote source package"})
+	return nil
+}
+
+// writeTrackedGitSourceArchive writes the one-file pristine upstream archive
+// for a tracked-path snapshot without invoking git archive. A blob:none mirror
+// may deliberately lack .gitattributes blobs that git archive consults even
+// when restricted to one path; attempting that traversal would introduce a
+// hidden lazy fetch into an otherwise offline exact-lock build.
+func writeTrackedGitSourceArchive(archive, prefix string, source SourceState) error {
+	tracked, err := cleanRelPath(source.TrackedPath)
+	if err != nil || tracked != source.TrackedPath {
+		if err == nil {
+			err = fmt.Errorf("path is not canonical")
+		}
+		return wrapDiag("invalid_source_path", source.TrackedPath, err)
+	}
+	prefix, err = cleanRelPath(prefix)
+	if err != nil {
+		return wrapDiag("invalid_source_path", prefix, err)
+	}
+	if source.TrackedRoot == "" || len(source.TrackedSHA256) != sha256.Size*2 {
+		return diag("missing_source_artifact", "tracked git source is missing its pristine root or digest")
+	}
+	if _, err := hex.DecodeString(source.TrackedSHA256); err != nil {
+		return diag("missing_source_artifact", "tracked git source has an invalid pristine digest")
+	}
+
+	file := filepath.Join(source.TrackedRoot, filepath.FromSlash(tracked))
+	info, err := os.Lstat(file)
+	if err != nil {
+		return wrapDiag("stat", file, err)
+	}
+	if !info.Mode().IsRegular() {
+		return diag("unsupported_source", "tracked git source %s is not a regular file", file)
+	}
+	if info.Mode().Perm() != source.TrackedMode.Perm() || (source.TrackedMode.Perm() != 0o644 && source.TrackedMode.Perm() != 0o755) {
+		return diag("source_mode_mismatch", "tracked git source %s mode no longer matches its locked regular-file mode", file)
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return wrapDiag("open", file, err)
+	}
+	h := sha256.New()
+	_, copyErr := io.Copy(h, f)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return wrapDiag("read", file, copyErr)
+	}
+	if closeErr != nil {
+		return wrapDiag("close", file, closeErr)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != source.TrackedSHA256 {
+		return diag("lock_mismatch", "tracked git pristine source digest %s does not match locked %s", got, source.TrackedSHA256)
+	}
+
+	tarEntries := []payloadEntry{{Source: file, Dest: prefix + "/" + tracked}}
+	if err := validatePayloadDestinations(tarEntries); err != nil {
+		return err
+	}
+	if err := writeTar(archive, tarEntries); err != nil {
+		return wrapDiag("git_archive", "export tracked source file", err)
+	}
 	return nil
 }
 

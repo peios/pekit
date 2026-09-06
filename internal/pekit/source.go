@@ -52,6 +52,13 @@ type SourceState struct {
 	// materialised tree and corresponding-source archive contain only this
 	// path, while GitRepo and Commit still identify its immutable origin.
 	TrackedPath string
+	// TrackedRoot is a pristine sparse materialisation made from the locked,
+	// digest-verified blob before patches or build commands can alter the
+	// working source tree. TrackedSHA256 and TrackedMode bind its expected
+	// bytes and regular-file mode for offline corresponding-source emission.
+	TrackedRoot   string
+	TrackedSHA256 string
+	TrackedMode   os.FileMode
 }
 
 type SourceManifest struct {

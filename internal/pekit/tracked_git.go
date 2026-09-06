@@ -411,6 +411,20 @@ func resolveTrackedGitSource(ctx *Context, recipe RecipeConfig, outBase string, 
 
 	scope := "git-tracked-" + shortHash(cfg.URL, snapshot.Commit, cfg.TrackedPath, snapshot.BlobSHA256)
 	workBase := filepath.Join(outBase, scope)
+	trackedRoot := filepath.Join(workBase, "upstream")
+	if err := os.RemoveAll(trackedRoot); err != nil {
+		return SourceState{}, wrapDiag("clean_source", trackedRoot, err)
+	}
+	trackedDest := filepath.Join(trackedRoot, filepath.FromSlash(cfg.TrackedPath))
+	if err := os.MkdirAll(filepath.Dir(trackedDest), 0o755); err != nil {
+		return SourceState{}, wrapDiag("mkdir", filepath.Dir(trackedDest), err)
+	}
+	if err := os.WriteFile(trackedDest, snapshot.Bytes, snapshot.Mode); err != nil {
+		return SourceState{}, wrapDiag("write_file", trackedDest, err)
+	}
+	if err := os.Chmod(trackedDest, snapshot.Mode); err != nil {
+		return SourceState{}, wrapDiag("chmod", trackedDest, err)
+	}
 	sourceRoot := filepath.Join(workBase, "source")
 	if err := os.RemoveAll(sourceRoot); err != nil {
 		return SourceState{}, wrapDiag("clean_source", sourceRoot, err)
@@ -421,6 +435,9 @@ func resolveTrackedGitSource(ctx *Context, recipe RecipeConfig, outBase string, 
 	}
 	if err := os.WriteFile(dest, snapshot.Bytes, snapshot.Mode); err != nil {
 		return SourceState{}, wrapDiag("write_file", dest, err)
+	}
+	if err := os.Chmod(dest, snapshot.Mode); err != nil {
+		return SourceState{}, wrapDiag("chmod", dest, err)
 	}
 	ps, err := loadPatchSet(recipe, ctx.Inv.AllowUnused)
 	if err != nil {
@@ -459,5 +476,8 @@ func resolveTrackedGitSource(ctx *Context, recipe RecipeConfig, outBase string, 
 		GitRepo:       snapshot.Repo,
 		Commit:        snapshot.Commit,
 		TrackedPath:   cfg.TrackedPath,
+		TrackedRoot:   trackedRoot,
+		TrackedSHA256: snapshot.BlobSHA256,
+		TrackedMode:   snapshot.Mode,
 	}, nil
 }

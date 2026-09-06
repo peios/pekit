@@ -254,6 +254,24 @@ func TestTrackedGitSourcePackageArchivesOnlyTrackedPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		seen[hdr.Name] = true
+		if hdr.Name == "app-2026.09.06-1/security/trust/certdata.txt" {
+			if hdr.Typeflag != tar.TypeReg || hdr.Mode != 0o644 {
+				t.Fatalf("tracked archive mode/type = %#o/%d", hdr.Mode, hdr.Typeflag)
+			}
+			if hdr.Uid != 0 || hdr.Gid != 0 || hdr.Uname != "" || hdr.Gname != "" {
+				t.Fatalf("tracked archive owner = %d:%d %q:%q", hdr.Uid, hdr.Gid, hdr.Uname, hdr.Gname)
+			}
+			if hdr.ModTime.Unix() != 0 || !hdr.AccessTime.IsZero() || !hdr.ChangeTime.IsZero() {
+				t.Fatalf("tracked archive timestamps are not normalized: %#v", hdr)
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "trust-v1\n" {
+				t.Fatalf("tracked archive data = %q", data)
+			}
+		}
 	}
 	if !seen["app-2026.09.06-1/security/trust/certdata.txt"] {
 		t.Fatalf("tracked file absent from archive: %v", sortedKeys(seen))
@@ -262,6 +280,136 @@ func TestTrackedGitSourcePackageArchivesOnlyTrackedPath(t *testing.T) {
 		if strings.Contains(name, "unrelated.txt") || strings.Contains(name, ".git") {
 			t.Fatalf("untracked repository content leaked into source archive: %s", name)
 		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("tracked archive contains more than its one file: %v", sortedKeys(seen))
+	}
+}
+
+func TestTrackedGitSourcePackageIsOfflineWithoutAttributeBlobsAndReproducible(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "upstream")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runTestCmd(t, repo, "git", "init", "-b", "release")
+	runTestCmd(t, repo, "git", "config", "user.email", "test@example.invalid")
+	runTestCmd(t, repo, "git", "config", "user.name", "Test")
+	runTestCmd(t, repo, "git", "config", "uploadpack.allowFilter", "true")
+	writeFile(t, filepath.Join(repo, ".gitattributes"), "*.txt export-subst\n")
+	writeFile(t, filepath.Join(repo, "security", "trust", "certdata.txt"), "trust-v1\n")
+	writeFile(t, filepath.Join(repo, "unrelated.txt"), "unrelated-v1\n")
+	runTestCmd(t, repo, "git", "add", ".")
+	runTestCmd(t, repo, "git", "commit", "-m", "initial")
+	attributeBlob := strings.TrimSpace(runTestCmdOutput(t, repo, "git", "rev-parse", "HEAD:.gitattributes"))
+
+	recipe := filepath.Join(root, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+
+[source.git]
+url = "file://`+filepath.ToSlash(repo)+`"
+ref = "refs/heads/release"
+tracked_path = "security/trust/certdata.txt"
+
+[source_package]
+name = "app-source"
+
+[build]
+command = "true"
+`)
+	writeFile(t, filepath.Join(recipe, "package.pekit.toml"), strings.Replace(sourcePkgMemberDef, `"@source:payload.txt"`, `"@source:security/trust/certdata.txt"`, 1))
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr, Now: func() time.Time {
+		return time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	}}
+	if err := runTrackedApp(t, recipe, app, "lock", "--latest"); err != nil {
+		t.Fatalf("lock: %v\nstderr=%s", err, stderr.String())
+	}
+	cfg, err := LoadRecipe(filepath.Join(recipe, "pekit.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := trackedGitRepo(cfg, cfg.Source.Git)
+	cmd := execCommand("git", "cat-file", "-e", attributeBlob)
+	cmd.Dir = cache
+	cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("fixture unexpectedly cached .gitattributes; it cannot prove offline git-archive avoidance")
+	}
+
+	if err := os.Rename(repo, filepath.Join(root, "upstream-offline")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_NO_LAZY_FETCH", "1")
+	if err := runTrackedApp(t, recipe, app, "package", "--version", "2026.09.06"); err != nil {
+		t.Fatalf("offline package: %v\nstderr=%s", err, stderr.String())
+	}
+	artifact := globOne(t, filepath.Join(recipe, "out", "git-tracked-*", "package", "*", "app-source_2026.09.06-1_noarch.peipkg"))
+	first, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readPeipkgEntries(t, artifact)
+	archive := entries["usr/src/dist/app-2026.09.06-1/upstream/app-2026.09.06-1.tar"]
+	tr := tar.NewReader(bytes.NewReader(archive))
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.Name != "app-2026.09.06-1/security/trust/certdata.txt" {
+		t.Fatalf("offline archive entry = %q", hdr.Name)
+	}
+	if _, err := tr.Next(); err != io.EOF {
+		t.Fatalf("offline archive has an unexpected second entry: %v", err)
+	}
+
+	if err := runTrackedApp(t, recipe, app, "package", "--version", "2026.09.06"); err != nil {
+		t.Fatalf("second offline package: %v\nstderr=%s", err, stderr.String())
+	}
+	second, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("offline tracked-path source package changed across identical runs: %s != %s", sha256Hex(first), sha256Hex(second))
+	}
+}
+
+func TestTrackedGitSourceArchiveRejectsTraversalSymlinkAndTamper(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "certdata.txt")
+	writeFile(t, file, "trust\n")
+	base := SourceState{
+		TrackedRoot:   root,
+		TrackedPath:   "certdata.txt",
+		TrackedSHA256: sha256Hex([]byte("trust\n")),
+		TrackedMode:   0o644,
+	}
+	archive := filepath.Join(t.TempDir(), "source.tar")
+
+	escape := base
+	escape.TrackedPath = "../certdata.txt"
+	if err := writeTrackedGitSourceArchive(archive, "app-1", escape); err == nil {
+		t.Fatal("tracked archive accepted path traversal")
+	}
+
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "elsewhere"), file); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTrackedGitSourceArchive(archive, "app-1", base); err == nil {
+		t.Fatal("tracked archive accepted a symlink")
+	}
+
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, file, "tampered\n")
+	if err := writeTrackedGitSourceArchive(archive, "app-1", base); err == nil || diagCode(err) != "lock_mismatch" {
+		t.Fatalf("tracked archive did not reject changed bytes: %v", err)
 	}
 }
 
