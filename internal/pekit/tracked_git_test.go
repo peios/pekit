@@ -277,6 +277,41 @@ func TestNextTrackedSnapshotVersionMonotonicAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestNextTrackedSnapshotVersionCrossesDecimalSuffixBoundaries(t *testing.T) {
+	ctx := &Context{Start: time.Date(2026, 9, 6, 1, 0, 0, 0, time.UTC)}
+	for _, tc := range []struct {
+		previous string
+		want     string
+	}{
+		{previous: "2026.09.06.9", want: "2026.09.06.10"},
+		{previous: "2026.09.06.19", want: "2026.09.06.20"},
+		{previous: "2026.09.06.99", want: "2026.09.06.100"},
+	} {
+		got, err := nextTrackedSnapshotVersion(ctx, []LockSource{{Version: tc.previous}})
+		if err != nil {
+			t.Fatalf("after %s: %v", tc.previous, err)
+		}
+		if got != tc.want {
+			t.Fatalf("after %s: got %s, want %s", tc.previous, got, tc.want)
+		}
+		if err := validateTrackedGitLock(LockSource{
+			Version:    got,
+			Repository: "https://example.invalid/repo.git",
+			Ref:        "refs/heads/release",
+			Path:       "certdata.txt",
+			Commit:     strings.Repeat("a", 40),
+			Blob:       strings.Repeat("b", 40),
+			BlobSHA256: strings.Repeat("c", 64),
+		}, GitSourceConfig{
+			URL:         "https://example.invalid/repo.git",
+			Ref:         "refs/heads/release",
+			TrackedPath: "certdata.txt",
+		}, got); err != nil {
+			t.Fatalf("generated version %s is not lock-valid: %v", got, err)
+		}
+	}
+}
+
 func TestNextTrackedSnapshotVersionSuffixIsOverflowSafe(t *testing.T) {
 	ctx := &Context{Start: time.Date(2026, 9, 6, 1, 0, 0, 0, time.UTC)}
 	history := []LockSource{{Version: "2026.09.06.999999999999999999999999999999"}}

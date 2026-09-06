@@ -29,7 +29,7 @@ type trackedGitSnapshot struct {
 	Timestamp  int64
 }
 
-var trackedSnapshotVersionRE = regexp.MustCompile(`^([0-9]{4}\.[0-9]{2}\.[0-9]{2})(?:\.([2-9][0-9]*))?$`)
+var trackedSnapshotVersionRE = regexp.MustCompile(`^([0-9]{4}\.[0-9]{2}\.[0-9]{2})(?:\.([2-9]|[1-9][0-9]+))?$`)
 var trackedGitObjectRE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 func trackedGitKey(recipe RecipeConfig, cfg GitSourceConfig) string {
