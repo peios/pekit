@@ -157,12 +157,15 @@ type PyPISourceConfig struct {
 // invalid signature fails the fetch and nothing is locked. KeyFiles are
 // committed public keys resolved relative to the recipe root; Of selects
 // what the detached signature covers — the artifact as published, or its
-// decompressed content (kernel.org signs the uncompressed tar).
+// decompressed content (kernel.org signs the uncompressed tar). IgnoreExpiry
+// permits new signatures made after a pinned key expired; it does not relax
+// any other signature or trust-policy check.
 type URLSignatureConfig struct {
 	URL          string // template; empty means "{{source_url}}.sig"
 	Of           string // "artifact" (default) or "decompressed"
 	KeyFiles     []string
 	Fingerprints []string
+	IgnoreExpiry bool
 }
 
 func (c URLSignatureConfig) Configured() bool { return len(c.KeyFiles) > 0 }
@@ -1460,7 +1463,7 @@ func parseURLSignature(path, field string, value any) (URLSignatureConfig, error
 	if err != nil {
 		return URLSignatureConfig{}, err
 	}
-	known := map[string]bool{"url": true, "of": true, "key_files": true, "fingerprints": true}
+	known := map[string]bool{"url": true, "of": true, "key_files": true, "fingerprints": true, "ignore_expiry": true}
 	for key := range table {
 		if !known[key] {
 			return URLSignatureConfig{}, diagAt("unknown_key", path, "unknown %s key %q", field, key)
@@ -1493,6 +1496,12 @@ func parseURLSignature(path, field string, value any) (URLSignatureConfig, error
 	}
 	if v, ok := table["fingerprints"]; ok {
 		cfg.Fingerprints, err = expectStringSlice(path, field+".fingerprints", v)
+		if err != nil {
+			return URLSignatureConfig{}, err
+		}
+	}
+	if v, ok := table["ignore_expiry"]; ok {
+		cfg.IgnoreExpiry, err = expectBool(path, field+".ignore_expiry", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}

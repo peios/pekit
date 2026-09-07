@@ -79,6 +79,17 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 			err = fmt.Errorf("signature creation time %s is in the future", sig.CreationTime.UTC().Format(time.RFC3339))
 		} else if sig.SigExpired(now) {
 			err = pgperrors.ErrSignatureExpired
+		} else if sigCfg.IgnoreExpiry {
+			// The library has already verified the cryptographic signature and,
+			// because key expiry is checked after critical notations and current
+			// revocations, those checks have also passed. It checks signature
+			// lifetimes after key expiry, so repeat that narrow part here before
+			// accepting the recipe's explicit exception.
+			if signatureOrBindingExpiredAt(keyring, signer, sig, now) {
+				err = pgperrors.ErrSignatureExpired
+			} else {
+				err = nil
+			}
 		} else {
 			signedAt := sig.CreationTime
 			restore := selectIdentitySelfSignaturesAt(keyring, signedAt)
@@ -96,6 +107,36 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 			"signature verifies but signer %s is not in %s.fingerprints", fpr, field)
 	}
 	return fpr, nil
+}
+
+// signatureOrBindingExpiredAt mirrors the signature-lifetime checks performed
+// by openpgp after its key-expiry check. This lets IgnoreExpiry bypass only the
+// latter without also accepting an expired detached signature, identity
+// certification, subkey binding, or cross-signature.
+func signatureOrBindingExpiredAt(keyring openpgp.EntityList, signer *openpgp.Entity, sig *packet.Signature, at time.Time) bool {
+	relevant := []*packet.Signature{sig}
+	if signer != nil {
+		primarySelfSignature, _ := signer.PrimarySelfSignature()
+		relevant = append(relevant, primarySelfSignature)
+	}
+	if signer != nil && sig.IssuerKeyId != nil {
+		for _, key := range keyring.KeysByIdUsage(*sig.IssuerKeyId, packet.KeyFlagSign) {
+			if key.Entity != signer || key.PublicKey == signer.PrimaryKey {
+				continue
+			}
+			relevant = append(relevant, key.SelfSignature)
+			if key.SelfSignature != nil {
+				relevant = append(relevant, key.SelfSignature.EmbeddedSignature)
+			}
+			break
+		}
+	}
+	for _, candidate := range relevant {
+		if candidate != nil && candidate.SigExpired(at) {
+			return true
+		}
+	}
+	return false
 }
 
 // selectIdentitySelfSignaturesAt makes the v4 keyring describe the identity

@@ -94,6 +94,40 @@ file_regex = 'v[0-9]+\\.[0-9]+\\.[0-9]+'
 	}
 }
 
+func TestLoadRecipeURLSignatureIgnoreExpiry(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.url]
+url = "https://example.invalid/demo.tar.gz"
+
+[source.url.signature]
+key_files = ["keys/upstream.asc"]
+ignore_expiry = true
+`)
+	recipe, err := LoadRecipe(filepath.Join(dir, "pekit.toml"))
+	if err != nil {
+		t.Fatalf("load recipe: %v", err)
+	}
+	if !recipe.Source.URL.Signature.IgnoreExpiry {
+		t.Fatal("ignore_expiry was not decoded")
+	}
+}
+
+func TestLoadRecipeURLSignatureRejectsNonBooleanIgnoreExpiry(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source.url]
+url = "https://example.invalid/demo.tar.gz"
+
+[source.url.signature]
+key_files = ["keys/upstream.asc"]
+ignore_expiry = "true"
+`)
+	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+		t.Fatal("expected non-boolean ignore_expiry to fail")
+	}
+}
+
 func TestLoadRecipeTrackedGitSource(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

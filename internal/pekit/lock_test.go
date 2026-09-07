@@ -323,6 +323,20 @@ func detachSignAt(t *testing.T, entity *openpgp.Entity, data []byte, at time.Tim
 	return buf.Bytes()
 }
 
+// detachSignAfterKeyExpiry models upstream tooling that continues using a
+// private key after the expiration recorded in its public self-signature.
+// The library's signer refuses that operation, so temporarily hide only the
+// key lifetime while producing the fixture and restore it before serialization.
+func detachSignAfterKeyExpiry(t *testing.T, entity *openpgp.Entity, data []byte, at time.Time, lifetime uint32) []byte {
+	t.Helper()
+	selfSignature, _ := entity.PrimarySelfSignature()
+	keyLifetime := selfSignature.KeyLifetimeSecs
+	selfSignature.KeyLifetimeSecs = nil
+	signature := detachSignAt(t, entity, data, at, lifetime)
+	selfSignature.KeyLifetimeSecs = keyLifetime
+	return signature
+}
+
 const signedRecipe = `
 out_dir = "out"
 
@@ -400,6 +414,96 @@ func TestURLSignatureMadeBeforeKeyExpiryIsAccepted(t *testing.T) {
 	app := &App{Stdout: &stdout, Stderr: &stderr}
 	if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
 		t.Fatalf("historical signature failed: %v\nstderr=%s", err, stderr.String())
+	}
+}
+
+func TestURLSignatureMadeAfterKeyExpiryRequiresExplicitOverride(t *testing.T) {
+	created := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
+	signer, err := openpgp.NewEntity("Expired Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm:       packet.PubKeyAlgoEdDSA,
+		Time:            func() time.Time { return created },
+		KeyLifetimeSecs: uint32((24 * time.Hour) / time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := makeTarGz(t, "app-1.0", "payload")
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz":     artifact,
+		"https://example.test/app-1.0.tar.gz.sig": detachSignAfterKeyExpiry(t, signer, artifact, created.Add(48*time.Hour), 0),
+	}
+	serveURLs(t, responses)
+
+	for _, tc := range []struct {
+		name         string
+		ignoreExpiry bool
+		wantSuccess  bool
+	}{
+		{name: "default rejects", wantSuccess: false},
+		{name: "explicit override accepts", ignoreExpiry: true, wantSuccess: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			recipe := signedRecipe
+			if tc.ignoreExpiry {
+				recipe = strings.Replace(recipe, `key_files = ["keys/upstream.key"]`, `key_files = ["keys/upstream.key"]
+ignore_expiry = true`, 1)
+			}
+			writeFile(t, filepath.Join(dir, "pekit.toml"), recipe)
+			if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			chdir(t, dir)
+			var stdout, stderr bytes.Buffer
+			app := &App{Stdout: &stdout, Stderr: &stderr}
+			err := app.Run([]string{"build", "--version", "1.0"})
+			if tc.wantSuccess && err != nil {
+				t.Fatalf("signed build failed: %v\nstderr=%s", err, stderr.String())
+			}
+			if !tc.wantSuccess && (err == nil || diagCode(err) != "signature_invalid") {
+				t.Fatalf("expected signature_invalid, got %v", err)
+			}
+		})
+	}
+}
+
+func TestURLSignatureIgnoreExpiryDoesNotIgnoreSignatureExpiry(t *testing.T) {
+	dir := t.TempDir()
+	created := time.Now().Add(-96 * time.Hour).Truncate(time.Second)
+	signer, err := openpgp.NewEntity("Expired Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm:       packet.PubKeyAlgoEdDSA,
+		Time:            func() time.Time { return created },
+		KeyLifetimeSecs: uint32((24 * time.Hour) / time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := makeTarGz(t, "app-1.0", "payload")
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz": artifact,
+		"https://example.test/app-1.0.tar.gz.sig": detachSignAfterKeyExpiry(
+			t, signer, artifact, created.Add(48*time.Hour), uint32(time.Hour/time.Second),
+		),
+	}
+	serveURLs(t, responses)
+	recipe := strings.Replace(signedRecipe, `key_files = ["keys/upstream.key"]`, `key_files = ["keys/upstream.key"]
+ignore_expiry = true`, 1)
+	writeFile(t, filepath.Join(dir, "pekit.toml"), recipe)
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	err = app.Run([]string{"build", "--version", "1.0"})
+	if err == nil || diagCode(err) != "signature_invalid" || !strings.Contains(err.Error(), "signature expired") {
+		t.Fatalf("expected expired signature rejection, got %v", err)
 	}
 }
 
