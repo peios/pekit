@@ -1,3 +1,5 @@
 /pekit
 /out/
 /.tmp/
+/go.work
+/go.work.sum
