@@ -61,6 +61,7 @@ var lintKeys = []lintKeySpec{
 	{ID: "source.reproducible", Kind: lintBool},
 	{ID: "source.discovery", Kind: lintBool},
 	{ID: "source.versions.floor", Kind: lintBool},
+	{ID: "source.versions.ceiling", Kind: lintString, Enum: []string{"none"}},
 	{ID: "source.ref", Kind: lintString, Enum: []string{"immutable"}},
 	{ID: "source.url.scheme", Kind: lintString, Enum: []string{"https"}},
 	{ID: "source.lock", Kind: lintBool},

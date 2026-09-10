@@ -154,6 +154,7 @@ dependencies  = "consistent"
 reproducible          = true
 discovery             = true
 versions.floor        = true
+versions.ceiling      = "none"
 ref                   = "immutable"
 url.scheme            = "https"
 lock                  = true
@@ -214,7 +215,7 @@ thing = "1"
 	want := []string{
 		"package.name.style", "package.license", "package.license_class", "package.homepage",
 		"package.description", "package.dependencies",
-		"source.versions.floor", "source.url.scheme", "source.lock",
+		"source.versions.floor", "source.versions.ceiling", "source.url.scheme", "source.lock",
 		"source.signature.fingerprint", "source.signature.keys",
 		"build.dependencies.providers", "build.test",
 	}
@@ -252,7 +253,7 @@ command = "true"
 			t.Errorf("no finding for %s on the git recipe; got %v", rule, got)
 		}
 	}
-	if got["source.versions.floor"] != 0 || got["source.signature.required"] != 0 {
+	if got["source.versions.floor"] != 0 || got["source.versions.ceiling"] != 0 || got["source.signature.required"] != 0 {
 		t.Errorf("url-only rules fired on a git source: %v", got)
 	}
 }
@@ -334,6 +335,25 @@ libfoo = "*"
 	}
 	if len(events["lint_unused_allow"]) != 1 {
 		t.Fatalf("expected the unused build.test allow to be reported, got %v", events["lint_unused_allow"])
+	}
+}
+
+func TestConstraintCeiling(t *testing.T) {
+	cases := map[string]string{
+		"":                "",
+		"*":               "",
+		">= 1.5.7":        "",
+		">= 1.5.7, > 1.0": "",
+		">= 1.5.7, < 1.6": "<1.6",
+		"<= 2":            "<=2",
+		"= 1.2.3":         "=1.2.3",
+		"^1.5":            "^1.5",
+		">= 4.2, ~4.2":    "~4.2",
+	}
+	for raw, want := range cases {
+		if got := constraintCeiling(raw); got != want {
+			t.Errorf("constraintCeiling(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }
 

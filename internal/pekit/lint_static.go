@@ -198,6 +198,13 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 			l.report("source.versions.floor", "", path, "release discovery has no lower bound: set versions = \">= <first version this recipe was written for>\" so it never follows an older release")
 		}
 	}
+	if l.on("source.versions.ceiling") {
+		for _, c := range []string{s.URL.Versions, s.Git.Versions, s.PyPI.Versions} {
+			if term := constraintCeiling(c); term != "" {
+				l.report("source.versions.ceiling", "", path, "versions = %q bounds discovery from above with %q; unattended updates stop at that release — drop the ceiling and review the new major when it arrives", c, term)
+			}
+		}
+	}
 	if l.on("source.ref") && s.Git.URL != "" && s.Git.TrackedPath == "" {
 		if ref := s.Git.Ref; !strings.Contains(ref, "{{") && !fixedGitRefRE.MatchString(ref) {
 			l.report("source.ref", "", path, "git ref %q is a moving branch; use a tag template such as \"v{{version}}\" so the lock can pin it", ref)
@@ -237,6 +244,23 @@ func constraintHasFloor(raw string) bool {
 		return true
 	}
 	return false
+}
+
+// constraintCeiling returns the first term of a versions constraint that
+// bounds from above, or "". `<` and `<=` are explicit ceilings; `=` pins
+// one release; `^` and `~` imply the next major or minor as a ceiling.
+func constraintCeiling(raw string) string {
+	for _, part := range splitConstraintParts(raw) {
+		part = strings.TrimSpace(part)
+		switch {
+		case part == "" || part == "*":
+		case strings.HasPrefix(part, "<"), strings.HasPrefix(part, "^"), strings.HasPrefix(part, "~"):
+			return part
+		case strings.HasPrefix(part, "=") && !strings.HasPrefix(part, "=>"):
+			return part
+		}
+	}
+	return ""
 }
 
 func lintURLSchemes(l *linter, path string, s SourceConfig) {
