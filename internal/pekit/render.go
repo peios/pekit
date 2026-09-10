@@ -22,6 +22,9 @@ type Event struct {
 	Stream     string `json:"stream,omitempty"`
 	Text       string `json:"text,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
+	// Rule names the lint rule a lint event belongs to (its lint.pekit.toml
+	// key path); empty on every other event type.
+	Rule string `json:"rule,omitempty"`
 }
 
 type Renderer interface {
@@ -79,6 +82,12 @@ func humanEventMessage(e Event) string {
 	case "artifact", "publish", "package_plan", "publish_plan":
 		if e.Path != "" {
 			msg += ": " + e.Path
+		}
+	case "lint", "lint_allowed":
+		// A finding names the file it is about; without it the reader has
+		// to guess which of a package's hundred files lacks a man page.
+		if e.Path != "" {
+			msg += " [" + e.Path + "]"
 		}
 	}
 	return msg

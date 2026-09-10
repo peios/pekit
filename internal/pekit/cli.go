@@ -57,6 +57,14 @@ var commandFlags = map[Command]map[flagUse]bool{
 	CommandLock: {
 		flagVersion: true, flagRefreshSource: true, flagRepin: true,
 	},
+	// lint checks the recipe tree against the rules its lint.pekit.toml
+	// enables. Without a version flag it reads only committed files; with one
+	// it also resolves the source and checks the staged payload of an
+	// existing build, so it takes version selection and the local-source
+	// flags but never builds.
+	CommandLint: {
+		flagVersion: true, flagLocal: true, flagEnv: true, flagKeyring: true,
+	},
 }
 
 func ParseInvocation(args []string, cwd string) (Invocation, error) {
@@ -488,6 +496,13 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 	case CommandLock:
 		if len(selectors) > 0 {
 			return diag("invalid_selector", "lock does not accept selectors")
+		}
+	case CommandLint:
+		if len(selectors) > 0 {
+			return diag("invalid_selector", "lint does not accept selectors")
+		}
+		if inv.All && !inv.AllowUnused {
+			return diag("unsupported_flag", "lint does not support --all")
 		}
 	default:
 		if inv.All && !inv.AllowUnused {

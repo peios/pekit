@@ -21,6 +21,7 @@ const (
 	CommandGen       Command = "gen"
 	CommandVerify    Command = "verify"
 	CommandLock      Command = "lock"
+	CommandLint      Command = "lint"
 	CommandWorkspace Command = "workspace"
 )
 
@@ -34,6 +35,7 @@ var commands = map[string]Command{
 	"gen":       CommandGen,
 	"verify":    CommandVerify,
 	"lock":      CommandLock,
+	"lint":      CommandLint,
 	"workspace": CommandWorkspace,
 }
 

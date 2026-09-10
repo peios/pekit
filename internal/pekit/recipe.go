@@ -58,6 +58,11 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	if cmd == CommandLock {
 		return runLockCmd(ctx, recipe, member)
 	}
+	// lint reads the tree and, given a version, an existing build stage. It
+	// never runs a target, so it skips the gen drift gates too.
+	if cmd == CommandLint {
+		return runLint(ctx, recipe, workspace, member)
+	}
 	// Consuming commands run the scoped drift gates first, so no build/test/
 	// package/publish ever proceeds from a stale generated tree (unless
 	// --no-verify is passed).

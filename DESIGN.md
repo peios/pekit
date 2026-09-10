@@ -549,6 +549,7 @@ This is the first-pass v2 command contract.
 | `clean` | clean target and/or managed output | no | no | no | only when a clean target runs | runs clean target and/or removes managed output |
 | `gen` | gen targets | no | no | no | yes | runs gen commands (writes generated source in-tree) |
 | `verify` | gen targets | no | no | no | yes | runs gen verify_commands (read-only drift check) |
+| `lint` | the recipe and every package it defines | optional; selects an existing build stage for payload rules | yes | reads stages, never builds | env/keyring only | checks lint.pekit.toml rules; writes nothing |
 | `workspace` | workspace members plus a delegated command | delegated | delegated | delegated | delegated | delegates normal operations per member |
 
 Version behavior:
