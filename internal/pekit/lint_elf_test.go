@@ -1,6 +1,7 @@
 package pekit
 
 import (
+	"debug/elf"
 	"encoding/binary"
 	"testing"
 )
@@ -54,6 +55,27 @@ func TestEmbeddedDebugSectionExcludesGDBAutoLoadMarker(t *testing.T) {
 	} {
 		if got := isEmbeddedDebugSection(tc.name); got != tc.want {
 			t.Errorf("isEmbeddedDebugSection(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDynamicRelaSectionAcceptsGoLinkerName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		type_ elf.SectionType
+		flags elf.SectionFlag
+		class elf.Class
+		want  bool
+	}{
+		{name: ".rela.dyn", type_: elf.SHT_RELA, flags: elf.SHF_ALLOC, class: elf.ELFCLASS64, want: true},
+		{name: ".rela", type_: elf.SHT_RELA, flags: elf.SHF_ALLOC, class: elf.ELFCLASS64, want: true},
+		{name: ".rela.debug_info", type_: elf.SHT_RELA, class: elf.ELFCLASS64, want: false},
+		{name: ".rel.dyn", type_: elf.SHT_REL, flags: elf.SHF_ALLOC, class: elf.ELFCLASS64, want: false},
+		{name: ".rela.dyn", type_: elf.SHT_RELA, flags: elf.SHF_ALLOC, class: elf.ELFCLASS32, want: false},
+	} {
+		s := &elf.Section{SectionHeader: elf.SectionHeader{Name: tc.name, Type: tc.type_, Flags: tc.flags}}
+		if got := isDynamicRelaSection(s, tc.class); got != tc.want {
+			t.Errorf("isDynamicRelaSection(%q) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

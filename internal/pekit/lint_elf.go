@@ -114,8 +114,8 @@ func analyzeELF(path string) (*elfInfo, error) {
 			info.HasSymtab = true
 		case isEmbeddedDebugSection(s.Name):
 			info.HasDebugSections = true
-		case s.Name == ".rela.dyn" && ef.Class == elf.ELFCLASS64:
-			info.RelativeRelocs = countRelativeRelocs(ef, s)
+		case isDynamicRelaSection(s, ef.Class):
+			info.RelativeRelocs += countRelativeRelocs(ef, s)
 		case s.Name == ".note.gnu.build-id":
 			if data, err := s.Data(); err == nil {
 				forEachNote(data, 4, ef.ByteOrder, func(name string, typ uint32, desc []byte) {
@@ -142,6 +142,13 @@ func analyzeELF(path string) (*elfInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// Dynamic linkers consume allocatable SHT_RELA sections regardless of their
+// spelling. GNU linkers conventionally use .rela.dyn, while Go's internal
+// linker uses .rela; both contain relocations which DT_RELR can replace.
+func isDynamicRelaSection(s *elf.Section, class elf.Class) bool {
+	return class == elf.ELFCLASS64 && s.Type == elf.SHT_RELA && s.Flags&elf.SHF_ALLOC != 0
 }
 
 // .debug_gdb_scripts is an allocatable auto-load marker consumed by GDB, not
