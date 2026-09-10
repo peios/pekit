@@ -112,7 +112,7 @@ func analyzeELF(path string) (*elfInfo, error) {
 		switch {
 		case s.Name == ".symtab":
 			info.HasSymtab = true
-		case strings.HasPrefix(s.Name, ".debug_"):
+		case isEmbeddedDebugSection(s.Name):
 			info.HasDebugSections = true
 		case s.Name == ".rela.dyn" && ef.Class == elf.ELFCLASS64:
 			info.RelativeRelocs = countRelativeRelocs(ef, s)
@@ -142,6 +142,14 @@ func analyzeELF(path string) (*elfInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// .debug_gdb_scripts is an allocatable auto-load marker consumed by GDB, not
+// embedded debugging information. Toolchain strip deliberately retains it;
+// removing an allocatable section with objcopy can rewrite program headers and
+// weaken otherwise-valid hardening such as PT_GNU_RELRO.
+func isEmbeddedDebugSection(name string) bool {
+	return strings.HasPrefix(name, ".debug_") && name != ".debug_gdb_scripts"
 }
 
 // relativeRelocType is R_<arch>_RELATIVE for the architectures whose value

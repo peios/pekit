@@ -41,3 +41,19 @@ func TestELF64GNUPropertyNoteUsesFourByteNoteFraming(t *testing.T) {
 		t.Fatal("regression fixture does not distinguish the old outer-note alignment")
 	}
 }
+
+func TestEmbeddedDebugSectionExcludesGDBAutoLoadMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: ".debug_info", want: true},
+		{name: ".debug_line", want: true},
+		{name: ".debug_gdb_scripts", want: false},
+		{name: ".gnu_debuglink", want: false},
+	} {
+		if got := isEmbeddedDebugSection(tc.name); got != tc.want {
+			t.Errorf("isEmbeddedDebugSection(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
