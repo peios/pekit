@@ -1,6 +1,9 @@
 package pekit
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // A dependency's constraint and its root come from one [dependencies]
 // entry, and merging them as two independent maps let a base's root
@@ -69,5 +72,46 @@ func TestAnOverrideMayRestateTheRoot(t *testing.T) {
 	got := mergePackageMeta(base, over)
 	if got.DependencyRoots["libfoo"] != "initramfs" {
 		t.Errorf("root = %q, want the override's", got.DependencyRoots["libfoo"])
+	}
+}
+
+func TestExplicitlyEmptyPackageSectionsClearInheritedEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package.pekit.toml")
+	writeFile(t, path, `
+side_effects = []
+
+[dependencies]
+
+[optional_dependencies]
+
+[conflicts]
+
+[provides]
+
+[replaces]
+
+[sd_overrides]
+`)
+	over, err := LoadPackageFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := PackageMeta{
+		Dependencies:         map[string]string{"old-dependency": "*"},
+		OptionalDependencies: map[string]string{"old-optional": "*"},
+		Conflicts:            map[string]string{"old-conflict": "*"},
+		Provides:             map[string]string{"old-provide": "1"},
+		Replaces:             map[string]string{"old-replacement": "<= 1"},
+		SideEffects:          []string{"ldconfig"},
+		SDOverrides:          map[string]string{"usr/bin/old": "system"},
+	}
+
+	got := mergePackageMeta(base, over.Package)
+	if len(got.Dependencies) != 0 || len(got.OptionalDependencies) != 0 ||
+		len(got.Conflicts) != 0 || len(got.Provides) != 0 ||
+		len(got.Replaces) != 0 || len(got.SideEffects) != 0 ||
+		len(got.SDOverrides) != 0 {
+		t.Fatalf("empty overlay sections did not clear inherited entries: %#v", got)
 	}
 }

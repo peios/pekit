@@ -2311,6 +2311,8 @@ Rules:
 - dependency sections replace as whole sections.
 - `provides`, `replaces`, `sd_overrides`, and publish targets replace as whole
   sections.
+- An explicitly present empty whole-section clears entries inherited from lower
+  layers; omitting the section continues to inherit it.
 - package format replaces as a scalar.
 - multipack config replaces as a whole section.
 

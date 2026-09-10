@@ -401,27 +401,27 @@ func mergePackageMeta(base, over PackageMeta) PackageMeta {
 	// failed, and there was no way to un-set a root once a base declared
 	// one. "Maps replace wholesale" is the right rule; splitting one
 	// logical field across two maps that can diverge was not.
-	if len(over.Dependencies) > 0 || len(over.DependencyRoots) > 0 {
+	if over.Dependencies != nil || over.DependencyRoots != nil {
 		out.Dependencies = cloneStringMap(over.Dependencies)
 		out.DependencyRoots = cloneStringMap(over.DependencyRoots)
 	}
-	if len(over.OptionalDependencies) > 0 || len(over.OptionalDependencyRoots) > 0 {
+	if over.OptionalDependencies != nil || over.OptionalDependencyRoots != nil {
 		out.OptionalDependencies = cloneStringMap(over.OptionalDependencies)
 		out.OptionalDependencyRoots = cloneStringMap(over.OptionalDependencyRoots)
 	}
-	if len(over.Conflicts) > 0 {
+	if over.Conflicts != nil {
 		out.Conflicts = cloneStringMap(over.Conflicts)
 	}
-	if len(over.Provides) > 0 {
+	if over.Provides != nil {
 		out.Provides = cloneStringMap(over.Provides)
 	}
-	if len(over.Replaces) > 0 {
+	if over.Replaces != nil {
 		out.Replaces = cloneStringMap(over.Replaces)
 	}
-	if len(over.SideEffects) > 0 {
+	if over.SideEffects != nil {
 		out.SideEffects = append([]string(nil), over.SideEffects...)
 	}
-	if len(over.SDOverrides) > 0 {
+	if over.SDOverrides != nil {
 		out.SDOverrides = cloneStringMap(over.SDOverrides)
 	}
 	if len(over.Claims.Provides) > 0 || len(over.Claims.Dependencies) > 0 {
