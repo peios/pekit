@@ -118,6 +118,12 @@ func TestTemplateExtractRegexMatchesUnseparatedUpstreamSuffix(t *testing.T) {
 	}
 }
 
+func TestEmbeddedVersionDoesNotConsumeArchiveExtension(t *testing.T) {
+	if got := embeddedVersionRE.FindString("tzdata2026c.tar.gz"); got != "2026c" {
+		t.Fatalf("embedded version = %q, want 2026c", got)
+	}
+}
+
 func TestEnumerateURLVersionsUsesExplicitListingURL(t *testing.T) {
 	const listingURL = "https://example.test/releases"
 	serveURLs(t, map[string][]byte{

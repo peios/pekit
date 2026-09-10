@@ -32,8 +32,8 @@ type Version struct {
 	BuildMeta  string
 }
 
-var versionRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)([A-Za-z][0-9A-Za-z.]*)?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
-var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*(?:[A-Za-z][0-9A-Za-z.]*)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
+var versionRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)([A-Za-z][0-9A-Za-z]*)?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*(?:[A-Za-z][0-9A-Za-z]*)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
 
 func ParseVersion(raw string) (Version, error) {
 	m := versionRE.FindStringSubmatch(raw)
