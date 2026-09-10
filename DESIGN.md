@@ -1262,6 +1262,7 @@ Template variables:
 - `{{major}}`
 - `{{minor}}`
 - `{{patch}}`
+- `{{suffix}}`
 - `{{prerelease}}`
 - `{{buildmeta}}`
 
@@ -1269,6 +1270,8 @@ Rules:
 
 - `{{version}}` renders the original version text.
 - Numeric cores may contain any positive number of dot-separated components.
+  An unseparated alphanumeric upstream suffix is also supported (for example,
+  IANA tzdata `2026c`) and is exposed through `{{suffix}}`.
 - `{{major}}`, `{{minor}}`, and `{{patch}}` retain their compatibility meaning:
   they expose the first three components. Use `{{version}}` when an upstream
   fourth or later component is significant.
@@ -1276,8 +1279,9 @@ Rules:
 - Referencing a missing `minor` or `patch` component is an error.
 - Version selection compares every numeric component as an arbitrary-precision
   decimal value. Missing components compare as zero, so `1.2`, `1.2.0`, and
-  `1.2.0.0` have the same numeric core; prerelease and build-metadata handling
-  retains Pekit's existing policy.
+  `1.2.0.0` have the same numeric core. Unseparated suffixes sort after the
+  matching bare numeric core and lexically among themselves; prerelease and
+  build-metadata handling retains Pekit's existing policy.
 - Unknown template variables are errors.
 
 #### Version CLI
@@ -3000,6 +3004,7 @@ PEKIT_VERSION=<original selected version text>
 PEKIT_VERSION_MAJOR=<major>
 PEKIT_VERSION_MINOR=<minor, if present>
 PEKIT_VERSION_PATCH=<patch, if present>
+PEKIT_VERSION_SUFFIX=<unseparated upstream suffix, if present>
 PEKIT_VERSION_PRERELEASE=<prerelease, if present>
 PEKIT_VERSION_BUILDMETA=<build metadata, if present>
 ```

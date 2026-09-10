@@ -166,6 +166,7 @@ func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, s
 		values["PEKIT_VERSION_MAJOR"] = version.Major
 		values["PEKIT_VERSION_MINOR"] = version.Minor
 		values["PEKIT_VERSION_PATCH"] = version.Patch
+		values["PEKIT_VERSION_SUFFIX"] = version.Suffix
 		values["PEKIT_VERSION_PRERELEASE"] = version.Prerelease
 		values["PEKIT_VERSION_BUILDMETA"] = version.BuildMeta
 	}

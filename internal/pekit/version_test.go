@@ -19,6 +19,19 @@ func TestParseVersionPreservesArbitraryNumericCore(t *testing.T) {
 	}
 }
 
+func TestParseVersionPreservesUnseparatedUpstreamSuffix(t *testing.T) {
+	v, err := ParseVersion("2026c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Raw != "2026c" || v.Major != "2026" || v.Suffix != "c" || v.Prerelease != "" {
+		t.Fatalf("unexpected parsed version: %#v", v)
+	}
+	if got := v.TemplateVars()["suffix"]; got != "c" {
+		t.Fatalf("suffix template value = %q, want c", got)
+	}
+}
+
 func TestCompareVersionTextUsesAllNumericComponents(t *testing.T) {
 	tests := []struct {
 		a, b string
@@ -34,6 +47,20 @@ func TestCompareVersionTextUsesAllNumericComponents(t *testing.T) {
 		if got := compareVersionText(tt.a, tt.b); got != tt.want {
 			t.Errorf("compareVersionText(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestCompareVersionTextOrdersUnseparatedUpstreamSuffix(t *testing.T) {
+	values := []string{"2025c", "2026", "2026a", "2026b", "2026c", "2027a"}
+	for i := 1; i < len(values); i++ {
+		if got := compareVersionText(values[i-1], values[i]); got >= 0 {
+			t.Fatalf("compareVersionText(%q, %q) = %d, want < 0", values[i-1], values[i], got)
+		}
+	}
+	got := filterVersions(values, ">= 2026c")
+	want := []string{"2026c", "2027a"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered versions = %v, want %v", got, want)
 	}
 }
 
@@ -77,6 +104,17 @@ func TestTemplateExtractRegexMatchesArbitraryNumericCore(t *testing.T) {
 	version := extractVersion(`<a href="foo-0.5.13.10.tar.gz">foo</a>`, re)
 	if version != "0.5.13.10" {
 		t.Fatalf("version = %q", version)
+	}
+}
+
+func TestTemplateExtractRegexMatchesUnseparatedUpstreamSuffix(t *testing.T) {
+	re, err := templateExtractRegex("tzdata{{version}}.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := extractVersion(`<a href="tzdata2026c.tar.gz">tzdata</a>`, re)
+	if version != "2026c" {
+		t.Fatalf("version = %q, want 2026c", version)
 	}
 }
 

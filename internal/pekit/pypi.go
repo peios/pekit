@@ -309,7 +309,7 @@ func parsePyPISDistFilename(project, filename string) (string, string, bool) {
 		return "", "", false
 	}
 	parsed, err := ParseVersion(version)
-	if err != nil || parsed.Prerelease != "" {
+	if err != nil || parsed.Suffix != "" || parsed.Prerelease != "" {
 		return "", "", false
 	}
 	return version, root, true

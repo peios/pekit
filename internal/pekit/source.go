@@ -521,7 +521,7 @@ func urlBaseVersion(cfg URLSourceConfig, selected Version) (Version, error) {
 	if !cfg.PatchSeries.Configured() {
 		return selected, nil
 	}
-	if !selected.Parsed || selected.Minor == "" || selected.Patch == "" || selected.Prerelease != "" || selected.BuildMeta != "" {
+	if !selected.Parsed || selected.Minor == "" || selected.Patch == "" || selected.Suffix != "" || selected.Prerelease != "" || selected.BuildMeta != "" {
 		return Version{}, diag("invalid_patch_series_version", "source.url.patch_series requires a stable major.minor.patch version, got %q", selected.Raw)
 	}
 	base := selected
@@ -534,7 +534,7 @@ func fetchURLPatchArtifacts(ctx *Context, outBase string, cfg URLPatchSeriesConf
 	if !cfg.Configured() {
 		return nil, nil
 	}
-	if !version.Parsed || version.Minor == "" || version.Patch == "" || version.Prerelease != "" || version.BuildMeta != "" {
+	if !version.Parsed || version.Minor == "" || version.Patch == "" || version.Suffix != "" || version.Prerelease != "" || version.BuildMeta != "" {
 		return nil, diag("invalid_patch_series_version", "source.url.patch_series requires a stable major.minor.patch version, got %q", version.Raw)
 	}
 	level := 0

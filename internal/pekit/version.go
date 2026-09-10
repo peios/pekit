@@ -24,12 +24,16 @@ type Version struct {
 	Major      string
 	Minor      string
 	Patch      string
+	// Suffix preserves an unseparated alphanumeric suffix used by upstream
+	// schemes such as IANA tzdata (2026a, 2026b, ...). It is distinct from a
+	// hyphenated prerelease so {{prerelease}} retains its established meaning.
+	Suffix     string
 	Prerelease string
 	BuildMeta  string
 }
 
-var versionRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
-var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
+var versionRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)*)([A-Za-z][0-9A-Za-z.]*)?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+var embeddedVersionRE = regexp.MustCompile(`[0-9]+(?:\.[0-9]+)*(?:[A-Za-z][0-9A-Za-z.]*)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
 
 func ParseVersion(raw string) (Version, error) {
 	m := versionRE.FindStringSubmatch(raw)
@@ -41,8 +45,9 @@ func ParseVersion(raw string) (Version, error) {
 		Raw:        raw,
 		Parsed:     true,
 		Components: components,
-		Prerelease: m[2],
-		BuildMeta:  m[3],
+		Suffix:     m[2],
+		Prerelease: m[3],
+		BuildMeta:  m[4],
 	}
 	if len(components) > 0 {
 		v.Major = components[0]
@@ -62,6 +67,7 @@ func (v Version) TemplateVars() map[string]string {
 		"major":      v.Major,
 		"minor":      v.Minor,
 		"patch":      v.Patch,
+		"suffix":     v.Suffix,
 		"prerelease": v.Prerelease,
 		"buildmeta":  v.BuildMeta,
 	}
@@ -179,7 +185,7 @@ func resolveExactVersionTexts(ctx *Context, raws []string, source SourceConfig, 
 
 func trailingZeroCandidates(raw string) []string {
 	v, err := ParseVersion(raw)
-	if err != nil || v.Prerelease != "" || v.BuildMeta != "" {
+	if err != nil || v.Suffix != "" || v.Prerelease != "" || v.BuildMeta != "" {
 		return []string{raw}
 	}
 	components := append([]string(nil), v.Components...)
@@ -332,7 +338,7 @@ func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {
 	seen := map[string]bool{}
 	for _, raw := range baseVersions {
 		base, err := ParseVersion(raw)
-		if err != nil || base.Minor == "" || base.Prerelease != "" || base.BuildMeta != "" {
+		if err != nil || base.Minor == "" || base.Suffix != "" || base.Prerelease != "" || base.BuildMeta != "" {
 			continue
 		}
 		// A patch series is based on the upstream major.minor release, not a
@@ -814,6 +820,9 @@ func compareVersionText(a, b string) int {
 		if cmp := compareNumericComponent(ac, bc); cmp != 0 {
 			return cmp
 		}
+	}
+	if cmp := strings.Compare(va.Suffix, vb.Suffix); cmp != 0 {
+		return cmp
 	}
 	return strings.Compare(va.Prerelease, vb.Prerelease)
 }
