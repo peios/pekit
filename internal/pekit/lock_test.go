@@ -337,6 +337,16 @@ func TestLoadPinnedKeysReadsConcatenatedArmoredBlocks(t *testing.T) {
 	}
 }
 
+func TestLoadPinnedKeysRejectsMalformedTrailingArmoredBlock(t *testing.T) {
+	dir := t.TempDir()
+	bundle := append(armoredPublicKeyBytes(t, newTestSigner(t)), []byte(armoredKeyMarker)...)
+	writeFile(t, filepath.Join(dir, "upstream.asc"), string(bundle))
+	_, err := loadPinnedKeys(dir, []string{"upstream.asc"})
+	if err == nil || diagCode(err) != "signature_key_file" {
+		t.Fatalf("expected malformed trailing block to fail closed, got %v", err)
+	}
+}
+
 func detachSign(t *testing.T, entity *openpgp.Entity, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -611,6 +621,9 @@ func TestHistoricalVerificationWithRenewalAfterMessageAndLaterExpiry(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// SignIdentity creates a generic third-party certification. Turn that
+	// packet into the first key-lifetime renewal and re-sign its hashed fields
+	// with the same primary key, matching an upstream self-certification.
 	firstRenewal := identity.Signatures[len(identity.Signatures)-1]
 	firstLifetime := uint32((96 * time.Hour) / time.Second)
 	firstRenewal.FlagsValid = true
@@ -632,6 +645,8 @@ func TestHistoricalVerificationWithRenewalAfterMessageAndLaterExpiry(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// This later renewal postdates the detached signature and is expired at
+	// verification time. Historical verification must select firstRenewal.
 	secondRenewal := identity.Signatures[len(identity.Signatures)-1]
 	secondLifetime := uint32((108 * time.Hour) / time.Second)
 	secondRenewal.FlagsValid = true
