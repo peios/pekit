@@ -62,14 +62,22 @@ func ParseVersion(raw string) (Version, error) {
 }
 
 func (v Version) TemplateVars() map[string]string {
+	revision := ""
+	revisionSuffix := ""
+	if len(v.Components) > 3 {
+		revision = v.Components[3]
+		revisionSuffix = "-rev" + revision
+	}
 	return map[string]string{
-		"version":    v.Raw,
-		"major":      v.Major,
-		"minor":      v.Minor,
-		"patch":      v.Patch,
-		"suffix":     v.Suffix,
-		"prerelease": v.Prerelease,
-		"buildmeta":  v.BuildMeta,
+		"version":         v.Raw,
+		"major":           v.Major,
+		"minor":           v.Minor,
+		"patch":           v.Patch,
+		"revision":        revision,
+		"revision_suffix": revisionSuffix,
+		"suffix":          v.Suffix,
+		"prerelease":      v.Prerelease,
+		"buildmeta":       v.BuildMeta,
 	}
 }
 
@@ -256,8 +264,9 @@ func enumerateGitVersions(cfg GitSourceConfig) ([]string, error) {
 
 // extractGitTagVersion maps an upstream tag to the version Pekit exposes.
 // Named captures make transformations explicit: `version` supplies a complete
-// version, while major/minor/patch (plus optional prerelease/buildmeta) compose
-// one. Regexes without those names retain the historical ref-template
+// version, while major/minor/patch (plus optional revision, suffix,
+// prerelease, and buildmeta) compose one. Regexes without those names retain
+// the historical ref-template
 // extraction behaviour, so a filtering-only capture group cannot accidentally
 // change a package's versions.
 func extractGitTagVersion(tag string, tagFilter, refPattern *regexp.Regexp) (string, error) {
@@ -298,9 +307,11 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 	major, hasMajor := capture("major")
 	minor, hasMinor := capture("minor")
 	patch, hasPatch := capture("patch")
+	revision, hasRevision := capture("revision")
+	suffix, hasSuffix := capture("suffix")
 	prerelease, hasPrerelease := capture("prerelease")
 	buildmeta, hasBuildmeta := capture("buildmeta")
-	configured := hasMajor || hasMinor || hasPatch || hasPrerelease || hasBuildmeta
+	configured := hasMajor || hasMinor || hasPatch || hasRevision || hasSuffix || hasPrerelease || hasBuildmeta
 	if !configured {
 		return "", false, nil
 	}
@@ -310,6 +321,12 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 	if hasPatch && patch != "" && (!hasMinor || minor == "") {
 		return "", true, diag("git_versions", "tag %q has a patch capture without a minor capture", tag)
 	}
+	if hasRevision && revision != "" && (!hasPatch || patch == "") {
+		return "", true, diag("git_versions", "tag %q has a revision capture without a patch capture", tag)
+	}
+	if revision != "" && suffix != "" {
+		return "", true, diag("git_versions", "tag %q has both suffix and revision captures", tag)
+	}
 
 	version := major
 	if hasMinor && minor != "" {
@@ -317,6 +334,12 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 	}
 	if hasPatch && patch != "" {
 		version += "." + patch
+	}
+	if hasRevision && revision != "" {
+		version += "." + revision
+	}
+	if hasSuffix && suffix != "" {
+		version += suffix
 	}
 	if hasPrerelease && prerelease != "" {
 		version += "-" + prerelease

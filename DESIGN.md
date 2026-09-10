@@ -1157,6 +1157,9 @@ Template syntax:
 {{major}}
 {{minor}}
 {{patch}}
+{{revision}}
+{{revision_suffix}}
+{{suffix}}
 {{prerelease}}
 {{buildmeta}}
 {{multipack}}
@@ -1264,6 +1267,8 @@ Template variables:
 - `{{major}}`
 - `{{minor}}`
 - `{{patch}}`
+- `{{revision}}`
+- `{{revision_suffix}}`
 - `{{suffix}}`
 - `{{prerelease}}`
 - `{{buildmeta}}`
@@ -1277,6 +1282,10 @@ Rules:
 - `{{major}}`, `{{minor}}`, and `{{patch}}` retain their compatibility meaning:
   they expose the first three components. Use `{{version}}` when an upstream
   fourth or later component is significant.
+- `{{revision}}` exposes the fourth numeric component when present, and
+  `{{revision_suffix}}` renders it as `-revN`; both are empty otherwise. This
+  supports upstreams that publish corrective tags such as `20260210-rev1`
+  while Pekit orders the correction as version `2026.02.10.1`.
 - Partial versions are allowed.
 - Referencing a missing `minor` or `patch` component is an error.
 - Version selection compares every numeric component as an arbitrary-precision
@@ -1399,7 +1408,9 @@ Git enumeration:
 - Extracts semantic versions. A named `version` capture supplies the complete
   version, including any fourth or later numeric components. Named `major`,
   `minor`, and `patch` captures compose a dotted
-  version, with optional `prerelease` and `buildmeta` suffixes. Without named
+  version, with optional `revision`, `suffix`, `prerelease`, and `buildmeta`
+  captures. `revision` becomes a fourth numeric component and `suffix` is
+  appended without a separator. Without named
   version captures, extraction falls back to the ref template or an embedded
   semantic version; unnamed captures are filtering-only.
 

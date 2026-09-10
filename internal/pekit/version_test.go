@@ -32,6 +32,27 @@ func TestParseVersionPreservesUnseparatedUpstreamSuffix(t *testing.T) {
 	}
 }
 
+func TestRevisionTemplateVarsRenderRevSuffix(t *testing.T) {
+	base, err := ParseVersion("2026.02.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := base.TemplateVars()["revision_suffix"]; got != "" {
+		t.Fatalf("base revision suffix = %q", got)
+	}
+
+	revision, err := ParseVersion("2026.02.10.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := revision.TemplateVars()["revision"]; got != "1" {
+		t.Fatalf("revision = %q", got)
+	}
+	if got := revision.TemplateVars()["revision_suffix"]; got != "-rev1" {
+		t.Fatalf("revision suffix = %q", got)
+	}
+}
+
 func TestCompareVersionTextUsesAllNumericComponents(t *testing.T) {
 	tests := []struct {
 		a, b string
@@ -174,6 +195,38 @@ func TestGitTagNamedComponentsComposeCanonicalVersion(t *testing.T) {
 	}
 	if version != "2026.08.10" {
 		t.Fatalf("version = %q, want 2026.08.10", version)
+	}
+}
+
+func TestGitTagNamedSuffixAndRevisionComposePostReleaseVersions(t *testing.T) {
+	tagFilter := regexp.MustCompile(`^microcode-(?P<major>[0-9]{4})(?P<minor>[0-9]{2})(?P<patch>[0-9]{2})(?:(?P<suffix>[a-z])|-rev(?P<revision>[0-9]+))?$`)
+	refPattern, err := templateExtractRegex("microcode-{{major}}{{minor}}{{patch}}{{suffix}}{{revision_suffix}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tag, want := range map[string]string{
+		"microcode-20260210":      "2026.02.10",
+		"microcode-20260210-rev1": "2026.02.10.1",
+		"microcode-20230516a":     "2023.05.16a",
+	} {
+		version, err := extractGitTagVersion(tag, tagFilter, refPattern)
+		if err != nil {
+			t.Fatalf("%s: %v", tag, err)
+		}
+		if version != want {
+			t.Errorf("%s = %q, want %q", tag, version, want)
+		}
+		parsed, err := ParseVersion(version)
+		if err != nil {
+			t.Fatalf("%s: parse %q: %v", tag, version, err)
+		}
+		rendered, err := RenderTemplate("microcode-{{major}}{{minor}}{{patch}}{{suffix}}{{revision_suffix}}", TemplateContext{Version: parsed})
+		if err != nil {
+			t.Fatalf("%s: render %q: %v", tag, version, err)
+		}
+		if rendered != tag {
+			t.Errorf("render %q = %q, want %q", version, rendered, tag)
+		}
 	}
 }
 

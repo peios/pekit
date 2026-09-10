@@ -18,7 +18,7 @@ func TestRenderTemplateRefusesDerivedTokensOfAnUndecomposableVersion(t *testing.
 	}
 
 	for _, token := range []string{"{{major}}", "{{minor}}", "{{patch}}",
-		"{{prerelease}}", "{{buildmeta}}"} {
+		"{{revision}}", "{{revision_suffix}}", "{{suffix}}", "{{prerelease}}", "{{buildmeta}}"} {
 		out, err := RenderTemplate("pkg-"+token, TemplateContext{Version: v})
 		if err == nil {
 			t.Errorf("RenderTemplate(%s) = %q, want a diagnostic rather than an empty render",
