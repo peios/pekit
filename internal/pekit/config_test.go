@@ -60,6 +60,29 @@ func TestLoadRecipeRejectsCamelCaseOutDir(t *testing.T) {
 	}
 }
 
+func TestLoadRecipeRejectsOutDirOutsideRecipe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pekit.toml")
+	for _, out := range []string{"", ".", "..", filepath.Dir(dir)} {
+		writeFile(t, path, "out_dir = \""+out+"\"\n")
+		_, err := LoadRecipe(path)
+		if err == nil || diagCode(err) != "invalid_path" {
+			t.Fatalf("out_dir %q: expected invalid_path, got %v", out, err)
+		}
+	}
+}
+
+func TestLoadRecipeAllowsOutDirBelowRecipe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pekit.toml")
+	for _, out := range []string{"out", "build/out", filepath.Join(dir, "absolute-out")} {
+		writeFile(t, path, "out_dir = \""+out+"\"\n")
+		if _, err := LoadRecipe(path); err != nil {
+			t.Fatalf("out_dir %q: unexpected error: %v", out, err)
+		}
+	}
+}
+
 func TestLoadRecipePyPISource(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

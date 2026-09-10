@@ -151,6 +151,9 @@ func topoBuildsForInvocation(inv Invocation, source SourceState, all map[string]
 }
 
 func cleanRecipe(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, member string) error {
+	if err := validateCleanOutputPath(recipe.Root, source.OutBase); err != nil {
+		return err
+	}
 	selectors := ctx.Inv.selectors()
 	runCleanTarget := !ctx.Inv.OutputOnly
 	removeOutput := !ctx.Inv.TargetOnly
@@ -185,6 +188,42 @@ func cleanRecipe(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, 
 			return wrapDiag("clean_output", source.OutBase, err)
 		}
 		ctx.Renderer.Event(Event{Type: "clean", Member: member, Path: source.OutBase, Message: "removed managed output"})
+	}
+	return nil
+}
+
+// validateCleanOutputPath prevents an apparently nested out_dir from escaping
+// through a symlink in one of its parent components. The final path may itself
+// be a symlink: RemoveAll then unlinks it without following it, which supports
+// release worktrees that point `out` at shared staging.
+func validateCleanOutputPath(recipeRoot, out string) error {
+	root, err := filepath.Abs(recipeRoot)
+	if err != nil {
+		return wrapDiag("invalid_path", "resolve recipe root", err)
+	}
+	out, err = filepath.Abs(out)
+	if err != nil {
+		return wrapDiag("invalid_path", "resolve out_dir", err)
+	}
+	rel, err := filepath.Rel(root, out)
+	if err != nil {
+		return wrapDiag("invalid_path", "compare out_dir with recipe root", err)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	current := root
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return wrapDiag("clean_output", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return diagAt("invalid_path", out,
+				"refusing to clean out_dir through symlinked parent %s", current)
+		}
 	}
 	return nil
 }

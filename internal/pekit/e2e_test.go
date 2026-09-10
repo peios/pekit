@@ -917,6 +917,58 @@ command = "printf cleaned > cleaned.txt"
 	}
 }
 
+func TestCleanRemovesOutDirSymlinkWithoutFollowing(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "recipe")
+	outside := filepath.Join(base, "shared-output")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	writeFile(t, filepath.Join(outside, "keep"), "preserved")
+	if err := os.Symlink(outside, filepath.Join(dir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"clean"}); err != nil {
+		t.Fatalf("clean failed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "out")); !os.IsNotExist(err) {
+		t.Fatalf("managed output symlink remains: %v", err)
+	}
+	if !fileExists(filepath.Join(outside, "keep")) {
+		t.Fatal("clean followed the output symlink")
+	}
+}
+
+func TestCleanRejectsSymlinkedOutDirParent(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "recipe")
+	outside := filepath.Join(base, "shared-output")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "linked/out"`)
+	writeFile(t, filepath.Join(outside, "out", "keep"), "preserved")
+	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run([]string{"clean"})
+	if err == nil || diagCode(err) != "invalid_path" {
+		t.Fatalf("expected invalid_path, got %v", err)
+	}
+	if !fileExists(filepath.Join(outside, "out", "keep")) {
+		t.Fatal("clean followed a symlinked output parent")
+	}
+}
+
 func TestSourcelessRecipeAllowsUnusedLocalFlag(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

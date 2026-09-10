@@ -384,6 +384,9 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 			return RecipeConfig{}, err
 		}
 	}
+	if err := validateOutDir(path, root, cfg.OutDir); err != nil {
+		return RecipeConfig{}, err
+	}
 	if v, ok := raw["env"]; ok {
 		cfg.Env, err = parseEnvVars(path, "env", v, md)
 		if err != nil {
@@ -426,6 +429,39 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 		cfg.Targets[cmd] = targets
 	}
 	return cfg, nil
+}
+
+// validateOutDir keeps Pekit's recursively deleted managed state strictly
+// below the recipe root. Besides making recipes portable, this prevents a
+// typo such as out_dir = ".", "..", or "/" from turning `pekit clean` into
+// deletion of source, a workspace, or a filesystem root. A symlink at the
+// resulting child path remains valid: os.RemoveAll removes the link itself,
+// not the tree to which it points.
+func validateOutDir(recipePath, recipeRoot, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return diagAt("invalid_path", recipePath, "out_dir must name a directory below the recipe root")
+	}
+	root, err := filepath.Abs(recipeRoot)
+	if err != nil {
+		return wrapDiag("invalid_path", "resolve recipe root", err)
+	}
+	out := value
+	if !filepath.IsAbs(out) {
+		out = filepath.Join(root, out)
+	}
+	out, err = filepath.Abs(out)
+	if err != nil {
+		return wrapDiag("invalid_path", "resolve out_dir", err)
+	}
+	rel, err := filepath.Rel(root, out)
+	if err != nil {
+		return wrapDiag("invalid_path", "compare out_dir with recipe root", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return diagAt("invalid_path", recipePath,
+			"out_dir must resolve below the recipe root, got %q", value)
+	}
+	return nil
 }
 
 func LoadWorkspace(path string) (WorkspaceConfig, error) {

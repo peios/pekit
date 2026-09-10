@@ -508,6 +508,12 @@ pekit clean --output-only
 - Remove only Pekit's managed output directory.
 - Do not run clean targets.
 
+The managed output directory must resolve strictly below the recipe root.
+Recipe-root, ancestor, and external paths are rejected while loading the
+recipe, before any clean target or recursive removal can run. A symlink at a
+valid child path is removed as a link rather than followed; a symlink in a
+parent component of a nested output path is rejected.
+
 ```text
 pekit clean --target-only <target>
 ```
