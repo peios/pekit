@@ -551,6 +551,8 @@ This is the first-pass v2 command contract.
 | `verify` | gen targets | no | no | no | yes | runs gen verify_commands (read-only drift check) |
 | `lint` | the recipe and every package it defines | optional; selects an existing build stage for payload rules | yes | reads stages, never builds | env/keyring only | checks lint.pekit.toml rules; writes nothing |
 | `workspace` | workspace members plus a delegated command | delegated | delegated | delegated | delegated | delegates normal operations per member |
+| `help` | a command name, optionally | no | no | no | no | prints the overview or one command's help (also `--help` / `-h`) |
+| `version` | nothing | no | no | no | no | prints the pekit version from build info |
 
 Version behavior:
 

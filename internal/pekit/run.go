@@ -32,9 +32,24 @@ func (a *App) Run(args []string) error {
 	if err != nil {
 		return wrapDiag("cwd", "get current directory", err)
 	}
+	if len(args) == 0 {
+		// A bare `pekit` is a request for orientation, not a run: show the
+		// overview, but on stderr and with a failing status, since nothing
+		// was done.
+		fmt.Fprint(a.Stderr, usageText(""))
+		return renderedError{err: diag("missing_command", "missing command")}
+	}
 	inv, err := ParseInvocation(args, cwd)
 	if err != nil {
 		return err
+	}
+	if inv.Help {
+		fmt.Fprint(a.Stdout, usageText(inv.HelpTopic))
+		return nil
+	}
+	if inv.Command == CommandVersion {
+		fmt.Fprintln(a.Stdout, versionString())
+		return nil
 	}
 	if a.Now == nil {
 		a.Now = time.Now

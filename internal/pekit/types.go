@@ -23,6 +23,8 @@ const (
 	CommandLock      Command = "lock"
 	CommandLint      Command = "lint"
 	CommandWorkspace Command = "workspace"
+	CommandHelp      Command = "help"
+	CommandVersion   Command = "version"
 )
 
 var commands = map[string]Command{
@@ -37,6 +39,8 @@ var commands = map[string]Command{
 	"lock":      CommandLock,
 	"lint":      CommandLint,
 	"workspace": CommandWorkspace,
+	"help":      CommandHelp,
+	"version":   CommandVersion,
 }
 
 type Invocation struct {
@@ -46,6 +50,13 @@ type Invocation struct {
 	Command         Command
 	WorkspaceMode   bool
 	DelegateCommand Command
+
+	// Help is set by --help, -h or the help command. HelpTopic is the
+	// command whose help was asked for, "" for the overview. A help
+	// invocation is never validated: asking how to use a flag must not
+	// fail because the flag was used wrongly.
+	Help      bool
+	HelpTopic string
 
 	RecipeFlag      string
 	WorkspaceFlag   string

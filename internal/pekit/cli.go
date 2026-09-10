@@ -65,6 +65,10 @@ var commandFlags = map[Command]map[flagUse]bool{
 	CommandLint: {
 		flagVersion: true, flagLocal: true, flagEnv: true, flagKeyring: true,
 	},
+	// help and version take no command flags; the global flags are accepted
+	// and ignored so `pekit --json version` is not an error.
+	CommandHelp:    {},
+	CommandVersion: {},
 }
 
 func ParseInvocation(args []string, cwd string) (Invocation, error) {
@@ -101,6 +105,13 @@ func ParseInvocation(args []string, cwd string) (Invocation, error) {
 				if err := parseWorkspaceTail(&inv, args[i:], &used); err != nil {
 					return Invocation{}, err
 				}
+				if inv.Help {
+					inv.HelpTopic = string(CommandWorkspace)
+					if inv.DelegateCommand != "" {
+						inv.HelpTopic = string(inv.DelegateCommand)
+					}
+					return inv, nil
+				}
 				return inv, validateInvocation(&inv, used)
 			}
 			continue
@@ -117,8 +128,23 @@ func ParseInvocation(args []string, cwd string) (Invocation, error) {
 		inv.Positionals = append(inv.Positionals, arg)
 		i++
 	}
+	if inv.Command == CommandHelp {
+		inv.Help = true
+		if len(inv.Positionals) > 0 {
+			topic := inv.Positionals[0]
+			if _, ok := commands[topic]; !ok {
+				return Invocation{}, diag("unknown_command", "unknown command %q; run `pekit help` for the list", topic)
+			}
+			inv.HelpTopic = topic
+		}
+		return inv, nil
+	}
+	if inv.Help {
+		inv.HelpTopic = string(inv.Command)
+		return inv, nil
+	}
 	if !commandSeen {
-		return Invocation{}, diag("missing_command", "missing command")
+		return Invocation{}, diag("missing_command", "missing command; run `pekit help` for the list")
 	}
 	return inv, validateInvocation(&inv, used)
 }
@@ -152,6 +178,9 @@ func parseWorkspaceTail(inv *Invocation, args []string, used *[]flagUse) error {
 			if handled, next, use, err := parseGlobalOrCommandFlag(inv, args, i); err != nil {
 				return err
 			} else if handled {
+				if inv.Help {
+					return nil
+				}
 				if use >= 0 {
 					return diag("missing_workspace_command", "workspace command flag %s must appear after the delegated command", flagUseName(use))
 				}
@@ -159,8 +188,8 @@ func parseWorkspaceTail(inv *Invocation, args []string, used *[]flagUse) error {
 				continue
 			}
 			cmd, ok := commands[arg]
-			if !ok || cmd == CommandWorkspace {
-				return diag("missing_workspace_command", "workspace requires a delegated command after workspace flags")
+			if !ok || cmd == CommandWorkspace || cmd == CommandHelp || cmd == CommandVersion {
+				return diag("missing_workspace_command", "workspace requires a delegated command after workspace flags (run `pekit help workspace`)")
 			}
 			inv.DelegateCommand = cmd
 			tail := append([]string{string(cmd)}, args[i+1:]...)
@@ -169,6 +198,7 @@ func parseWorkspaceTail(inv *Invocation, args []string, used *[]flagUse) error {
 				return err
 			}
 			copyDelegated(inv, sub)
+			inv.Help = sub.Help
 			*used = append(*used, delegatedUsedFlags(sub)...)
 			return nil
 		}
@@ -266,6 +296,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 	}
 	name, value, hasValue := strings.Cut(arg, "=")
 	switch name {
+	case "--help", "-h":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "%s does not take a value", name)
+		}
+		inv.Help = true
+		return true, i + 1, -1, nil
 	case "--recipe":
 		v, next, err := flagValue(args, i, value, hasValue, name)
 		if err != nil {
@@ -500,6 +536,10 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 	case CommandLint:
 		if len(selectors) > 0 {
 			return diag("invalid_selector", "lint does not accept selectors")
+		}
+	case CommandVersion:
+		if len(selectors) > 0 {
+			return diag("invalid_selector", "version does not accept selectors")
 		}
 		if inv.All && !inv.AllowUnused {
 			return diag("unsupported_flag", "lint does not support --all")
