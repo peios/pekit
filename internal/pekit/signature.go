@@ -27,6 +27,7 @@ import (
 // hard failure and nothing is pinned.
 
 const armoredKeyMarker = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+const armoredKeyEndMarker = "-----END PGP PUBLIC KEY BLOCK-----"
 const armoredSigMarker = "-----BEGIN PGP SIGNATURE-----"
 
 // verifySourceSignature fetches (or reuses the cached) detached signature for
@@ -245,7 +246,7 @@ func loadPinnedKeys(recipeRoot string, keyFiles []string) (openpgp.EntityList, e
 		}
 		var entities openpgp.EntityList
 		if bytes.Contains(data, []byte(armoredKeyMarker)) {
-			entities, err = openpgp.ReadArmoredKeyRing(bytes.NewReader(data))
+			entities, err = readArmoredKeyRingBlocks(data)
 		} else {
 			entities, err = openpgp.ReadKeyRing(bytes.NewReader(data))
 		}
@@ -256,6 +257,41 @@ func loadPinnedKeys(recipeRoot string, keyFiles []string) (openpgp.EntityList, e
 	}
 	if len(keyring) == 0 {
 		return nil, diag("signature_key_file", "no usable keys loaded from source.url.signature.key_files")
+	}
+	return keyring, nil
+}
+
+// readArmoredKeyRingBlocks reads every public-key block in a bundle.  OpenPGP's
+// ReadArmoredKeyRing reads one armor block, while authoritative upstream
+// bundles may concatenate independently armored current and retired release
+// keys (as OpenSSL does).  Splitting at complete armor boundaries avoids the
+// armor decoder's documented read-ahead while retaining comments between
+// blocks.
+func readArmoredKeyRingBlocks(data []byte) (openpgp.EntityList, error) {
+	begin := []byte(armoredKeyMarker)
+	end := []byte(armoredKeyEndMarker)
+	rest := data
+	var keyring openpgp.EntityList
+	for {
+		start := bytes.Index(rest, begin)
+		if start < 0 {
+			break
+		}
+		block := rest[start:]
+		finish := bytes.Index(block, end)
+		if finish < 0 {
+			return nil, fmt.Errorf("unterminated %s", armoredKeyMarker)
+		}
+		finish += len(end)
+		entities, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(block[:finish]))
+		if err != nil {
+			return nil, err
+		}
+		keyring = append(keyring, entities...)
+		rest = block[finish:]
+	}
+	if len(keyring) == 0 {
+		return nil, fmt.Errorf("no armored public keys found")
 	}
 	return keyring, nil
 }

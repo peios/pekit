@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
@@ -302,6 +303,40 @@ func publicKeyBytes(t *testing.T, entity *openpgp.Entity) []byte {
 	return buf.Bytes()
 }
 
+func armoredPublicKeyBytes(t *testing.T, entity *openpgp.Entity) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, openpgp.PublicKeyType, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := entity.Serialize(w); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestLoadPinnedKeysReadsConcatenatedArmoredBlocks(t *testing.T) {
+	dir := t.TempDir()
+	first := newTestSigner(t)
+	second := newTestSigner(t)
+	bundle := append(armoredPublicKeyBytes(t, first), armoredPublicKeyBytes(t, second)...)
+	writeFile(t, filepath.Join(dir, "upstream.asc"), string(bundle))
+	keyring, err := loadPinnedKeys(dir, []string{"upstream.asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keyring) != 2 {
+		t.Fatalf("loaded %d keys, want both armored blocks", len(keyring))
+	}
+	if got := keyring.KeysById(second.PrimaryKey.KeyId); len(got) != 1 {
+		t.Fatalf("second armored block yielded %d matching keys, want 1", len(got))
+	}
+}
+
 func detachSign(t *testing.T, entity *openpgp.Entity, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -365,7 +400,9 @@ func TestURLSignatureVerifiedAndPinned(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+	decoy := newTestSigner(t)
+	bundle := append(armoredPublicKeyBytes(t, decoy), armoredPublicKeyBytes(t, signer)...)
+	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), bundle, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	chdir(t, dir)
@@ -547,6 +584,84 @@ func TestHistoricalVerificationSelectsSelfSignatureValidAtSigningTime(t *testing
 	restore()
 	if identity.SelfSignature != current {
 		t.Fatal("expected current self-signature to be restored")
+	}
+}
+
+func TestHistoricalVerificationWithRenewalAfterMessageAndLaterExpiry(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Truncate(time.Second)
+	created := now.Add(-120 * time.Hour)
+	signer, err := openpgp.NewEntity("Renewed Upstream", "", "upstream@example.test", &packet.Config{
+		Algorithm:       packet.PubKeyAlgoEdDSA,
+		Time:            func() time.Time { return created },
+		KeyLifetimeSecs: uint32((48 * time.Hour) / time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identityName string
+	var identity *openpgp.Identity
+	for name, candidate := range signer.Identities {
+		identityName = name
+		identity = candidate
+		break
+	}
+	if err := signer.SignIdentity(identityName, signer, &packet.Config{
+		Time: func() time.Time { return created.Add(24 * time.Hour) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstRenewal := identity.Signatures[len(identity.Signatures)-1]
+	firstLifetime := uint32((96 * time.Hour) / time.Second)
+	firstRenewal.FlagsValid = true
+	firstRenewal.FlagCertify = true
+	firstRenewal.FlagSign = true
+	firstRenewal.KeyLifetimeSecs = &firstLifetime
+	if err := firstRenewal.SignUserId(identityName, signer.PrimaryKey, signer.PrivateKey, &packet.Config{
+		Time: func() time.Time { return created.Add(24 * time.Hour) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	identity.SelfSignature = firstRenewal
+
+	artifact := makeTarGz(t, "app-1.0", "payload")
+	signature := detachSignAt(t, signer, artifact, created.Add(72*time.Hour), 0)
+
+	if err := signer.SignIdentity(identityName, signer, &packet.Config{
+		Time: func() time.Time { return created.Add(84 * time.Hour) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondRenewal := identity.Signatures[len(identity.Signatures)-1]
+	secondLifetime := uint32((108 * time.Hour) / time.Second)
+	secondRenewal.FlagsValid = true
+	secondRenewal.FlagCertify = true
+	secondRenewal.FlagSign = true
+	secondRenewal.KeyLifetimeSecs = &secondLifetime
+	if err := secondRenewal.SignUserId(identityName, signer.PrimaryKey, signer.PrivateKey, &packet.Config{
+		Time: func() time.Time { return created.Add(84 * time.Hour) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	identity.SelfSignature = secondRenewal
+
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz":     artifact,
+		"https://example.test/app-1.0.tar.gz.sig": signature,
+	}
+	serveURLs(t, responses)
+	writeFile(t, filepath.Join(dir, "pekit.toml"), signedRecipe)
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "upstream.key"), publicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
+		t.Fatalf("historical signature failed: %v\nstderr=%s", err, stderr.String())
 	}
 }
 
