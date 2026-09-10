@@ -1,0 +1,43 @@
+package pekit
+
+import (
+	"encoding/binary"
+	"testing"
+)
+
+func TestELF64GNUPropertyNoteUsesFourByteNoteFraming(t *testing.T) {
+	bo := binary.LittleEndian
+	desc := make([]byte, 16)
+	bo.PutUint32(desc[0:4], gnuPropertyX86Feature1And)
+	bo.PutUint32(desc[4:8], 4)
+	bo.PutUint32(desc[8:12], x86Feature1IBT|x86Feature1SHSTK)
+
+	note := make([]byte, 12+4+len(desc))
+	bo.PutUint32(note[0:4], 4)
+	bo.PutUint32(note[4:8], uint32(len(desc)))
+	bo.PutUint32(note[8:12], ntGnuPropertyType)
+	copy(note[12:16], "GNU\x00")
+	copy(note[16:], desc)
+
+	seen := false
+	forEachNote(note, 4, bo, func(name string, typ uint32, got []byte) {
+		if name == "GNU" && typ == ntGnuPropertyType {
+			seen = propertyHasCET(got, 8, bo)
+		}
+	})
+	if !seen {
+		t.Fatal("ELF64 GNU property note did not report IBT+SHSTK")
+	}
+
+	// The old parser incorrectly used the eight-byte property-entry alignment
+	// for the outer note too, skipped four descriptor bytes, and missed CET.
+	oldSeen := false
+	forEachNote(note, 8, bo, func(name string, typ uint32, got []byte) {
+		if name == "GNU" && typ == ntGnuPropertyType {
+			oldSeen = propertyHasCET(got, 8, bo)
+		}
+	})
+	if oldSeen {
+		t.Fatal("regression fixture does not distinguish the old outer-note alignment")
+	}
+}

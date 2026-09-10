@@ -125,14 +125,17 @@ func analyzeELF(path string) (*elfInfo, error) {
 				})
 			}
 		case s.Name == ".note.gnu.property":
-			align := 4
+			propertyAlign := 4
 			if ef.Class == elf.ELFCLASS64 {
-				align = 8
+				propertyAlign = 8
 			}
 			if data, err := s.Data(); err == nil {
-				forEachNote(data, align, ef.ByteOrder, func(name string, typ uint32, desc []byte) {
+				// ELF note names and descriptors use four-byte framing even
+				// when the GNU property entries inside the descriptor use the
+				// ELF-class alignment (eight bytes for ELF64).
+				forEachNote(data, 4, ef.ByteOrder, func(name string, typ uint32, desc []byte) {
 					if name == "GNU" && typ == ntGnuPropertyType {
-						info.CET = info.CET || propertyHasCET(desc, align, ef.ByteOrder)
+						info.CET = info.CET || propertyHasCET(desc, propertyAlign, ef.ByteOrder)
 					}
 				})
 			}
@@ -181,8 +184,8 @@ func countRelativeRelocs(ef *elf.File, s *elf.Section) int {
 }
 
 // forEachNote walks an ELF note section. align is the padding unit for the
-// name and descriptor (4 for ordinary notes, 8 for .note.gnu.property in a
-// 64-bit object).
+// note name and descriptor. ELF notes use four-byte framing; any independent
+// alignment required by a descriptor's internal format belongs to its parser.
 func forEachNote(data []byte, align int, bo binary.ByteOrder, fn func(name string, typ uint32, desc []byte)) {
 	pad := func(n int) int { return (n + align - 1) &^ (align - 1) }
 	for len(data) >= 12 {
