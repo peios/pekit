@@ -810,6 +810,30 @@ command = "printf main > \"$PEKIT_OUT/ran\""
 	}
 }
 
+func TestNoBuildRefusesMissingStage(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build.main]
+command = "printf ran > \"$PEKIT_OUT/ran\""
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Run([]string{"build", "main", "--no-build"})
+	if diagCode(err) != "missing_stage" {
+		t.Fatalf("want missing_stage, got %v", err)
+	}
+	if fileExists(filepath.Join(dir, "out", "build", "main", "ran")) {
+		t.Fatal("target ran despite --no-build and missing stage")
+	}
+}
+
 func TestDirectBuildDependencyOutputExport(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `

@@ -122,7 +122,7 @@ func topoBuildsForInvocation(inv Invocation, source SourceState, all map[string]
 		if visiting[t.Name] {
 			return diag("target_cycle", "build dependency cycle: %s -> %s", strings.Join(stack, " -> "), t.Name)
 		}
-		if source.WorkBase != "" && shouldReuseBuild(inv, t, targetStage(source, CommandBuild, t.Name)) {
+		if source.WorkBase != "" && wantsReuseBuild(inv, t) {
 			visited[t.Name] = true
 			out = append(out, t)
 			return nil

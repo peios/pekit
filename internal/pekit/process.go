@@ -16,7 +16,10 @@ var execCommand = exec.Command
 
 func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, member string) error {
 	stage := targetStage(source, target.Kind, target.Name)
-	if shouldReuseBuild(ctx.Inv, target, stage) {
+	if wantsReuseBuild(ctx.Inv, target) {
+		if !dirExists(stage) {
+			return diag("missing_stage", "--no-build requested reuse of build target %q, but %s does not exist", target.Name, stage)
+		}
 		status, recorded := readStageStatus(source, target.Kind, target.Name)
 		switch {
 		case recorded && status != stageStatusOK:
@@ -86,8 +89,8 @@ func targetStage(source SourceState, kind Command, name string) string {
 	return filepath.Join(source.WorkBase, dir, name)
 }
 
-func shouldReuseBuild(inv Invocation, target TargetConfig, stage string) bool {
-	if target.Kind != CommandBuild || inv.NoBuild == nil || !dirExists(stage) {
+func wantsReuseBuild(inv Invocation, target TargetConfig) bool {
+	if target.Kind != CommandBuild || inv.NoBuild == nil {
 		return false
 	}
 	if *inv.NoBuild == "" {
