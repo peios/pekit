@@ -419,6 +419,12 @@ func shebangLine(src string) (string, bool) {
 	if !bytes.HasPrefix(buf, []byte("#!")) {
 		return "", false
 	}
+	// Rust inner attributes use the same two-byte prefix as a Unix shebang
+	// (for example, #![no_std]) but do not name an interpreter. Treating them
+	// as scripts produces false findings for debugsource packages.
+	if len(buf) >= 3 && buf[2] == '[' {
+		return "", false
+	}
 	line := buf[2:]
 	if i := bytes.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]

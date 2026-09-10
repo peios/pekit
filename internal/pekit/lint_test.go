@@ -28,6 +28,21 @@ func lintEvents(t *testing.T, dir string, args ...string) (map[string][]Event, e
 	return byType, err
 }
 
+func TestShebangLineIgnoresRustInnerAttribute(t *testing.T) {
+	dir := t.TempDir()
+	rustSource := filepath.Join(dir, "lib.rs")
+	writeFile(t, rustSource, "#![no_std]\n")
+	if line, ok := shebangLine(rustSource); ok {
+		t.Fatalf("Rust inner attribute recognized as shebang: %q", line)
+	}
+
+	script := filepath.Join(dir, "script")
+	writeFile(t, script, "#!/bin/sh\n")
+	if line, ok := shebangLine(script); !ok || line != "/bin/sh" {
+		t.Fatalf("valid shebang = %q, %v; want /bin/sh, true", line, ok)
+	}
+}
+
 func lintRules(events []Event) map[string]int {
 	out := map[string]int{}
 	for _, e := range events {
