@@ -52,6 +52,94 @@ format = "tar"
 	assertTarHas(t, artifacts[0], "usr/bin/hello")
 }
 
+func TestPackageRunsReleaseGateBeforeWritingArtifact(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[build.validation-input]
+command = "printf ready > \"$PEKIT_OUT/ready\""
+
+[test.release]
+needs = ["validation-input"]
+gate = true
+command = "test -f \"$PEKIT_VALIDATION_INPUT_OUT/ready\" && printf passed > \"$PEKIT_OUT/passed\""
+`)
+	writeFile(t, filepath.Join(dir, "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload.txt"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	if !fileExists(filepath.Join(dir, "out", "test", "release", "passed")) {
+		t.Fatal("release gate did not run")
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("expected one artifact after gate, got %v (err=%v)", artifacts, err)
+	}
+}
+
+func TestPackageGateFailureCanBeExplicitlyBypassed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+out_dir = "out"
+
+[test.release]
+gate = true
+command = "exit 23"
+`)
+	writeFile(t, filepath.Join(dir, "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload.txt"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"package"}); err == nil {
+		t.Fatal("package unexpectedly passed a failing release gate")
+	}
+	artifacts, err := filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("gate failure wrote artifacts: %v", artifacts)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run([]string{"package", "--no-gates"}); err != nil {
+		t.Fatalf("package --no-gates failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	artifacts, err = filepath.Glob(filepath.Join(dir, "out", "package", "*", "main.tar"))
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("expected one bypassed artifact, got %v (err=%v)", artifacts, err)
+	}
+	if !strings.Contains(stderr.String(), "skipping release gates: release") &&
+		!strings.Contains(stdout.String(), "skipping release gates: release") {
+		t.Fatal("--no-gates did not report the skipped release gate")
+	}
+}
+
 // A directory source that stages an empty directory must pack as an
 // explicit empty-directory payload entry rather than vanishing. This is
 // the fsbase skeleton case (runtime mountpoint dirs, no files); without it
@@ -911,6 +999,31 @@ command = "printf cleaned > cleaned.txt"
 	}
 	if !fileExists(filepath.Join(dir, "cleaned.txt")) {
 		t.Fatal("clean target did not run")
+	}
+	if dirExists(filepath.Join(dir, "out")) {
+		t.Fatal("managed output was not removed")
+	}
+}
+
+func TestCleanRemovesReadOnlyGeneratedDirectories(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	cache := filepath.Join(dir, "out", "build", "vendor", "modcache", "toolchain")
+	writeFile(t, filepath.Join(cache, "PATENTS"), "generated")
+	if err := os.Chmod(cache, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cache, 0o700) })
+
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"clean"}); err != nil {
+		t.Fatalf("clean failed: %v", err)
 	}
 	if dirExists(filepath.Join(dir, "out")) {
 		t.Fatal("managed output was not removed")

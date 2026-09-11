@@ -58,8 +58,9 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	if cmd == CommandLock {
 		return runLockCmd(ctx, recipe, member)
 	}
-	// lint reads the tree and, given a version, an existing build stage. It
-	// never runs a target, so it skips the gen drift gates too.
+	// lint reads the effective tree (resolving delegated recipe files) and,
+	// given an explicit version, an existing build stage. It never runs a
+	// target, so it skips the gen drift gates too.
 	if cmd == CommandLint {
 		return runLint(ctx, recipe, workspace, member)
 	}

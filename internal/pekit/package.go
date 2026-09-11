@@ -75,6 +75,34 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	if err != nil {
 		return err
 	}
+	gates := releaseGates(recipe)
+	if ctx.Inv.NoGates && len(gates) > 0 {
+		names := make([]string, 0, len(gates))
+		for _, gate := range gates {
+			names = append(names, gate.Name)
+		}
+		ctx.Renderer.Event(Event{Type: "warning", Member: member, Version: version.Raw, Message: "skipping release gates: " + strings.Join(names, ", ")})
+		gates = nil
+	}
+	// A release gate may cover a build that the selected package does not
+	// otherwise consume. Recipe-wide gates are part of the release contract, so
+	// stage the union once and make every needed output available to the test.
+	buildSet := make(map[string]bool, len(buildNames))
+	for _, name := range buildNames {
+		buildSet[name] = true
+	}
+	for _, gate := range gates {
+		for _, name := range gate.Needs {
+			if err := validateSelector("target", name); err != nil {
+				return err
+			}
+			if _, ok := recipe.Targets[CommandBuild][name]; !ok {
+				return diag("missing_target", "test.%s needs missing build target %q", gate.Name, name)
+			}
+			buildSet[name] = true
+		}
+	}
+	buildNames = sortedKeys(buildSet)
 	buildTargets := make([]TargetConfig, 0, len(buildNames))
 	for _, name := range buildNames {
 		t, ok := recipe.Targets[CommandBuild][name]
@@ -89,6 +117,11 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	}
 	for _, target := range buildOrder {
 		if err := runTarget(ctx, recipe, workspace, source, version, target, member); err != nil {
+			return err
+		}
+	}
+	for _, gate := range gates {
+		if err := runTarget(ctx, recipe, workspace, source, version, gate, member); err != nil {
 			return err
 		}
 	}
@@ -192,6 +225,17 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 		}
 	}
 	return nil
+}
+
+func releaseGates(recipe RecipeConfig) []TargetConfig {
+	tests := recipe.Targets[CommandTest]
+	out := make([]TargetConfig, 0, len(tests))
+	for _, name := range sortedKeys(tests) {
+		if tests[name].Gate {
+			out = append(out, tests[name])
+		}
+	}
+	return out
 }
 
 func reservePublishDestinations(ctx *Context, ops publishPlan, member string) error {

@@ -184,7 +184,10 @@ func cleanRecipe(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, 
 			ctx.Renderer.Event(Event{Type: "clean_plan", Member: member, Path: source.OutBase, Message: "would remove managed output"})
 			return nil
 		}
-		if err := os.RemoveAll(source.OutBase); err != nil {
+		// Build tools commonly leave generated caches read-only (notably the
+		// Go module/toolchain cache). removeStage retries after making only the
+		// managed tree's directories writable and never follows symlinks.
+		if err := removeStage(source.OutBase); err != nil {
 			return wrapDiag("clean_output", source.OutBase, err)
 		}
 		ctx.Renderer.Event(Event{Type: "clean", Member: member, Path: source.OutBase, Message: "removed managed output"})

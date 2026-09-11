@@ -6,12 +6,13 @@ import (
 	"strings"
 )
 
-// lint is pekit's rule checker. `pekit lint` reads the committed tree —
-// recipe, package files, lock, patches — against the rules the recipe's
-// lint.pekit.toml chain enables, and reports every finding in one pass. With
-// a version selected it also resolves the source the way `package` does and
-// checks the payload each package would pack from an existing build stage:
-// it never runs a build, so the stage must already be there.
+// lint is pekit's rule checker. `pekit lint` reads the recipe, package files,
+// lock and patches against the rules the recipe's lint.pekit.toml chain
+// enables, and reports every finding in one pass. A delegated recipe also
+// materialises one source snapshot and statically checks the effective merged
+// recipe. With an explicit version/source selector lint additionally checks
+// the payload each package would pack from an existing build stage. It never
+// runs a build.
 //
 // Findings are errors: a rule is either on, or exempted in [allow] with a
 // reason. There is no warning level — a warning is a finding nobody has to
@@ -106,31 +107,34 @@ func runLint(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, memb
 	if err != nil {
 		return err
 	}
-	if len(cfg.Files) == 0 {
-		return diag("missing_lint_config", "no %s found for %s: pekit enables no rules by default, so there is nothing to lint", lintFileName, recipe.Root)
-	}
-	if ctx.Inv.Verbose {
-		ctx.Renderer.Event(Event{Type: "lint_config", Member: member, Message: "lint files: " + strings.Join(cfg.Files, ", ") + "; rules: " + strings.Join(cfg.EnabledRules(), ", ")})
-	}
 	l := newLinter(ctx, cfg, member)
-	if err := lintStatic(l, recipe, workspace); err != nil {
-		return err
-	}
-
-	withVersion := ctx.Inv.Version != "" || ctx.Inv.Latest || ctx.Inv.AllVersions || ctx.Inv.Local != nil || ctx.Inv.PreferLocal != nil
-	if !withVersion {
+	explicitSource := lintHasExplicitSourceSelection(ctx.Inv)
+	resolveDelegate := recipe.Delegate.Any() && recipe.Source.HasExternal()
+	if !explicitSource && !resolveDelegate {
+		if len(cfg.Files) == 0 {
+			return missingLintConfig(recipe.Root)
+		}
+		emitLintConfig(ctx, member, cfg)
+		if err := lintStatic(l, recipe, workspace, cleanSourceState(recipe)); err != nil {
+			return err
+		}
 		if payload := cfg.enabledPayloadRules(); len(payload) > 0 {
 			ctx.Renderer.Event(Event{Type: "lint_skipped", Member: member,
 				Message: fmt.Sprintf("%d payload rule(s) need a staged build: pass --version (or --latest/--local) to check an existing stage", len(payload))})
 		}
 		return l.finish()
 	}
-	versions, err := resolveRecipeVersions(ctx, recipe)
+
+	resolveCtx := ctx
+	if resolveDelegate && !explicitSource {
+		resolveCtx = delegatedLintContext(ctx, recipe.Source)
+	}
+	versions, err := resolveRecipeVersions(resolveCtx, recipe)
 	if err != nil {
 		return err
 	}
 	for _, version := range versions {
-		source, err := ResolveSource(ctx, recipe, version)
+		source, err := ResolveSource(resolveCtx, recipe, version)
 		if err != nil {
 			return err
 		}
@@ -147,11 +151,81 @@ func runLint(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, memb
 			}
 			l.cfg = reloaded
 		}
-		if err := lintPayload(l, effective, workspace, source, version); err != nil {
+		if len(l.cfg.Files) == 0 {
+			return missingLintConfig(recipe.Root)
+		}
+		emitLintConfig(ctx, member, l.cfg)
+		if err := lintStatic(l, effective, workspace, source); err != nil {
 			return err
+		}
+		if explicitSource {
+			if err := lintPayload(l, effective, workspace, source, version); err != nil {
+				return err
+			}
+		}
+	}
+	if !explicitSource {
+		if payload := l.cfg.enabledPayloadRules(); len(payload) > 0 {
+			ctx.Renderer.Event(Event{Type: "lint_skipped", Member: member,
+				Message: fmt.Sprintf("%d payload rule(s) need a staged build: pass --version (or --latest/--local) to check an existing stage", len(payload))})
 		}
 	}
 	return l.finish()
+}
+
+func missingLintConfig(recipeRoot string) error {
+	return diag("missing_lint_config", "no %s found for %s: pekit enables no rules by default, so there is nothing to lint", lintFileName, recipeRoot)
+}
+
+func emitLintConfig(ctx *Context, member string, cfg LintConfig) {
+	if ctx.Inv.Verbose {
+		ctx.Renderer.Event(Event{Type: "lint_config", Member: member, Message: "lint files: " + strings.Join(cfg.Files, ", ") + "; rules: " + strings.Join(cfg.EnabledRules(), ", ")})
+	}
+}
+
+func lintHasExplicitSourceSelection(inv Invocation) bool {
+	return inv.Version != "" || inv.Latest || inv.AllVersions || inv.Local != nil || inv.PreferLocal != nil
+}
+
+// delegatedLintContext chooses one source snapshot for a plain lint. A local-
+// only delegate uses its configured local tree. Reproducible sources whose
+// materialisation needs a version select their newest available version;
+// fixed refs/URLs can be acquired without inventing a version selector.
+func delegatedLintContext(ctx *Context, source SourceConfig) *Context {
+	localCtx := *ctx
+	localCtx.Inv = ctx.Inv
+	if !source.HasReproducible() {
+		local := ""
+		localCtx.Inv.Local = &local
+		return &localCtx
+	}
+	needsVersion := source.PyPI.Project != "" || source.Git.TrackedPath != "" ||
+		hasVersionTemplate(
+			source.Git.Ref,
+			source.URL.URL,
+			source.URL.Root,
+			source.URL.Signature.URL,
+			source.URL.PatchSeries.URL,
+			source.URL.PatchSeries.Signature.URL,
+		)
+	if needsVersion {
+		localCtx.Inv.Latest = true
+	}
+	return &localCtx
+}
+
+func hasVersionTemplate(values ...string) bool {
+	for _, value := range values {
+		for _, name := range []string{
+			"version", "major", "minor", "patch", "revision",
+			"revision_suffix", "suffix", "prerelease", "buildmeta",
+		} {
+			if strings.Contains(value, "{{"+name+"}}") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // enabledPayloadRules lists the enabled rules that need a staged payload.

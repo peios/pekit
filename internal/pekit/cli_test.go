@@ -98,6 +98,25 @@ func TestParseNoVerifyForms(t *testing.T) {
 	}
 }
 
+func TestParseNoGates(t *testing.T) {
+	for _, command := range []string{"package", "publish"} {
+		inv, err := ParseInvocation([]string{command, "--no-gates"}, "/tmp")
+		if err != nil || !inv.NoGates {
+			t.Fatalf("%s --no-gates: inv.NoGates=%v err=%v", command, inv.NoGates, err)
+		}
+	}
+	inv, err := ParseInvocation([]string{"workspace", "package", "--no-gates"}, "/tmp")
+	if err != nil || !inv.NoGates {
+		t.Fatalf("workspace package --no-gates: inv.NoGates=%v err=%v", inv.NoGates, err)
+	}
+	if _, err := ParseInvocation([]string{"build", "--no-gates"}, "/tmp"); err == nil {
+		t.Fatal("build unexpectedly accepted --no-gates")
+	}
+	if _, err := ParseInvocation([]string{"package", "--no-gates=yes"}, "/tmp"); err == nil {
+		t.Fatal("--no-gates unexpectedly accepted a value")
+	}
+}
+
 func TestParseGenVerifyCommands(t *testing.T) {
 	inv, err := ParseInvocation([]string{"gen", "uapi"}, "/tmp")
 	if err != nil || inv.Command != CommandGen || len(inv.Positionals) != 1 || inv.Positionals[0] != "uapi" {

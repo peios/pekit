@@ -55,6 +55,8 @@ var lintKeys = []lintKeySpec{
 	{ID: "package.homepage", Kind: lintBoolOrString, Enum: []string{"https"}},
 	{ID: "package.description", Kind: lintBoolOrInt},
 	{ID: "package.dependencies", Kind: lintString, Enum: []string{"consistent"}},
+	{ID: "package.references", Kind: lintString, Enum: []string{"reverse-dns"}},
+	{ID: "package.virtual_capabilities", Kind: lintStrings, Param: true},
 	{ID: "package.architecture", Kind: lintString, Enum: []string{"consistent"}, Payload: true},
 	{ID: "package.noarch", Kind: lintTemplate, Param: true},
 	// [source]

@@ -31,6 +31,9 @@ type TargetConfig struct {
 	Needs        []string
 	Dependencies map[string]map[string]string
 	ClearOut     bool
+	// Gate makes a test target a release gate: package and publish run it
+	// after staging its required builds and before writing any artifact.
+	Gate bool
 	// Sign holds the target's post-run signing tables, keyed by kind
 	// (`sign.<kind>`), each mapping an output-relative path or glob to
 	// the keyring leaf that names its private key. Build targets only.
@@ -91,6 +94,9 @@ func (d DelegateConfig) AllowsBuild() bool    { return d.All || d.Build }
 func (d DelegateConfig) AllowsEnv() bool      { return d.All || d.Env }
 func (d DelegateConfig) AllowsWrap() bool     { return d.All || d.Wrap }
 func (d DelegateConfig) AllowsPackages() bool { return d.All || d.Packages }
+func (d DelegateConfig) Any() bool {
+	return d.All || d.Build || d.Env || d.Wrap || d.Packages
+}
 
 type SourceConfig struct {
 	Git   GitSourceConfig
@@ -976,6 +982,8 @@ func targetConfigKey(kind Command, key string) bool {
 	switch key {
 	case "command", "needs", "clear_out":
 		return true
+	case "gate":
+		return kind == CommandTest
 	case "dependencies":
 		// A test stage runs in a composed root just as a build does, and
 		// under --env peipkg that root holds nothing the stage does not
@@ -996,6 +1004,9 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 	if kind == CommandBuild || kind == CommandTest {
 		known["dependencies"] = true
 	}
+	if kind == CommandTest {
+		known["gate"] = true
+	}
 	if kind == CommandBuild {
 		known["sign"] = true
 	}
@@ -1015,6 +1026,12 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 	t := TargetConfig{Name: name, Kind: kind, Command: cmd, ClearOut: true, Owner: "recipe", Path: path}
 	if v, ok := table["needs"]; ok {
 		t.Needs, err = expectStringSlice(path, string(kind)+"."+name+".needs", v)
+		if err != nil {
+			return TargetConfig{}, err
+		}
+	}
+	if v, ok := table["gate"]; ok {
+		t.Gate, err = expectBool(path, string(kind)+"."+name+".gate", v)
 		if err != nil {
 			return TargetConfig{}, err
 		}

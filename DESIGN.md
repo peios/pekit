@@ -550,12 +550,12 @@ This is the first-pass v2 command contract.
 | `build` | build targets | yes | yes | yes | yes | runs build targets |
 | `test` | test targets | yes, single resolved version | yes | yes, for needed builds | yes | stages needed builds, runs tests |
 | `install` | install targets | yes, single resolved version | yes | yes, for needed builds | yes | stages needed builds, runs installs |
-| `package` | packages | yes, multiple versions | yes | yes | yes | stages builds, writes package artifacts |
-| `publish` | packages | yes, multiple versions | yes | yes | yes | stages builds, writes packages, publishes artifacts |
+| `package` | packages | yes, multiple versions | yes | yes | yes | stages builds, runs release gates, writes package artifacts |
+| `publish` | packages | yes, multiple versions | yes | yes | yes | stages builds, runs release gates, writes packages, publishes artifacts |
 | `clean` | clean target and/or managed output | no | no | no | only when a clean target runs | runs clean target and/or removes managed output |
 | `gen` | gen targets | no | no | no | yes | runs gen commands (writes generated source in-tree) |
 | `verify` | gen targets | no | no | no | yes | runs gen verify_commands (read-only drift check) |
-| `lint` | the recipe and every package it defines | optional; selects an existing build stage for payload rules | yes | reads stages, never builds | env/keyring only | checks lint.pekit.toml rules; writes nothing |
+| `lint` | the recipe and every package it defines | optional; selects an existing build stage for payload rules | yes | reads stages, never builds | env/keyring only | checks lint.pekit.toml rules; delegated recipes may populate the source cache/materialisation |
 | `workspace` | workspace members plus a delegated command | delegated | delegated | delegated | delegated | delegates normal operations per member |
 | `help` | a command name, optionally | no | no | no | no | prints the overview or one command's help (also `--help` / `-h`) |
 | `version` | nothing | no | no | no | no | prints the pekit version from build info |
@@ -651,6 +651,14 @@ Bare `pekit test` runs `test.main` if it exists. Explicit selectors run the
 selected test targets and their required build dependencies.
 
 If no `test.main` exists, bare `pekit test` errors and lists available targets.
+
+Test targets may set `gate = true`. Package and publish run every such target
+after staging the union of package-required builds and gate `needs`, and before
+writing any package artifact. Gates are recipe-wide, run once per resolved
+version, and are not run by `pekit build`. `--no-gates` skips them for rapid
+iteration and emits a warning naming the skipped gates; it is accepted only by
+package and publish. `--no-build` may reuse a gate's completed build inputs but
+does not itself skip the gate.
 
 Install:
 
@@ -2746,8 +2754,9 @@ Package staging:
 
 Package command:
 
-- `pekit package` builds required targets, resolves payload entries, prepares
-  package stages, and writes selected artifacts.
+- `pekit package` builds required targets, runs every `gate = true` test target,
+  resolves payload entries, prepares package stages, and writes selected
+  artifacts. A failed gate writes no artifact in that invocation.
 - It does not publish artifacts.
 - Artifact paths are reported in normal output and as artifact events in JSON.
 
@@ -3294,6 +3303,7 @@ libssl-dev = "*"
 
 [test.unit]
 needs = ["main"]
+gate = true
 command = "cargo test"
 
 [install.cli]

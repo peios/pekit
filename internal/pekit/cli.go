@@ -13,6 +13,7 @@ const (
 	flagLocal
 	flagNoBuild
 	flagNoVerify
+	flagNoGates
 	flagEnv
 	flagKeyring
 	flagRefreshSource
@@ -34,10 +35,10 @@ var commandFlags = map[Command]map[flagUse]bool{
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
 	},
 	CommandPackage: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
 	},
 	CommandPublish: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true,
 	},
 	CommandClean: {
 		flagEnv: true, flagKeyring: true, flagCleanMode: true,
@@ -57,11 +58,10 @@ var commandFlags = map[Command]map[flagUse]bool{
 	CommandLock: {
 		flagVersion: true, flagRefreshSource: true, flagRepin: true,
 	},
-	// lint checks the recipe tree against the rules its lint.pekit.toml
-	// enables. Without a version flag it reads only committed files; with one
-	// it also resolves the source and checks the staged payload of an
-	// existing build, so it takes version selection and the local-source
-	// flags but never builds.
+	// lint checks the effective recipe tree against the rules its
+	// lint.pekit.toml enables. It resolves delegated recipe files even without
+	// a version flag; an explicit source/version selection additionally checks
+	// the staged payload of an existing build. It never builds.
 	CommandLint: {
 		flagVersion: true, flagLocal: true, flagEnv: true, flagKeyring: true,
 	},
@@ -218,6 +218,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.PreferLocal = sub.PreferLocal
 	inv.NoBuild = sub.NoBuild
 	inv.NoVerify = sub.NoVerify
+	inv.NoGates = sub.NoGates
 	inv.EnvName = sub.EnvName
 	inv.Keyrings = sub.Keyrings
 	inv.KeyringValues = sub.KeyringValues
@@ -256,6 +257,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.NoVerify != nil {
 		out = append(out, flagNoVerify)
+	}
+	if inv.NoGates {
+		out = append(out, flagNoGates)
 	}
 	if inv.EnvName != "" {
 		out = append(out, flagEnv)
@@ -393,6 +397,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.NoVerify = &v
 		return true, i + 1, flagNoVerify, nil
+	case "--no-gates":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--no-gates does not take a value")
+		}
+		inv.NoGates = true
+		return true, i + 1, flagNoGates, nil
 	case "--env":
 		v, next, err := flagValue(args, i, value, hasValue, name)
 		if err != nil {
@@ -577,6 +587,8 @@ func flagUseName(u flagUse) string {
 		return "--no-build"
 	case flagNoVerify:
 		return "--no-verify"
+	case flagNoGates:
+		return "--no-gates"
 	case flagEnv:
 		return "--env"
 	case flagKeyring:

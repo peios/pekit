@@ -84,6 +84,7 @@ type Invocation struct {
 
 	NoBuild            *string
 	NoVerify           *string
+	NoGates            bool
 	EnvName            string
 	Keyrings           []string
 	KeyringValues      map[string]string

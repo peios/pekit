@@ -465,6 +465,7 @@ command = "make"
 
 [test.smoke]
 command = "./smoke.sh"
+gate = true
 
 [test.smoke.dependencies.peipkg]
 dash = "*"
@@ -476,6 +477,9 @@ bash = "*"
 	}
 	if recipe.Targets[CommandTest]["smoke"].Dependencies["peipkg"]["dash"] != "*" {
 		t.Fatalf("test target dependencies not decoded: %#v", recipe.Targets[CommandTest]["smoke"])
+	}
+	if !recipe.Targets[CommandTest]["smoke"].Gate {
+		t.Fatalf("test target gate not decoded: %#v", recipe.Targets[CommandTest]["smoke"])
 	}
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `
 [build.main]
@@ -489,5 +493,13 @@ dash = "*"
 `)
 	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
 		t.Fatal("install target accepted dependencies")
+	}
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = "make"
+gate = true
+`)
+	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); err == nil {
+		t.Fatal("build target accepted test-only gate")
 	}
 }

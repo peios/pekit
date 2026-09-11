@@ -9,10 +9,9 @@ import (
 	"strings"
 )
 
-// The static rules read only committed files: the recipe, its package
-// files, pekit.lock and the patch series. Nothing here resolves a source or
-// touches the network, so `pekit lint` with no version flag is safe to run
-// anywhere, including a checkout with no build tools.
+// The static rules read recipe and package definitions, pekit.lock and the
+// patch series. runLint supplies a materialised source for delegated recipes,
+// so these checks cover the effective merged recipe without running targets.
 
 var (
 	reverseDNSNameRE  = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9][a-z0-9+-]*)+$`)
@@ -23,7 +22,7 @@ var (
 	fixedGitRefRE     = regexp.MustCompile(`^([0-9a-f]{40}|refs/tags/.+|v?[0-9].*)$`)
 )
 
-func lintStatic(l *linter, recipe RecipeConfig, workspace *WorkspaceConfig) error {
+func lintStatic(l *linter, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState) error {
 	if workspace != nil && l.on("package.name.style") {
 		base := filepath.Base(recipe.Root)
 		if !lintNameMatchesStyle(base, l.cfg.Str("package.name.style")) {
@@ -31,8 +30,9 @@ func lintStatic(l *linter, recipe RecipeConfig, workspace *WorkspaceConfig) erro
 		}
 	}
 	lintSourceRules(l, recipe)
-	lintBuildRules(l, recipe)
-	packages, err := loadEffectivePackages(recipe, workspace, cleanSourceState(recipe))
+	lintBuildRules(l, recipe, source)
+	lintTargetPackageReferences(l, recipe)
+	packages, err := loadEffectivePackages(recipe, workspace, source)
 	if err != nil {
 		// A recipe without package definitions has nothing for the package
 		// rules to check; a delegate's live in the source it has not
@@ -107,6 +107,59 @@ func lintPackageMeta(l *linter, pkg EffectivePackage) {
 	if l.on("package.dependencies") {
 		lintDependencyConsistency(l, name, path, meta)
 	}
+	if l.on("package.references") {
+		lintPackageReferences(l, name, path, meta)
+	}
+}
+
+func lintPackageReferences(l *linter, packageName, path string, meta PackageMeta) {
+	for section, refs := range map[string]map[string]string{
+		"dependencies":          meta.Dependencies,
+		"optional_dependencies": meta.OptionalDependencies,
+		"conflicts":             meta.Conflicts,
+		"provides":              meta.Provides,
+		"replaces":              meta.Replaces,
+	} {
+		for ref := range refs {
+			lintPackageReference(l, packageName, path, section, ref)
+		}
+	}
+}
+
+func lintTargetPackageReferences(l *linter, recipe RecipeConfig) {
+	if !l.on("package.references") {
+		return
+	}
+	for _, kind := range commandOrder {
+		for _, targetName := range sortedKeys(recipe.Targets[kind]) {
+			target := recipe.Targets[kind][targetName]
+			for ref := range target.Dependencies["peipkg"] {
+				lintPackageReference(l, "", target.Path, string(kind)+"."+targetName+".dependencies.peipkg", ref)
+			}
+			for ref := range target.VerifyDependencies["peipkg"] {
+				lintPackageReference(l, "", target.Path, string(kind)+"."+targetName+".verify_dependencies.peipkg", ref)
+			}
+		}
+	}
+}
+
+func lintPackageReference(l *linter, packageName, path, section, ref string) {
+	if lintNameMatchesStyle(ref, l.cfg.Str("package.references")) || lintVirtualCapability(l, ref) {
+		return
+	}
+	l.report("package.references", packageName, path, "%s reference %q is not a canonical reverse-DNS package name or an allowed virtual capability", section, ref)
+}
+
+func lintVirtualCapability(l *linter, name string) bool {
+	for _, allowed := range l.cfg.Strings("package.virtual_capabilities") {
+		if name == allowed {
+			return true
+		}
+	}
+	// Structured capability namespaces describe an interface rather than a
+	// concrete package identity. pkgconfig(foo), python(abi), and ELF SONAME
+	// capabilities are intentionally not reverse-DNS package names.
+	return strings.Contains(name, "(") || strings.Contains(name, ".so")
 }
 
 func lintDescription(l *linter, name, path, desc string) {
@@ -415,9 +468,10 @@ func patchHeaderFields(path string) (desc, origin bool, err error) {
 
 // --- build -----------------------------------------------------------------
 
-func lintBuildRules(l *linter, recipe RecipeConfig) {
+func lintBuildRules(l *linter, recipe RecipeConfig, source SourceState) {
 	builds := recipe.Targets[CommandBuild]
-	delegated := recipe.Delegate.AllowsBuild()
+	delegatedUnresolved := recipe.Delegate.AllowsBuild() &&
+		(source.SourceRoot == "" || source.SourceRoot == recipe.Root)
 	if l.on("build.dependencies.providers") && len(builds) > 0 {
 		providers := l.cfg.Strings("build.dependencies.providers")
 		for _, name := range sortedKeys(builds) {
@@ -429,7 +483,7 @@ func lintBuildRules(l *linter, recipe RecipeConfig) {
 			}
 		}
 	}
-	if l.on("build.test") && len(recipe.Targets[CommandTest]) == 0 && !delegated {
+	if l.on("build.test") && len(recipe.Targets[CommandTest]) == 0 && !delegatedUnresolved {
 		l.report("build.test", "", recipe.Path, "recipe defines no test target")
 	}
 }

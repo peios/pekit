@@ -126,6 +126,77 @@ func TestLintConfigLayering(t *testing.T) {
 	}
 }
 
+func TestPlainLintAcquiresAndChecksDelegatedRecipe(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "upstream")
+	writeFile(t, filepath.Join(repo, "pekit.toml"), `
+[build.main]
+command = "true"
+
+[build.main.dependencies.peipkg]
+legacy-builder = "*"
+`)
+	writeFile(t, filepath.Join(repo, "package.pekit.toml"), `
+format = "peipkg"
+
+[package]
+name = "org.example.delegated"
+version = "{{version}}-1"
+architecture = "noarch"
+description = "short"
+license = "MIT"
+license_class = "free"
+homepage = "https://example.org"
+
+[dependencies]
+legacy-runtime = "*"
+`)
+	writeFile(t, filepath.Join(repo, "lint.pekit.toml"), `
+[package]
+description = 4
+references = "reverse-dns"
+
+[build]
+test = true
+`)
+	runTestCmd(t, repo, "git", "init")
+	runTestCmd(t, repo, "git", "add", ".")
+	runTestCmd(t, repo, "git", "-c", "user.name=Pekit Tests", "-c", "user.email=pekit@example.invalid", "commit", "-m", "delegated recipe")
+	runTestCmd(t, repo, "git", "tag", "v1.0.0")
+
+	ws := filepath.Join(base, "workspace")
+	writeFile(t, filepath.Join(ws, "workspace.pekit.toml"), `include = ["./org.example.wrapper"]`)
+	member := filepath.Join(ws, "org.example.wrapper")
+	writeFile(t, filepath.Join(member, "pekit.toml"), `
+out_dir = "out"
+delegate = true
+
+[source.git]
+url = "`+repo+`"
+ref = "v{{version}}"
+tag_regex = '^v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)$'
+versions = ">= 1.0.0"
+`)
+
+	events, err := lintEvents(t, member, "lint")
+	if diagCode(err) != "lint_failed" {
+		t.Fatalf("want lint_failed from delegated static rules, got %v", err)
+	}
+	rules := lintRules(events["lint"])
+	if rules["package.references"] != 2 {
+		t.Fatalf("delegated package/build references = %d, want 2: %#v", rules["package.references"], events["lint"])
+	}
+	if rules["build.test"] != 1 {
+		t.Fatalf("delegated build.test findings = %d, want 1: %#v", rules["build.test"], events["lint"])
+	}
+	if rules["package.description"] != 1 {
+		t.Fatalf("delegated source lint config was not applied: %#v", events["lint"])
+	}
+	if len(events["lint_summary"]) != 1 {
+		t.Fatalf("plain delegated lint did not finish normally: %#v", events)
+	}
+}
+
 func TestSPDXExpressions(t *testing.T) {
 	good := []string{
 		"MIT",
@@ -164,6 +235,8 @@ license_class = true
 homepage      = "https"
 description   = 80
 dependencies  = "consistent"
+references    = "reverse-dns"
+virtual_capabilities = ["sh"]
 
 [source]
 reproducible          = true
@@ -229,7 +302,7 @@ thing = "1"
 	got := lintRules(events["lint"])
 	want := []string{
 		"package.name.style", "package.license", "package.license_class", "package.homepage",
-		"package.description", "package.dependencies",
+		"package.description", "package.dependencies", "package.references",
 		"source.versions.floor", "source.versions.ceiling", "source.url.scheme", "source.lock",
 		"source.signature.fingerprint", "source.signature.keys",
 		"build.dependencies.providers", "build.test",
@@ -270,6 +343,51 @@ command = "true"
 	}
 	if got["source.versions.floor"] != 0 || got["source.versions.ceiling"] != 0 || got["source.signature.required"] != 0 {
 		t.Errorf("url-only rules fired on a git source: %v", got)
+	}
+}
+
+func TestLintPackageReferencesRequireCanonicalNames(t *testing.T) {
+	ws := t.TempDir()
+	writeFile(t, filepath.Join(ws, "workspace.pekit.toml"), "include = [\"./*\"]\n")
+	writeFile(t, filepath.Join(ws, "lint.pekit.toml"), `
+[package]
+references = "reverse-dns"
+virtual_capabilities = ["sh"]
+`)
+	dir := filepath.Join(ws, "org.example.thing")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = "true"
+
+[build.main.dependencies.peipkg]
+"org.gnu.make" = "*"
+make = "*"
+sh = "*"
+`)
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "peipkg"
+
+[package]
+name = "org.example.thing"
+version = "1-1"
+
+[dependencies]
+"org.example.runtime" = "*"
+"pkgconfig(example)" = "*"
+"python(abi)" = "3.14"
+"libc.so.6()(64bit)" = "*"
+sh = "*"
+legacy-runtime = "*"
+
+[provides]
+legacy-thing = "1"
+`)
+	events, err := lintEvents(t, dir, "lint")
+	if diagCode(err) != "lint_failed" {
+		t.Fatalf("want lint_failed, got %v", err)
+	}
+	if got := lintRules(events["lint"])["package.references"]; got != 3 {
+		t.Fatalf("package.references findings = %d, want 3: %#v", got, events["lint"])
 	}
 }
 
@@ -324,7 +442,7 @@ license_class = "free"
 homepage = "https://example.org"
 
 [dependencies]
-libfoo = "*"
+"org.example.libfoo" = "*"
 `)
 	events, err := lintEvents(t, dir, "lint")
 	if err != nil {
