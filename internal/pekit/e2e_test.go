@@ -2555,6 +2555,61 @@ format = "tar"
 	}
 }
 
+func TestWorkspaceLatestRunsSourcelessMemberOnce(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "src")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runTestCmd(t, repo, "git", "init")
+	runTestCmd(t, repo, "git", "config", "user.email", "test@example.invalid")
+	runTestCmd(t, repo, "git", "config", "user.name", "Test")
+	writeFile(t, filepath.Join(repo, "payload.txt"), "payload")
+	runTestCmd(t, repo, "git", "add", ".")
+	runTestCmd(t, repo, "git", "commit", "-m", "initial")
+	runTestCmd(t, repo, "git", "tag", "v1.0.0")
+	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)
+	writeFile(t, filepath.Join(dir, "sourceless", "pekit.toml"), `out_dir = "out"`)
+	writeFile(t, filepath.Join(dir, "sourceless", "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "sourceless", "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload"
+`)
+	writeFile(t, filepath.Join(dir, "versioned", "pekit.toml"), `
+out_dir = "out"
+
+[source.git]
+url = "`+repo+`"
+ref = "v{{version}}"
+`)
+	writeFile(t, filepath.Join(dir, "versioned", "payload.txt"), "payload")
+	writeFile(t, filepath.Join(dir, "versioned", "package.pekit.toml"), `
+format = "tar"
+
+[files]
+"@recipe:payload.txt" = "usr/share/payload"
+`)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"workspace", "package", "--latest"}); err != nil {
+		t.Fatalf("workspace package failed: %v\nstderr=%s\nstdout=%s", err, stderr.String(), stdout.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "sourceless", "out", "package", "*", "*.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one sourceless package, got %v", matches)
+	}
+}
+
 func TestWorkspacePublishDestinationCollisionFails(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)

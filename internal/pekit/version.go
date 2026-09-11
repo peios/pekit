@@ -109,6 +109,14 @@ func resolveVersions(ctx *Context, source SourceConfig, recipe *RecipeConfig) ([
 		}
 		return []Version{v}, nil
 	}
+	// --latest/--all-versions select upstream source versions. A sourceless
+	// recipe has no upstream stream to enumerate; its package definition owns
+	// the complete version, so run it once with an empty template version.
+	// This makes heterogeneous workspaces behave naturally without requiring
+	// --allow-unused merely because they contain policy/metapackages.
+	if (inv.Latest || inv.AllVersions) && !source.HasReproducible() {
+		return []Version{{}}, nil
+	}
 	if inv.Latest || inv.AllVersions || looksLikeConstraint(inv.Version) {
 		versions, err := enumerateSourceVersions(ctx, source, recipe)
 		if err != nil {
