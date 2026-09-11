@@ -287,6 +287,14 @@ func extractGitTagVersion(tag string, tagFilter, refPattern *regexp.Regexp) (str
 }
 
 func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) (string, bool, error) {
+	return versionFromNamedCaptures("git_versions", "tag", tag, re, match)
+}
+
+func versionFromNamedURLCaptures(value string, re *regexp.Regexp, match []string) (string, bool, error) {
+	return versionFromNamedCaptures("url_versions", "listing match", value, re, match)
+}
+
+func versionFromNamedCaptures(diagCode, subjectName, subject string, re *regexp.Regexp, match []string) (string, bool, error) {
 	capture := func(name string) (string, bool) {
 		idx := re.SubexpIndex(name)
 		if idx < 0 {
@@ -296,10 +304,10 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 	}
 	if version, ok := capture("version"); ok {
 		if version == "" {
-			return "", true, diag("git_versions", "tag %q has an empty named version capture", tag)
+			return "", true, diag(diagCode, "%s %q has an empty named version capture", subjectName, subject)
 		}
 		if _, err := ParseVersion(version); err != nil {
-			return "", true, wrapDiag("git_versions", "tag "+tag+" named version capture", err)
+			return "", true, wrapDiag(diagCode, subjectName+" "+subject+" named version capture", err)
 		}
 		return version, true, nil
 	}
@@ -316,16 +324,16 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 		return "", false, nil
 	}
 	if !hasMajor || major == "" {
-		return "", true, diag("git_versions", "tag %q uses named version components but has no non-empty major capture", tag)
+		return "", true, diag(diagCode, "%s %q uses named version components but has no non-empty major capture", subjectName, subject)
 	}
 	if hasPatch && patch != "" && (!hasMinor || minor == "") {
-		return "", true, diag("git_versions", "tag %q has a patch capture without a minor capture", tag)
+		return "", true, diag(diagCode, "%s %q has a patch capture without a minor capture", subjectName, subject)
 	}
 	if hasRevision && revision != "" && (!hasPatch || patch == "") {
-		return "", true, diag("git_versions", "tag %q has a revision capture without a patch capture", tag)
+		return "", true, diag(diagCode, "%s %q has a revision capture without a patch capture", subjectName, subject)
 	}
 	if revision != "" && suffix != "" {
-		return "", true, diag("git_versions", "tag %q has both suffix and revision captures", tag)
+		return "", true, diag(diagCode, "%s %q has both suffix and revision captures", subjectName, subject)
 	}
 
 	version := major
@@ -348,7 +356,7 @@ func versionFromNamedTagCaptures(tag string, re *regexp.Regexp, match []string) 
 		version += "+" + buildmeta
 	}
 	if _, err := ParseVersion(version); err != nil {
-		return "", true, wrapDiag("git_versions", "tag "+tag+" named version components", err)
+		return "", true, wrapDiag(diagCode, subjectName+" "+subject+" named version components", err)
 	}
 	return version, true, nil
 }
@@ -419,8 +427,17 @@ func enumerateBaseURLVersions(cfg URLSourceConfig) ([]string, error) {
 		if err != nil {
 			return nil, wrapDiag("invalid_regex", "source.url.file_regex", err)
 		}
-		for _, match := range re.FindAllString(body, -1) {
-			if v := embeddedVersionRE.FindString(match); v != "" {
+		for _, match := range re.FindAllStringSubmatch(body, -1) {
+			value := match[0]
+			version, configured, err := versionFromNamedURLCaptures(value, re, match)
+			if err != nil {
+				return nil, err
+			}
+			if configured {
+				seen[version] = true
+				continue
+			}
+			if v := embeddedVersionRE.FindString(value); v != "" {
 				seen[v] = true
 			}
 		}
@@ -847,7 +864,103 @@ func compareVersionText(a, b string) int {
 	if cmp := strings.Compare(va.Suffix, vb.Suffix); cmp != 0 {
 		return cmp
 	}
-	return strings.Compare(va.Prerelease, vb.Prerelease)
+	return comparePrerelease(va.Prerelease, vb.Prerelease)
+}
+
+func comparePrerelease(a, b string) int {
+	// A final release follows every prerelease of the same numeric core.
+	if a == "" {
+		if b == "" {
+			return 0
+		}
+		return 1
+	}
+	if b == "" {
+		return -1
+	}
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	count := len(aParts)
+	if len(bParts) < count {
+		count = len(bParts)
+	}
+	for i := 0; i < count; i++ {
+		if cmp := comparePrereleaseIdentifier(aParts[i], bParts[i]); cmp != 0 {
+			return cmp
+		}
+	}
+	if len(aParts) < len(bParts) {
+		return -1
+	}
+	if len(aParts) > len(bParts) {
+		return 1
+	}
+	return 0
+}
+
+func comparePrereleaseIdentifier(a, b string) int {
+	aNumeric := isDecimal(a)
+	bNumeric := isDecimal(b)
+	if aNumeric && bNumeric {
+		return compareNumericComponent(a, b)
+	}
+	if aNumeric {
+		return -1
+	}
+	if bNumeric {
+		return 1
+	}
+	return compareNaturalText(a, b)
+}
+
+// compareNaturalText preserves lexical ordering for words while treating
+// embedded decimal runs numerically. Many upstreams publish rc1, rc2, ...
+// rather than SemVer's rc.1 spelling; package discovery must not select rc2
+// as newer than rc13.
+func compareNaturalText(a, b string) int {
+	for len(a) > 0 && len(b) > 0 {
+		aDigit := a[0] >= '0' && a[0] <= '9'
+		bDigit := b[0] >= '0' && b[0] <= '9'
+		if aDigit != bDigit {
+			return strings.Compare(a[:1], b[:1])
+		}
+		aEnd, bEnd := 1, 1
+		for aEnd < len(a) && (a[aEnd] >= '0' && a[aEnd] <= '9') == aDigit {
+			aEnd++
+		}
+		for bEnd < len(b) && (b[bEnd] >= '0' && b[bEnd] <= '9') == bDigit {
+			bEnd++
+		}
+		var cmp int
+		if aDigit {
+			cmp = compareNumericComponent(a[:aEnd], b[:bEnd])
+		} else {
+			cmp = strings.Compare(a[:aEnd], b[:bEnd])
+		}
+		if cmp != 0 {
+			return cmp
+		}
+		a, b = a[aEnd:], b[bEnd:]
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return 0
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func compareNumericComponent(a, b string) int {

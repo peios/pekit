@@ -85,6 +85,30 @@ func TestCompareVersionTextOrdersUnseparatedUpstreamSuffix(t *testing.T) {
 	}
 }
 
+func TestCompareVersionTextOrdersPrereleasesNaturally(t *testing.T) {
+	values := []string{
+		"0.20.1-alpha1",
+		"0.20.1-rc1",
+		"0.20.1-rc2",
+		"0.20.1-rc13",
+		"0.20.1",
+	}
+	for i := 1; i < len(values); i++ {
+		if got := compareVersionText(values[i-1], values[i]); got >= 0 {
+			t.Fatalf("compareVersionText(%q, %q) = %d, want < 0", values[i-1], values[i], got)
+		}
+	}
+}
+
+func TestCompareVersionTextOrdersDottedPrereleases(t *testing.T) {
+	values := []string{"1.2.3-rc.2", "1.2.3-rc.10", "1.2.3-rc.10.1", "1.2.3"}
+	for i := 1; i < len(values); i++ {
+		if got := compareVersionText(values[i-1], values[i]); got >= 0 {
+			t.Fatalf("compareVersionText(%q, %q) = %d, want < 0", values[i-1], values[i], got)
+		}
+	}
+}
+
 func TestTrailingZeroCandidates(t *testing.T) {
 	got := trailingZeroCandidates("2.43.0")
 	want := []string{"2.43.0", "2.43"}
@@ -178,6 +202,46 @@ func TestEnumerateURLVersionsExtractsAndSortsArbitraryNumericCore(t *testing.T) 
 		t.Fatal(err)
 	}
 	want := []string{"0.5.13.9", "0.5.13.10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("versions = %v, want %v", got, want)
+	}
+}
+
+func TestEnumerateURLVersionsMapsNamedComponents(t *testing.T) {
+	const listingURL = "https://example.test/releases"
+	serveURLs(t, map[string][]byte{
+		listingURL: []byte(`<a href="linux-firmware-20260810.tar.xz">old</a><a href="linux-firmware-20260911.tar.xz">new</a>`),
+	})
+
+	got, err := enumerateBaseURLVersions(URLSourceConfig{
+		URL:        "https://example.test/linux-firmware-{{major}}{{minor}}{{patch}}.tar.xz",
+		ListingURL: listingURL,
+		FileRegex:  `linux-firmware-(?P<major>[0-9]{4})(?P<minor>[0-9]{2})(?P<patch>[0-9]{2})\.tar\.xz`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"2026.08.10", "2026.09.11"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("versions = %v, want %v", got, want)
+	}
+}
+
+func TestURLUnnamedFilterCaptureDoesNotChangeVersion(t *testing.T) {
+	const listingURL = "https://example.test/releases"
+	serveURLs(t, map[string][]byte{
+		listingURL: []byte(`<a href="widget-1.47.3.tar.xz">release</a>`),
+	})
+
+	got, err := enumerateBaseURLVersions(URLSourceConfig{
+		URL:        "https://example.test/widget-{{version}}.tar.xz",
+		ListingURL: listingURL,
+		FileRegex:  `widget-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.xz`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1.47.3"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("versions = %v, want %v", got, want)
 	}
