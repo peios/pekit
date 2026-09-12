@@ -555,6 +555,17 @@ func lintArchitecture(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs [
 			break
 		}
 	}
+	if evidence == "" {
+		// A header/source split can be tied to a machine-specific sibling
+		// without carrying machine code itself. Only infer this from package
+		// definitions available in this recipe, never from a dependency name.
+		for _, dep := range sortedKeys(pkg.Inst.Config.Package.Dependencies) {
+			if sibling := set.byName[dep]; sibling != nil && sibling.Inst.Architecture != "" && sibling.Inst.Architecture != noarch {
+				evidence = "dependency " + dep
+				break
+			}
+		}
+	}
 	switch {
 	case pkg.Inst.Architecture == noarch && evidence != "":
 		l.report("package.architecture", name, evidence, "package is declared %s but ships architecture-specific content", noarch)

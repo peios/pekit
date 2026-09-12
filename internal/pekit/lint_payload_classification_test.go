@@ -76,3 +76,48 @@ architecture = "noarch"
 		t.Fatalf("empty include directories should not require a devel split: %v (%v)", err, events["lint"])
 	}
 }
+
+func TestLintArchitectureAccountsForSiblingDependency(t *testing.T) {
+	for _, arch := range []string{"x86_64", "noarch"} {
+		t.Run(arch, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "lint.pekit.toml"), "[package]\narchitecture = \"consistent\"\n")
+			writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = 'mkdir -p "$PEKIT_OUT"; printf source > "$PEKIT_OUT/text"'
+`)
+			writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+[package]
+version = "1.0-1"
+`)
+			writeFile(t, filepath.Join(dir, "runtime.package.pekit.toml"), `
+[package]
+name = "example-runtime"
+architecture = "x86_64"
+[files]
+":text" = "usr/lib/x86_64-linux-example/config.txt"
+`)
+			writeFile(t, filepath.Join(dir, "source.package.pekit.toml"), `
+[package]
+name = "example-debugsource"
+architecture = "`+arch+`"
+[dependencies]
+example-runtime = "1.0-1"
+[files]
+":text" = "usr/src/debug/example/lib.rs"
+`)
+			if _, stderr, err := runIn(t, dir, "build", "--version", "1.0"); err != nil {
+				t.Fatalf("build: %v\n%s", err, stderr)
+			}
+			events, err := lintEvents(t, dir, "lint", "--version", "1.0")
+			if arch == "x86_64" {
+				if err != nil {
+					t.Fatalf("matching sibling architecture rejected: %v (%v)", err, events["lint"])
+				}
+			} else if diagCode(err) != "lint_failed" || lintRules(events["lint"])["package.architecture"] != 1 {
+				t.Fatalf("noarch dependency mismatch not found: %v (%v)", err, events["lint"])
+			}
+		})
+	}
+}
