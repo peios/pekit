@@ -163,6 +163,9 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 	if run.SignKey != nil {
 		ctx.Renderer.Event(Event{Type: "sign", Member: member, Package: instanceID(inst), Path: inst.Artifact, Message: "signed with key " + pack.SigningKeyFingerprint(run.SignKey)})
 	}
+	if err := writePackageStamp(source, inst, run); err != nil {
+		return err
+	}
 	ctx.Renderer.Event(Event{Type: "artifact", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "wrote source package"})
 	return nil
 }

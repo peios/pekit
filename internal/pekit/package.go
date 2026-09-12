@@ -199,6 +199,15 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	if source.Unanchored && !publish {
 		ctx.Renderer.Event(Event{Type: "warning", Member: member, Message: "package uses unanchored source provenance"})
 	}
+	// Every artifact this run leaves behind has to describe the recipe this
+	// run read. A stage packed under different provenance is dropped before
+	// anything is packed — including the stages of packages this run does
+	// not select, which nothing else would refresh (PEI-773).
+	if !ctx.Inv.DryRun {
+		if err := dropStalePackageStages(ctx, source, run, member); err != nil {
+			return err
+		}
+	}
 	for _, inst := range instances {
 		if ctx.Inv.DryRun {
 			ctx.Renderer.Event(Event{Type: "package_plan", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "would write package"})
@@ -900,6 +909,9 @@ func writePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig,
 		}
 	} else {
 		return diag("unsupported_format", "unsupported package format %q", inst.Format)
+	}
+	if err := writePackageStamp(source, inst, run); err != nil {
+		return err
 	}
 	ctx.Renderer.Event(Event{Type: "artifact", Member: member, Package: instanceID(inst), Version: version.Raw, Path: inst.Artifact, Message: "wrote package"})
 	return nil

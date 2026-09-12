@@ -2751,6 +2751,16 @@ Package staging:
 - If `clear_out = true`, the package stage is removed before packaging.
 - If `clear_out = false`, the package stage is preserved, but the format writer
   still owns and may replace its final artifact path.
+- Each written package stage is stamped, in the work base's `.pekit/` metadata,
+  with the provenance its artifact was packed under: the manifest `recipe_ref`,
+  `builder` and `source_ref`, plus the package identity the stage holds.
+- A package or publish invocation removes every package stage whose stamp does
+  not match its own provenance — including stages of packages it does not
+  select, and stages with no stamp — before it writes any artifact. A staged
+  artifact therefore never outlives the recipe state its manifest names.
+- Only package stages carry this stamp. Build stages are keyed on their own
+  inputs and retain their completion markers, so invalidating a package stage
+  never forces a rebuild and `--no-build` reuse is unaffected.
 
 Package command:
 
