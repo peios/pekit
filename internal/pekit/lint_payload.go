@@ -540,7 +540,10 @@ func lintArchitecture(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs [
 			archDirs = append(archDirs, d, d+"/**")
 		}
 	}
-	archDirs = append(archDirs, "usr/lib/debug/**", "usr/src/debug/**")
+	// Debug source paths contain source text, not necessarily machine code.
+	// Generated architecture-specific sources can be marked by the recipe;
+	// the directory alone does not prove that a noarch source package is wrong.
+	archDirs = append(archDirs, "usr/lib/debug/**")
 	evidence := ""
 	for _, dest := range pkg.Dests {
 		if pathMatches(dest, archDirs) {
@@ -569,6 +572,11 @@ func lintDevelSplit(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs []s
 	const limit = 10
 	n := 0
 	for _, dest := range pkg.Dests {
+		// Filesystem skeleton packages may own empty include/lib directories
+		// without shipping a development interface.
+		if fi, err := os.Lstat(pkg.Files[dest].Source); err == nil && fi.IsDir() {
+			continue
+		}
 		develFile := pathMatches(dest, files)
 		if !develFile && strings.HasSuffix(dest, ".so") && dirMatches(path.Dir(dest), libDirs) && isSymlink(pkg.Files[dest].Source) {
 			develFile = true

@@ -403,6 +403,19 @@ func enumerateURLVersions(cfg URLSourceConfig) ([]string, error) {
 }
 
 func enumerateBaseURLVersions(cfg URLSourceConfig) ([]string, error) {
+	// A URL source with one exact version and no listing has no discovery
+	// stream. This is common for bootstrap compilers and immutable crate
+	// inputs whose artifact hosts deliberately forbid directory listings.
+	// Resolution still downloads and authenticates the selected artifact.
+	if cfg.ListingURL == "" && !cfg.PatchSeries.Configured() {
+		parts := splitConstraintParts(cfg.Versions)
+		if len(parts) == 1 {
+			raw := strings.TrimSpace(strings.TrimPrefix(parts[0], "="))
+			if _, err := ParseVersion(raw); err == nil {
+				return []string{raw}, nil
+			}
+		}
+	}
 	listURL := cfg.ListingURL
 	if listURL == "" {
 		var err error
