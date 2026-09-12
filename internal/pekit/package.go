@@ -167,7 +167,11 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	if err != nil {
 		return err
 	}
-	run := packRun{SignKey: signKey, RecipeRef: recipeRef(recipe.Root), Builder: pekitBuilder()}
+	run := packRun{
+		SignKey:   signKey,
+		RecipeRef: recipeRef(recipe.Root, recipeRefScope(recipe, workspace, instances)),
+		Builder:   pekitBuilder(),
+	}
 	anyPeipkg := false
 	for _, inst := range instances {
 		if inst.Format == "peipkg" {

@@ -3,10 +3,31 @@ package pekit
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// gitCommitFixed commits with a fixed author and committer date.
+//
+// A url source's materialisation manifest records the recipe work tree's
+// HEAD commit time, and a run whose manifest does not match re-materialises
+// the whole work base — build stages included. Pinning the date keeps a
+// test commit from re-staging the build behind the assertion under test;
+// the commit id still moves, which is what these tests measure.
+func gitCommitFixed(t *testing.T, dir, message string) {
+	t.Helper()
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_DATE=2026-01-01T00:00:00+00:00",
+		"GIT_COMMITTER_DATE=2026-01-01T00:00:00+00:00",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, output)
+	}
+}
 
 // A two-member recipe whose build target records every run, so a test can
 // tell a reused build stage from a recompiled one.
@@ -72,7 +93,7 @@ func newPackageCacheRecipe(t *testing.T, extra map[string]string) (string, *App,
 	runTestCmd(t, recipe, "git", "config", "user.email", "test@example.invalid")
 	runTestCmd(t, recipe, "git", "config", "user.name", "Test")
 	runTestCmd(t, recipe, "git", "add", ".")
-	runTestCmd(t, recipe, "git", "commit", "-m", "recipe")
+	gitCommitFixed(t, recipe, "recipe")
 	chdir(t, recipe)
 	var stdout, stderr bytes.Buffer
 	return recipe, &App{Stdout: &stdout, Stderr: &stderr}, &stderr
@@ -137,7 +158,7 @@ func TestPackageStagesDropStaleProvenanceOnCommit(t *testing.T) {
 	}
 
 	runTestCmd(t, recipe, "git", "add", "-A")
-	runTestCmd(t, recipe, "git", "commit", "-m", "pin source")
+	gitCommitFixed(t, recipe, "pin source")
 	cleanRef := "git:" + gitHead(t, recipe)
 
 	if err := app.Run([]string{"package", "a", "--version", "1.0", "--no-build"}); err != nil {
@@ -161,7 +182,7 @@ func TestPackageStagesDropStaleProvenanceWhenTreeGoesDirty(t *testing.T) {
 		t.Fatalf("package --all failed: %v\nstderr=%s", err, stderr.String())
 	}
 	runTestCmd(t, recipe, "git", "add", "-A")
-	runTestCmd(t, recipe, "git", "commit", "-m", "pin source")
+	gitCommitFixed(t, recipe, "pin source")
 	if err := app.Run([]string{"package", "--all", "--version", "1.0", "--no-build"}); err != nil {
 		t.Fatalf("clean package --all failed: %v\nstderr=%s", err, stderr.String())
 	}
@@ -187,7 +208,7 @@ func TestPackageStagesDropStaleProvenanceOnSecondCommit(t *testing.T) {
 		t.Fatalf("package --all failed: %v\nstderr=%s", err, stderr.String())
 	}
 	runTestCmd(t, recipe, "git", "add", "-A")
-	runTestCmd(t, recipe, "git", "commit", "-m", "pin source")
+	gitCommitFixed(t, recipe, "pin source")
 	if err := app.Run([]string{"package", "--all", "--version", "1.0", "--no-build"}); err != nil {
 		t.Fatalf("first clean package failed: %v\nstderr=%s", err, stderr.String())
 	}
@@ -196,7 +217,7 @@ func TestPackageStagesDropStaleProvenanceOnSecondCommit(t *testing.T) {
 
 	writeFile(t, filepath.Join(recipe, "NOTES"), "unrelated\n")
 	runTestCmd(t, recipe, "git", "add", "-A")
-	runTestCmd(t, recipe, "git", "commit", "-m", "notes")
+	gitCommitFixed(t, recipe, "notes")
 	second := "git:" + gitHead(t, recipe)
 	if first == second {
 		t.Fatal("second commit did not move HEAD")
@@ -249,7 +270,7 @@ func TestPublishDropsStalePackageStages(t *testing.T) {
 	assertNoStaleRefs(t, stagedRecipeRefs(t, recipe), dirtyRef)
 
 	runTestCmd(t, recipe, "git", "add", "-A")
-	runTestCmd(t, recipe, "git", "commit", "-m", "pin source")
+	gitCommitFixed(t, recipe, "pin source")
 	cleanRef := "git:" + gitHead(t, recipe)
 	if err := app.Run([]string{"publish", "a", "--version", "1.0", "--no-build", "--allow-unsigned"}); err != nil {
 		t.Fatalf("publish a failed: %v\nstderr=%s", err, stderr.String())
