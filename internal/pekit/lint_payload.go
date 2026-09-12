@@ -555,10 +555,12 @@ func lintArchitecture(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs [
 			break
 		}
 	}
-	if evidence == "" {
+	if evidence == "" && pkg.Inst.Architecture != noarch {
 		// A header/source split can be tied to a machine-specific sibling
-		// without carrying machine code itself. Only infer this from package
-		// definitions available in this recipe, never from a dependency name.
+		// without carrying machine code itself. This can justify an explicit
+		// architecture constraint, but must not force portable scripts/data to
+		// inherit a dependency's architecture: resolve it for the target machine.
+		// Only use definitions in this recipe, never infer from a dependency name.
 		for _, dep := range sortedKeys(pkg.Inst.Config.Package.Dependencies) {
 			if sibling := set.byName[dep]; sibling != nil && sibling.Inst.Architecture != "" && sibling.Inst.Architecture != noarch {
 				evidence = "dependency " + dep

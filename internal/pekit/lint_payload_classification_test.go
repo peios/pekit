@@ -78,8 +78,13 @@ architecture = "noarch"
 }
 
 func TestLintArchitectureAccountsForSiblingDependency(t *testing.T) {
-	for _, arch := range []string{"x86_64", "noarch"} {
-		t.Run(arch, func(t *testing.T) {
+	for _, tc := range []struct{ name, arch, dest string }{
+		{"constrained-source", "x86_64", "usr/src/debug/example/lib.rs"},
+		{"portable-source", "noarch", "usr/src/debug/example/lib.rs"},
+		{"portable-script", "noarch", "usr/bin/example-helper"},
+		{"portable-data", "noarch", "usr/share/example/data.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "lint.pekit.toml"), "[package]\narchitecture = \"consistent\"\n")
 			writeFile(t, filepath.Join(dir, "pekit.toml"), `
@@ -101,22 +106,18 @@ architecture = "x86_64"
 			writeFile(t, filepath.Join(dir, "source.package.pekit.toml"), `
 [package]
 name = "example-debugsource"
-architecture = "`+arch+`"
+architecture = "`+tc.arch+`"
 [dependencies]
 example-runtime = "1.0-1"
 [files]
-":text" = "usr/src/debug/example/lib.rs"
+":text" = "`+tc.dest+`"
 `)
 			if _, stderr, err := runIn(t, dir, "build", "--version", "1.0"); err != nil {
 				t.Fatalf("build: %v\n%s", err, stderr)
 			}
 			events, err := lintEvents(t, dir, "lint", "--version", "1.0")
-			if arch == "x86_64" {
-				if err != nil {
-					t.Fatalf("matching sibling architecture rejected: %v (%v)", err, events["lint"])
-				}
-			} else if diagCode(err) != "lint_failed" || lintRules(events["lint"])["package.architecture"] != 1 {
-				t.Fatalf("noarch dependency mismatch not found: %v (%v)", err, events["lint"])
+			if err != nil {
+				t.Fatalf("portable payload with native sibling rejected for %s: %v (%v)", tc.arch, err, events["lint"])
 			}
 		})
 	}
