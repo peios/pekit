@@ -47,10 +47,21 @@ func newLinter(ctx *Context, cfg LintConfig, member string) *linter {
 func (l *linter) report(rule, pkg, path, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	f := lintFinding{Rule: rule, Package: pkg, Path: path, Message: msg}
-	if allow, ok := l.cfg.Allow[rule]; ok {
+	allow, ok := l.cfg.Allow[rule]
+	allowKey := rule
+	if !ok && path != "" {
+		for _, pattern := range sortedKeys(l.cfg.AllowFiles[rule]) {
+			if pathMatches(path, []string{pattern}) {
+				allow, ok = l.cfg.AllowFiles[rule][pattern], true
+				allowKey = rule + "\x00" + pattern
+				break
+			}
+		}
+	}
+	if ok {
 		f.Reason = allow.Reason
 		l.allowed = append(l.allowed, f)
-		l.usedAllow[rule] = true
+		l.usedAllow[allowKey] = true
 		l.ctx.Renderer.Event(Event{Type: "lint_allowed", Member: l.member, Package: pkg, Path: path, Rule: rule,
 			Message: fmt.Sprintf("%s: %s (allowed: %s)", rule, msg, allow.Reason)})
 		return
@@ -69,6 +80,13 @@ func (l *linter) finish() error {
 	for id, allow := range l.cfg.Allow {
 		if !l.usedAllow[id] {
 			unused = append(unused, id+" ("+allow.Path+")")
+		}
+	}
+	for id, entries := range l.cfg.AllowFiles {
+		for pattern, allow := range entries {
+			if !l.usedAllow[id+"\x00"+pattern] {
+				unused = append(unused, id+" ["+pattern+"] ("+allow.Path+")")
+			}
 		}
 	}
 	sort.Strings(unused)

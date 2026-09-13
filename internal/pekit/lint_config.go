@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // lint.pekit.toml enables and parameterises pekit's built-in lint rules.
@@ -122,10 +124,11 @@ type lintAllow struct {
 
 // LintConfig is the merged lint configuration for one recipe.
 type LintConfig struct {
-	Files  []string
-	values map[string]any
-	origin map[string]string // key -> file that set the effective value
-	Allow  map[string]lintAllow
+	Files      []string
+	values     map[string]any
+	origin     map[string]string // key -> file that set the effective value
+	Allow      map[string]lintAllow
+	AllowFiles map[string]map[string]lintAllow
 }
 
 // Enabled reports whether a rule or parameter has any value: `false` and an
@@ -182,9 +185,10 @@ func (c LintConfig) StringsOr(id string, def []string) []string {
 // lintFileValues is one parsed lint file: its rule and parameter leaves by
 // dotted key, and its [allow] table.
 type lintFileValues struct {
-	Path   string
-	Values map[string]any
-	Allow  map[string]string
+	Path       string
+	Values     map[string]any
+	Allow      map[string]string
+	AllowFiles map[string]map[string]string
 }
 
 // loadLintFile parses one lint.pekit.toml. Every key must be a known rule
@@ -216,6 +220,43 @@ func loadLintFile(path string) (lintFileValues, error) {
 			out.Allow[id] = reason
 		}
 		delete(raw, "allow")
+	}
+	if v, ok := raw["allow_files"]; ok {
+		table, err := expectMap(path, "allow_files", v)
+		if err != nil {
+			return lintFileValues{}, err
+		}
+		out.AllowFiles = map[string]map[string]string{}
+		for _, id := range sortedKeys(table) {
+			spec, known := lintKeyIndex[id]
+			if !known || spec.Param || !spec.Payload {
+				return lintFileValues{}, diagAt("unknown_key", path, "allow_files.%q does not name a payload lint rule", id)
+			}
+			entries, err := expectMap(path, "allow_files."+id, table[id])
+			if err != nil {
+				return lintFileValues{}, err
+			}
+			out.AllowFiles[id] = map[string]string{}
+			for _, pattern := range sortedKeys(entries) {
+				if pattern == "" || strings.HasPrefix(pattern, "/") || strings.Contains(pattern, "\\") || !doublestar.ValidatePattern(pattern) {
+					return lintFileValues{}, diagAt("invalid_value", path, "allow_files.%q has invalid relative payload pattern %q", id, pattern)
+				}
+				for _, component := range strings.Split(pattern, "/") {
+					if component == ".." || component == "." || component == "" {
+						return lintFileValues{}, diagAt("invalid_value", path, "allow_files.%q has non-canonical payload pattern %q", id, pattern)
+					}
+				}
+				reason, err := expectString(path, "allow_files."+id+"."+pattern, entries[pattern])
+				if err != nil {
+					return lintFileValues{}, err
+				}
+				if strings.TrimSpace(reason) == "" {
+					return lintFileValues{}, diagAt("missing_reason", path, "allow_files.%q.%q needs a reason", id, pattern)
+				}
+				out.AllowFiles[id][pattern] = reason
+			}
+		}
+		delete(raw, "allow_files")
 	}
 	if err := flattenLintTable(path, "", raw, out.Values); err != nil {
 		return lintFileValues{}, err
@@ -411,6 +452,17 @@ func (c *LintConfig) merge(file lintFileValues) error {
 	}
 	for id, reason := range file.Allow {
 		c.Allow[id] = lintAllow{Reason: reason, Path: file.Path}
+	}
+	if c.AllowFiles == nil {
+		c.AllowFiles = map[string]map[string]lintAllow{}
+	}
+	for id, entries := range file.AllowFiles {
+		if c.AllowFiles[id] == nil {
+			c.AllowFiles[id] = map[string]lintAllow{}
+		}
+		for pattern, reason := range entries {
+			c.AllowFiles[id][pattern] = lintAllow{Reason: reason, Path: file.Path}
+		}
 	}
 	return nil
 }
