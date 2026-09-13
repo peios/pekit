@@ -582,7 +582,13 @@ func lintDevelSplit(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs []s
 		return
 	}
 	files := l.cfg.StringsOr("split.devel.files", lintDefaultDevelFiles)
-	const limit = 10
+	limit := 10
+	// A path-scoped allow must retain the matching path on every finding;
+	// otherwise the aggregate "N more" finding cannot be matched narrowly and
+	// forces the recipe back to a whole-rule exemption.
+	if len(l.cfg.AllowFiles["split.devel.packages"]) > 0 {
+		limit = len(pkg.Dests)
+	}
 	n := 0
 	for _, dest := range pkg.Dests {
 		// Filesystem skeleton packages may own empty include/lib directories

@@ -74,3 +74,33 @@ func TestLintAllowFilesMerge(t *testing.T) {
 		t.Fatalf("incorrect merge: %v", cfg.AllowFiles)
 	}
 }
+
+func TestLintAllowFilesDoesNotLosePathsToFindingLimit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lint.pekit.toml"), `
+[split]
+devel.packages = "*-devel"
+[allow_files."split.devel.packages"]
+"usr/include/**" = "runtime-owned generated interface"
+`)
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[build.main]
+command = 'mkdir -p "$PEKIT_OUT/include"; i=0; while [ "$i" -lt 12 ]; do printf header > "$PEKIT_OUT/include/$i.h"; i=$((i + 1)); done'
+`)
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "tar"
+[package]
+name = "example"
+version = "1.0-1"
+architecture = "noarch"
+[files]
+":include/**" = "usr/include"
+`)
+	if _, stderr, err := runIn(t, dir, "build", "--version", "1.0"); err != nil {
+		t.Fatalf("build: %v\n%s", err, stderr)
+	}
+	events, err := lintEvents(t, dir, "lint", "--version", "1.0")
+	if err != nil || len(events["lint"]) != 0 || len(events["lint_allowed"]) != 12 {
+		t.Fatalf("all path-scoped findings should be allowed: %v (%v)", err, events)
+	}
+}
