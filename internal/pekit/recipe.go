@@ -31,7 +31,7 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	}
 	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
 		cmd := ctx.Inv.EffectiveCommand()
-		if cmd != CommandLint && cmd != CommandLock {
+		if cmd != CommandLint && cmd != CommandLock && !(cmd == CommandClean && ctx.Inv.OutputOnly) {
 			profile, err := selectedEnvFile(ctx.Inv, workspace.Root, false)
 			if err != nil {
 				return err
@@ -62,9 +62,11 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	cmd := ctx.Inv.EffectiveCommand()
 	if cmd == CommandClean {
 		source := cleanSourceState(recipe)
-		recipe, err = mergeDelegatedRecipe(recipe, source)
-		if err != nil {
-			return err
+		if !ctx.Inv.OutputOnly {
+			recipe, err = mergeDelegatedRecipe(recipe, source)
+			if err != nil {
+				return err
+			}
 		}
 		return cleanRecipe(ctx, recipe, workspace, source, member)
 	}
