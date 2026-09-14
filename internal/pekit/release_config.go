@@ -3,16 +3,18 @@ package pekit
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // ReleaseConfig is workspace-owned. Its repository is separate from ordinary
 // package publish targets, which may remain useful for bootstrap work.
 type ReleaseConfig struct {
-	Path         string
-	Name         string
-	SigningKey   string
-	Environments []string // last environment produces the promoted archives
-	Checks       map[string]ShellCommand
+	Path           string
+	Name           string
+	SigningKey     string
+	Environments   []string          // last environment produces the promoted archives
+	ReferenceAllow map[string]string // explicit findings allowed only in non-publication environments
+	Checks         map[string]ShellCommand
 }
 
 func parseReleaseConfig(path string, value any) (ReleaseConfig, error) {
@@ -31,6 +33,26 @@ func parseReleaseConfig(path string, value any) (ReleaseConfig, error) {
 			c.SigningKey, err = expectString(path, "release.signing_key", v)
 		case "environments":
 			c.Environments, err = expectStringSlice(path, "release.environments", v)
+		case "reference_allow":
+			var entries map[string]any
+			entries, err = expectMap(path, "release.reference_allow", v)
+			c.ReferenceAllow = map[string]string{}
+			if err == nil {
+				for rule, value := range entries {
+					spec, ok := lintKeyIndex[rule]
+					if !ok || spec.Param {
+						return c, diagAt("unknown_key", path, "unknown release reference lint rule %q", rule)
+					}
+					reason, e := expectString(path, "release.reference_allow."+rule, value)
+					if e != nil {
+						return c, e
+					}
+					if strings.TrimSpace(reason) == "" {
+						return c, diagAt("missing_reason", path, "reference lint allowance %s requires a reason", rule)
+					}
+					c.ReferenceAllow[rule] = reason
+				}
+			}
 		case "checks":
 			var checks map[string]any
 			checks, err = expectMap(path, "release.checks", v)

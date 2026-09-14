@@ -257,6 +257,14 @@ func (b *releaseBuild) qualify(ctx *Context, recipe RecipeConfig, ws *WorkspaceC
 	if len(cfg.Files) == 0 || len(cfg.EnabledRules()) == 0 || len(cfg.enabledPayloadRules()) == 0 {
 		return diag("release_lint_missing", "release requires active recipe and payload lint policy")
 	}
+	// Reference roots exercise portability against their own toolchains. Their
+	// explicit exceptions never apply to the final environment's promoted bytes.
+	publication := ctx.Inv.EnvName == ws.Release.Environments[len(ws.Release.Environments)-1]
+	if !publication {
+		for rule, reason := range ws.Release.ReferenceAllow {
+			cfg.Allow[rule] = lintAllow{Reason: reason, Path: ws.Path}
+		}
+	}
 	l := newLinter(ctx, cfg, member)
 	if err = lintStatic(l, recipe, ws, source); err != nil {
 		return err
