@@ -9,13 +9,19 @@ import (
 )
 
 type CommandEnv struct {
-	Values map[string]string
-	Outer  map[string]string
-	Script string
-	Wrap   ShellCommand
+	Sandbox *sandboxCommand
+	Values  map[string]string
+	Outer   map[string]string
+	Script  string
+	Wrap    ShellCommand
 }
 
 func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, targetOut string) (CommandEnv, error) {
+	if job := ctx.Jobs[source.WorkBase]; ctx.Inv.EffectiveCommand() != CommandGen && job != nil && job.SourceInputs != nil {
+		if err := job.SourceInputs.unchanged(); err != nil {
+			return CommandEnv{}, err
+		}
+	}
 	values := map[string]string{}
 	var userEnv []EnvVar
 	workspaceEnvFile := EnvFile{}
@@ -77,12 +83,29 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 	if recipeEnvFile.DependencyProvider != "" {
 		dependencyProvider = recipeEnvFile.DependencyProvider
 	}
+	var sandbox *sandboxCommand
+	if workspace != nil && workspace.Isolation.Enabled {
+		profile, err := selectedEnvFile(ctx.Inv, workspace.Root, false)
+		if err != nil {
+			return CommandEnv{}, err
+		}
+		if profile.Sandbox.Prepare.Empty() {
+			return CommandEnv{}, diag("isolation_required", "workspace requires a sandbox environment; select --env peipkg or --env debian")
+		}
+		// Only workspace policy selects the coordinator root and provider.
+		dependencyProvider = profile.DependencyProvider
+		sandbox = &sandboxCommand{Recipe: recipe, Workspace: *workspace, Source: source, Target: target, Profile: profile.Sandbox}
+	}
 	for _, env := range userEnv {
 		if strings.HasPrefix(env.Name, "PEKIT_") {
 			return CommandEnv{}, diag("reserved_env", "user env cannot set reserved variable %s", env.Name)
 		}
 	}
 	keyringEnv, err := resolveKeyrings(ctx.Inv, recipe.Root, workspace)
+	if err != nil {
+		return CommandEnv{}, err
+	}
+	keyringEnv, err = workerKeyrings(ctx.Inv, recipe.Root, workspace, target, keyringEnv)
 	if err != nil {
 		return CommandEnv{}, err
 	}
@@ -120,6 +143,17 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 	if recipeEnvFile.Wrap.Empty() == false {
 		wrap = recipeEnvFile.Wrap
 	}
+	if (workspace == nil || !workspace.Isolation.Enabled) && (!workspaceEnvFile.Sandbox.Prepare.Empty() || !recipeEnvFile.Sandbox.Prepare.Empty() || !sourceEnvFile.Sandbox.Prepare.Empty()) {
+		return CommandEnv{}, diag("sandbox_policy", "a sandbox profile requires workspace isolation.enabled = true")
+	}
+	workerManaged := managed
+	if sandbox != nil {
+		wrap = ShellCommand{}
+		workerManaged = map[string]string{}
+		overlay(workerManaged, managed)
+		workerManaged["PEKIT_DEPENDENCIES_FILE"] = "/run/pekit-dependencies.json"
+		all["PEKIT_DEPENDENCIES_FILE"] = workerManaged["PEKIT_DEPENDENCIES_FILE"]
+	}
 	if ctx.Inv.Verbose {
 		ctx.Renderer.Event(Event{
 			Type:    "env",
@@ -128,7 +162,7 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 			Message: "managed=" + strings.Join(sortedKeys(managed), ",") + " keyring=" + strings.Join(sortedKeys(keyringEnv), ",") + " env=" + strings.Join(sortedKeys(values), ","),
 		})
 	}
-	return CommandEnv{Values: all, Outer: managed, Script: exportScriptLayers(managed, keyringEnv, userEnv), Wrap: wrap}, nil
+	return CommandEnv{Sandbox: sandbox, Values: all, Outer: managed, Script: exportScriptLayers(workerManaged, keyringEnv, userEnv), Wrap: wrap}, nil
 }
 
 func sameFile(a, b string) bool {
@@ -285,10 +319,34 @@ func flattenKeyring(out map[string]string, prefix string, raw map[string]any) er
 		if prefix != "" {
 			path = prefix + "." + key
 		}
+		name := envNameFromKeyring(path)
+		if !envNameRE.MatchString(name) {
+			return fmt.Errorf("invalid keyring entry %s", path)
+		}
+		if _, exists := out[name]; exists {
+			return fmt.Errorf("keyring entries collide on %s", name)
+		}
 		switch v := value.(type) {
 		case string:
 			out[envNameFromKeyring(path)] = v
 		case map[string]any:
+			if value, ok := v["value"]; ok {
+				text, ok := value.(string)
+				if !ok {
+					return fmt.Errorf("keyring %s.value must be a string", path)
+				}
+				access, ok := v["access"].(string)
+				if !ok || (access != "public" && access != "acquisition" && access != "signing") {
+					return fmt.Errorf("keyring %s.access must be public, acquisition, or signing", path)
+				}
+				for k := range v {
+					if k != "value" && k != "access" {
+						return fmt.Errorf("unknown keyring field %s.%s", path, k)
+					}
+				}
+				out[envNameFromKeyring(path)] = text
+				continue
+			}
 			if _, ok := v["path"]; ok {
 				return diag("unsupported_keyring_entry", "typed keyring entry %s is not supported yet", path)
 			}
@@ -319,7 +377,12 @@ func appendEnvLayer(out *[]EnvVar, final map[string]string, vars []EnvVar) {
 }
 
 func envSlice(values map[string]string) []string {
-	env := os.Environ()
+	env := []string{}
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "PEKIT_KEYRING_") {
+			env = append(env, item)
+		}
+	}
 	seen := map[string]bool{}
 	for _, item := range env {
 		key, _, _ := strings.Cut(item, "=")

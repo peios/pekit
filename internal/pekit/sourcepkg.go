@@ -106,9 +106,9 @@ func sourcePayloadRoot(inst PackageInstance) string {
 // writeSourcePackage stages and writes one corresponding-source package:
 // upstream/ carries the pristine source input (the exact bytes the lock
 // hash covers, or a git-archive export of the locked commit), recipe/
-// carries the recipe directory's build-controlling files, and patches/
-// carries the recipe's patch series when one exists.
-func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, run packRun) error {
+// and workspace/ carry captured build inputs; source/ is the prepared tree.
+// Compatibility recipe/ and patches/ views remain available.
+func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, inst PackageInstance, member string, run packRun, captured *sourceInputs) error {
 	if err := removeStage(inst.Stage); err != nil {
 		return wrapDiag("clean_stage", inst.Stage, err)
 	}
@@ -149,11 +149,10 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 	default:
 		return diag("unsupported_source", "source package cannot be built from a %s source", source.Kind)
 	}
-	recipeEntries, err := sourceRecipeEntries(recipe, root)
+	entries, err := bundleEntries(ctx, captured, source, version, root, inst.Stage, entries)
 	if err != nil {
 		return err
 	}
-	entries = append(entries, recipeEntries...)
 	if err := validatePayloadDestinations(entries); err != nil {
 		return err
 	}
@@ -232,57 +231,13 @@ func writeTrackedGitSourceArchive(archive, prefix string, source SourceState) er
 	return nil
 }
 
-// sourceRecipeEntries collects the recipe-directory files that count as
-// the "scripts used to control compilation" half of corresponding
-// source: the recipe and package definitions, the source lock (which
-// makes the shipped upstream artifact verifiable), pinned upstream
-// signing keys, and the patch series. The allowlist deliberately never
-// matches *.keyring.pekit.toml — developer key material stays out.
-func sourceRecipeEntries(recipe RecipeConfig, root string) ([]payloadEntry, error) {
-	items, err := os.ReadDir(recipe.Root)
-	if err != nil {
-		return nil, wrapDiag("read_dir", recipe.Root, err)
-	}
-	var entries []payloadEntry
-	for _, item := range items {
-		name := item.Name()
-		if item.IsDir() {
-			destPrefix := ""
-			switch {
-			case name == "packages.pekit" || name == "keys":
-				destPrefix = root + "/recipe/" + name
-			// The applied series ships under the fixed patches/ name even
-			// when [source].patches picks a different directory.
-			case name == "patches" || (recipe.Source.Patches != "" && name == recipe.Source.Patches):
-				destPrefix = root + "/patches"
-			default:
-				continue
-			}
-			sub, err := sourceTreeEntries(filepath.Join(recipe.Root, name), destPrefix)
-			if err != nil {
-				return nil, err
-			}
-			entries = append(entries, sub...)
-			continue
-		}
-		switch {
-		case name == "pekit.toml", name == "pekit.lock",
-			name == "package.pekit.toml", name == "env.pekit.toml",
-			strings.HasSuffix(name, ".package.pekit.toml"),
-			strings.HasSuffix(name, ".env.pekit.toml"):
-			entries = append(entries, payloadEntry{Source: filepath.Join(recipe.Root, name), Dest: root + "/recipe/" + name})
-		}
-	}
-	return entries, nil
-}
-
 func sourceTreeEntries(dir, destPrefix string) ([]payloadEntry, error) {
 	var entries []payloadEntry
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if d.IsDir() {
+		if path == dir {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dir, path)

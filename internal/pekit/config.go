@@ -25,12 +25,13 @@ func (c ShellCommand) Empty() bool {
 }
 
 type TargetConfig struct {
-	Name         string
-	Kind         Command
-	Command      ShellCommand
-	Needs        []string
-	Dependencies map[string]map[string]string
-	ClearOut     bool
+	Name          string
+	Kind          Command
+	Command       ShellCommand
+	Needs         []string
+	KeyringInputs []string
+	Dependencies  map[string]map[string]string
+	ClearOut      bool
 	// Gate makes a test target a release gate: package and publish run it
 	// after staging its required builds and before writing any artifact.
 	Gate bool
@@ -74,10 +75,11 @@ type RecipeConfig struct {
 // SourcePackageConfig controls the corresponding-source package a recipe
 // emits alongside its binary packages. Emission defaults on for any
 // recipe with a reproducible [source] that produces peipkg-format
-// packages; the table exists to opt out or rename.
+// packages; the table controls emission, naming and additional shared inputs.
 type SourcePackageConfig struct {
-	Name    string
-	Enabled *bool
+	WorkspaceInputs []string
+	Name            string
+	Enabled         *bool
 }
 
 func (c SourcePackageConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
@@ -182,13 +184,15 @@ type LocalSourceConfig struct {
 }
 
 type WorkspaceConfig struct {
-	Root    string
-	Path    string
-	Include []string
-	Exclude []string
-	Env     []EnvVar
-	Wrap    ShellCommand
-	Policy  PolicyConfig
+	SourceInputs []string
+	Isolation    IsolationConfig
+	Root         string
+	Path         string
+	Include      []string
+	Exclude      []string
+	Env          []EnvVar
+	Wrap         ShellCommand
+	Policy       PolicyConfig
 }
 
 // PolicyConfig holds distro-wide derivation policy declared in the
@@ -209,7 +213,18 @@ func (w *WorkspaceConfig) symbolVersionPolicy() pack.SymbolVersionPolicy {
 	return pack.SymbolVersionPolicy(w.Policy.SymbolVersions)
 }
 
+type IsolationConfig struct {
+	Enabled bool
+	Inputs  []string
+}
+
+type SandboxConfig struct {
+	Prepare        ShellCommand
+	NetworkTargets []string
+}
+
 type EnvFile struct {
+	Sandbox            SandboxConfig
 	Path               string
 	Env                []EnvVar
 	Wrap               ShellCommand
@@ -477,7 +492,7 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 		return WorkspaceConfig{}, err
 	}
 	cfg := WorkspaceConfig{Root: root, Path: path}
-	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true}
+	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true, "isolation": true, "source_package": true}
 	for key := range raw {
 		if !known[key] {
 			return WorkspaceConfig{}, diagAt("unknown_key", path, "unknown workspace key %q", key)
@@ -516,6 +531,46 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 			return WorkspaceConfig{}, err
 		}
 	}
+	if v, ok := raw["source_package"]; ok {
+		table, err := expectMap(path, "source_package", v)
+		if err != nil {
+			return cfg, err
+		}
+		for key, value := range table {
+			if key != "inputs" {
+				return cfg, diagAt("unknown_key", path, "unknown workspace source_package key %q", key)
+			}
+			cfg.SourceInputs, err = expectStringSlice(path, "source_package.inputs", value)
+			if err != nil {
+				return cfg, err
+			}
+		}
+	}
+	if v, ok := raw["isolation"]; ok {
+		table, err := expectMap(path, "isolation", v)
+		if err != nil {
+			return cfg, err
+		}
+		for key, v := range table {
+			switch key {
+			case "enabled":
+				cfg.Isolation.Enabled, err = expectBool(path, "isolation.enabled", v)
+			case "inputs":
+				cfg.Isolation.Inputs, err = expectStringSlice(path, "isolation.inputs", v)
+			default:
+				return cfg, diagAt("unknown_key", path, "unknown isolation key %q", key)
+			}
+			if err != nil {
+				return cfg, err
+			}
+		}
+		for _, input := range cfg.Isolation.Inputs {
+			if _, err := cleanRelPath(input); err != nil {
+				return cfg, err
+			}
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -562,7 +617,7 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 		return EnvFile{}, err
 	}
 	env := EnvFile{Path: path}
-	known := map[string]bool{"env": true, "wrap": true, "dependency_provider": true}
+	known := map[string]bool{"env": true, "wrap": true, "dependency_provider": true, "sandbox": true}
 	for key := range raw {
 		if !known[key] {
 			return EnvFile{}, diagAt("unknown_key", path, "unknown env-file key %q", key)
@@ -570,7 +625,7 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	}
 	if _, hasEnv := raw["env"]; !hasEnv {
 		if _, hasWrap := raw["wrap"]; !hasWrap {
-			if _, hasProvider := raw["dependency_provider"]; !hasProvider {
+			if _, hasProvider := raw["dependency_provider"]; !hasProvider && raw["sandbox"] == nil {
 				return EnvFile{}, diagAt("missing_key", path, "env file requires [env], [wrap], dependency_provider, or a combination")
 			}
 		}
@@ -596,6 +651,34 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 			return EnvFile{}, err
 		}
 	}
+	if v, ok := raw["sandbox"]; ok {
+		table, err := expectMap(path, "sandbox", v)
+		if err != nil {
+			return env, err
+		}
+		for key, v := range table {
+			switch key {
+			case "command":
+				env.Sandbox.Prepare, err = parseCommand(path, "sandbox.command", v)
+			case "network_targets":
+				env.Sandbox.NetworkTargets, err = expectStringSlice(path, "sandbox.network_targets", v)
+			default:
+				return env, diagAt("unknown_key", path, "unknown sandbox key %q", key)
+			}
+			if err != nil {
+				return env, err
+			}
+		}
+		if env.Sandbox.Prepare.Empty() {
+			return env, diagAt("missing_key", path, "sandbox.command is required")
+		}
+		for _, target := range env.Sandbox.NetworkTargets {
+			if target != "build:vendor" {
+				return env, diagAt("invalid_value", path, "only build:vendor may acquire sources with network access")
+			}
+		}
+	}
+
 	return env, nil
 }
 
@@ -980,7 +1063,7 @@ func targetConfigKey(kind Command, key string) bool {
 		}
 	}
 	switch key {
-	case "command", "needs", "clear_out":
+	case "command", "needs", "clear_out", "keyring_inputs":
 		return true
 	case "gate":
 		return kind == CommandTest
@@ -1000,7 +1083,7 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 	if kind == CommandGen {
 		return parseGenTarget(path, name, table)
 	}
-	known := map[string]bool{"command": true, "needs": true, "clear_out": true}
+	known := map[string]bool{"command": true, "needs": true, "clear_out": true, "keyring_inputs": true}
 	if kind == CommandBuild || kind == CommandTest {
 		known["dependencies"] = true
 	}
@@ -1024,6 +1107,13 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 		return TargetConfig{}, err
 	}
 	t := TargetConfig{Name: name, Kind: kind, Command: cmd, ClearOut: true, Owner: "recipe", Path: path}
+	if v, ok := table["keyring_inputs"]; ok {
+		t.KeyringInputs, err = expectStringSlice(path, string(kind)+"."+name+".keyring_inputs", v)
+		if err != nil {
+			return t, err
+		}
+	}
+
 	if v, ok := table["needs"]; ok {
 		t.Needs, err = expectStringSlice(path, string(kind)+"."+name+".needs", v)
 		if err != nil {
@@ -1058,7 +1148,7 @@ func parseTarget(path string, kind Command, name string, table map[string]any) (
 }
 
 // signKinds lists the signature formats `sign.<kind>` accepts.
-var signKinds = map[string]bool{signKindPIP: true}
+var signKinds = map[string]bool{signKindPIP: true, "module": true}
 
 // parseTargetSign parses a build target's `sign` table:
 //
@@ -1622,7 +1712,7 @@ func parseSourcePackage(path string, value any) (SourcePackageConfig, error) {
 		return SourcePackageConfig{}, err
 	}
 	cfg := SourcePackageConfig{}
-	known := map[string]bool{"name": true, "enabled": true}
+	known := map[string]bool{"name": true, "enabled": true, "workspace_inputs": true}
 	for key, raw := range table {
 		if !known[key] {
 			return SourcePackageConfig{}, diagAt("unknown_key", path, "unknown source_package key %q", key)
@@ -1637,6 +1727,11 @@ func parseSourcePackage(path string, value any) (SourcePackageConfig, error) {
 				return SourcePackageConfig{}, diagAt("invalid_value", path, "source_package.name must not be empty")
 			}
 			cfg.Name = name
+		case "workspace_inputs":
+			cfg.WorkspaceInputs, err = expectStringSlice(path, "source_package.workspace_inputs", raw)
+			if err != nil {
+				return cfg, err
+			}
 		case "enabled":
 			b, err := expectBool(path, "source_package.enabled", raw)
 			if err != nil {

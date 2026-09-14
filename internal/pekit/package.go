@@ -48,6 +48,14 @@ type payloadEntry struct {
 }
 
 func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, publish bool, member string) error {
+	var capturedSource *sourceInputs
+	if !ctx.Inv.DryRun && recipe.SourcePackage.IsEnabled() && !source.Local && (source.Kind == "url" || source.Kind == "git" || source.Kind == "pypi") {
+		var err error
+		capturedSource, err = prepareSourceBundle(ctx, recipe, workspace, source)
+		if err != nil {
+			return err
+		}
+	}
 	packages, err := loadEffectivePackages(recipe, workspace, source)
 	if err != nil {
 		if ctx.Inv.DryRun && diagCode(err) == "missing_package" && recipe.Delegate.AllowsPackages() && source.SourceRoot != recipe.Root && !dirExists(source.SourceRoot) {
@@ -123,6 +131,25 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	for _, gate := range gates {
 		if err := runTarget(ctx, recipe, workspace, source, version, gate, member); err != nil {
 			return err
+		}
+	}
+	// Gates may rebuild prerequisites within the same isolated job. Re-sign
+	// the final bytes after every worker has stopped, before packaging.
+	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
+		if job := ctx.Jobs[source.WorkBase]; job != nil {
+			for _, name := range sortedKeys(recipe.Targets[CommandBuild]) {
+				target := recipe.Targets[CommandBuild][name]
+				stage := targetStage(source, CommandBuild, name)
+				if !job.Stages[stage] {
+					continue
+				}
+				if err := pipSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
+					return err
+				}
+				if err := moduleSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	var instances []PackageInstance
@@ -218,7 +245,7 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			continue
 		}
 		if inst.SourcePkg {
-			if err := writeSourcePackage(ctx, recipe, workspace, source, version, inst, member, run); err != nil {
+			if err := writeSourcePackage(ctx, recipe, workspace, source, version, inst, member, run, capturedSource); err != nil {
 				return err
 			}
 			continue

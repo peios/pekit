@@ -35,10 +35,15 @@ func runWorkspace(ctx *Context) error {
 	if err != nil {
 		return err
 	}
+	access, err := resolveKeyringAccess(ctx.Inv, ws.Root, &ws)
+	if err != nil {
+		return err
+	}
 	workspaceInv := ctx.Inv
 	workspaceInv.Keyrings = nil
 	workspaceInv.KeyringValues = map[string]string{}
 	workspaceInv.ResolvedKeyringEnv = resolvedKeyrings
+	workspaceInv.ResolvedKeyringAccess = access
 	localCtx := *ctx
 	localCtx.Inv = workspaceInv
 	ctx = &localCtx

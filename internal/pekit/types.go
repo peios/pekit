@@ -82,17 +82,18 @@ type Invocation struct {
 	Local       *string
 	PreferLocal *string
 
-	NoBuild            *string
-	NoVerify           *string
-	NoGates            bool
-	EnvName            string
-	Keyrings           []string
-	KeyringValues      map[string]string
-	ResolvedKeyringEnv map[string]string
-	RefreshSource      bool
-	AllowUnanchored    bool
-	AllowUnsigned      bool
-	Repin              bool
+	NoBuild               *string
+	NoVerify              *string
+	NoGates               bool
+	EnvName               string
+	Keyrings              []string
+	KeyringValues         map[string]string
+	ResolvedKeyringEnv    map[string]string
+	ResolvedKeyringAccess map[string]string
+	RefreshSource         bool
+	AllowUnanchored       bool
+	AllowUnsigned         bool
+	Repin                 bool
 
 	All        bool
 	OutputOnly bool
@@ -119,6 +120,7 @@ type App struct {
 }
 
 type Context struct {
+	Jobs            map[string]*buildJob
 	App             *App
 	Inv             Invocation
 	Renderer        Renderer

@@ -618,7 +618,10 @@ func pipSignTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig
 				}
 				continue
 			}
-			path := filepath.Join(stage, filepath.FromSlash(rel))
+			path, err := containedSigningPath(stage, rel)
+			if err != nil {
+				return err
+			}
 			placement, err := pipSignPath(path, key)
 			if err != nil {
 				return diagAt("sign_failed", path, "%s: %v", label, err)
@@ -648,4 +651,21 @@ func pipSignPath(path string, key *pipSigningKey) (string, error) {
 		return "section", signPIPFile(path, key)
 	}
 	return "sidecar", signPIPDetached(path, key)
+}
+
+// Called after worker shutdown, under the recipe job lock. Glob's no-follow
+// option does not protect literal symlink components in a pattern.
+func containedSigningPath(stage, rel string) (string, error) {
+	root, err := filepath.EvalSymlinks(stage)
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(stage, filepath.FromSlash(rel)))
+	if err != nil {
+		return "", err
+	}
+	if !withinDirectory(root, path) {
+		return "", diag("sign_path_escape", "signing target %s escapes %s", rel, stage)
+	}
+	return path, nil
 }

@@ -24,6 +24,24 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			workspace = &ws
 		}
 	}
+	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
+		cmd := ctx.Inv.EffectiveCommand()
+		if cmd != CommandLint && cmd != CommandLock {
+			profile, err := selectedEnvFile(ctx.Inv, workspace.Root, false)
+			if err != nil {
+				return err
+			}
+			if profile.Sandbox.Prepare.Empty() {
+				return diag("isolation_required", "workspace requires a sandbox environment; select --env peipkg or --env debian")
+			}
+		}
+		unlock, err := lockBuildJob(recipe)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		ctx.Jobs = map[string]*buildJob{}
+	}
 	// A delegate recipe borrows its build targets from the fetched source,
 	// which is not resolved yet — its names are validated per-version after
 	// mergeDelegatedRecipe instead of against the thin delegate stub here.

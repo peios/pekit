@@ -16,6 +16,18 @@ var execCommand = exec.Command
 
 func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, member string) error {
 	stage := targetStage(source, target.Kind, target.Name)
+	var job *buildJob
+	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
+		var err error
+		job, err = (&sandboxCommand{Recipe: recipe, Workspace: *workspace, Source: source}).job(ctx)
+		if err != nil {
+			return err
+		}
+		if (wantsReuseBuild(ctx.Inv, target) || (!target.ClearOut && dirExists(stage))) && !job.Stages[stage] {
+			return diag("isolation_legacy_stage", "%s was not produced by an isolated job; rebuild it before reuse", stage)
+		}
+	}
+
 	if wantsReuseBuild(ctx.Inv, target) {
 		if !dirExists(stage) {
 			return diag("missing_stage", "--no-build requested reuse of build target %q, but %s does not exist", target.Name, stage)
@@ -39,6 +51,10 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 		ctx.Renderer.Event(Event{Type: "target_plan", Member: member, Target: target.Name, Version: version.Raw, Path: stage, Message: "would run target"})
 		return nil
 	}
+	env, err := BuildCommandEnv(ctx, recipe, workspace, source, version, target, stage)
+	if err != nil {
+		return err
+	}
 	// Recorded before the stage is touched, so a clean or a command that fails
 	// leaves the stage marked incomplete rather than merely present.
 	if err := markStageRunning(source, target.Kind, target.Name); err != nil {
@@ -55,10 +71,6 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 	if ctx.Inv.Verbose {
 		ctx.Renderer.Event(Event{Type: "target_stage", Member: member, Target: target.Name, Version: version.Raw, Path: stage, Message: "prepared target stage"})
 	}
-	env, err := BuildCommandEnv(ctx, recipe, workspace, source, version, target, stage)
-	if err != nil {
-		return err
-	}
 	cwd := source.SourceRoot
 	if target.Kind == CommandClean {
 		cwd = recipe.Root
@@ -74,8 +86,25 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 	if err := pipSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
 		return err
 	}
+	if err := moduleSignTarget(ctx, recipe, workspace, target, stage, member, version.Raw); err != nil {
+		return err
+	}
 	if err := markStageComplete(source, target.Kind, target.Name); err != nil {
 		return err
+	}
+	if job != nil {
+		if target.Kind == CommandBuild && target.Name == "vendor" {
+			captured := filepath.Join(job.Directory, "acquisition", "vendor")
+			if err := os.RemoveAll(captured); err != nil {
+				return err
+			}
+			if err := snapshotTree(stage, captured, source.OutBase, job.Secrets); err != nil {
+				return err
+			}
+		}
+		if err := job.recordStage(stage); err != nil {
+			return err
+		}
 	}
 	ctx.Renderer.Event(Event{Type: "target_success", Member: member, Target: target.Name, Version: version.Raw, DurationMS: time.Since(start).Milliseconds(), Message: "target succeeded"})
 	return nil
@@ -105,6 +134,9 @@ func wantsReuseBuild(inv Invocation, target TargetConfig) bool {
 }
 
 func executeCommand(ctx *Context, command ShellCommand, env CommandEnv, cwd, member, version, target string) error {
+	if env.Sandbox != nil {
+		return executeSandbox(ctx, command, env, cwd, member, version, target)
+	}
 	if command.Shell != "" {
 		script := env.Script + "\n" + command.Shell
 		if env.Wrap.Shell != "" {

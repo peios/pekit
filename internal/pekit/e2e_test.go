@@ -2644,12 +2644,13 @@ path = "repo"
 func TestWorkspaceKeyringResolvedAtWorkspaceLevel(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "workspace.pekit.toml"), `include = ["./*"]`)
-	writeFile(t, filepath.Join(dir, "prod.keyring.pekit.toml"), `token = "workspace"`)
+	writeFile(t, filepath.Join(dir, "prod.keyring.pekit.toml"), `token = { value = "workspace", access = "public" }`)
 	for _, name := range []string{"a", "b"} {
 		writeFile(t, filepath.Join(dir, name, "pekit.toml"), `
 out_dir = "out"
 
 [build]
+keyring_inputs = ["token"]
 command = 'printf "$PEKIT_KEYRING_TOKEN" > "$PEKIT_OUT/token"'
 `)
 		writeFile(t, filepath.Join(dir, name, "prod.keyring.pekit.toml"), `token = "`+name+`"`)
