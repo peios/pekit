@@ -37,6 +37,9 @@ var commandFlags = map[Command]map[flagUse]bool{
 	CommandPackage: {
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
 	},
+	CommandRelease: {
+		flagVersion: true, flagKeyring: true, flagAll: true,
+	},
 	CommandPublish: {
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true,
 	},
@@ -531,7 +534,7 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 		if len(selectors) > 1 {
 			return diag("invalid_selector", "clean accepts at most one target selector")
 		}
-	case CommandPackage, CommandPublish:
+	case CommandPackage, CommandPublish, CommandRelease:
 		if inv.All && len(selectors) > 0 {
 			return diag("invalid_flags", "--all cannot be combined with package selectors")
 		}

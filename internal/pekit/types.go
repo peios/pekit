@@ -18,6 +18,7 @@ const (
 	CommandClean     Command = "clean"
 	CommandPackage   Command = "package"
 	CommandPublish   Command = "publish"
+	CommandRelease   Command = "release"
 	CommandGen       Command = "gen"
 	CommandVerify    Command = "verify"
 	CommandLock      Command = "lock"
@@ -34,6 +35,7 @@ var commands = map[string]Command{
 	"clean":     CommandClean,
 	"package":   CommandPackage,
 	"publish":   CommandPublish,
+	"release":   CommandRelease,
 	"gen":       CommandGen,
 	"verify":    CommandVerify,
 	"lock":      CommandLock,
@@ -120,6 +122,8 @@ type App struct {
 }
 
 type Context struct {
+	Release         *releaseSession
+	ReleaseBuild    *releaseBuild
 	Jobs            map[string]*buildJob
 	App             *App
 	Inv             Invocation

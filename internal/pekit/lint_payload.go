@@ -661,8 +661,24 @@ func lintELFRules(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs []str
 		if l.on("elf.relr") && info.Dynamic && !info.Relr && info.RelativeRelocs > 0 {
 			l.report("elf.relr", name, dest, "%d relative relocations in .rela.dyn and no DT_RELR; link with -z pack-relative-relocs", info.RelativeRelocs)
 		}
-		if l.on("elf.cet") && (info.Machine == elf.EM_X86_64 || info.Machine == elf.EM_386) && !info.CET {
-			l.report("elf.cet", name, dest, "no IBT+SHSTK property note; compile with -fcf-protection (an assembly object without the note drops it for the whole link)")
+		if l.on("elf.cet") && (info.Machine == elf.EM_X86_64 || info.Machine == elf.EM_386) {
+			if !info.CET {
+				l.report("elf.cet", name, dest, "no IBT+SHSTK property note; compile all linked code with control-flow protection; forcing linker notes does not instrument functions")
+			}
+			debugSource := ""
+			if len(info.BuildID) >= 2 {
+				expected := "usr/lib/debug/.build-id/" + info.BuildID[:2] + "/" + info.BuildID[2:] + ".debug"
+				if owner := set.byName[set.union[expected]]; owner != nil {
+					debugSource = owner.Files[expected].Source
+				}
+			}
+			bad, checked, err := checkCETCode(src, debugSource, info)
+			if err != nil {
+				l.report("elf.cet", name, dest, "cannot validate IBT code: %s", err)
+			} else if len(bad) > 0 {
+				first := bad[0]
+				l.report("elf.cet", name, dest, "%d of %d inspected indirect-call targets lack ENDBR; first: %s at %#x (%s); IBT property notes alone do not establish compatibility", len(bad), checked, first.Name, first.Address, first.Reason)
+			}
 		}
 		if l.on("elf.rpath") && info.Rpath != "" {
 			l.report("elf.rpath", name, dest, "carries a run path %q", info.Rpath)

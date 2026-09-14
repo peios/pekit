@@ -257,7 +257,7 @@ func plannedGating(recipe RecipeConfig, cmd Command, selectors []string) (buildN
 			return targetNames(order), targetNames(selected), nil
 		}
 		return targetNames(order), nil, nil
-	case CommandPackage, CommandPublish:
+	case CommandPackage, CommandPublish, CommandRelease:
 		out := make([]TargetConfig, 0, len(builds))
 		for _, name := range sortedKeys(builds) {
 			out = append(out, builds[name])

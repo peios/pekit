@@ -49,7 +49,7 @@ type payloadEntry struct {
 
 func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, publish bool, member string) error {
 	var capturedSource *sourceInputs
-	if !ctx.Inv.DryRun && recipe.SourcePackage.IsEnabled() && !source.Local && (source.Kind == "url" || source.Kind == "git" || source.Kind == "pypi") {
+	if !ctx.Inv.DryRun && (ctx.ReleaseBuild != nil || (recipe.SourcePackage.IsEnabled() && !source.Local && (source.Kind == "url" || source.Kind == "git" || source.Kind == "pypi"))) {
 		var err error
 		capturedSource, err = prepareSourceBundle(ctx, recipe, workspace, source)
 		if err != nil {
@@ -219,6 +219,9 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 		if err != nil {
 			return err
 		}
+		if err := guardProductionPublish(workspace, publishOps); err != nil {
+			return err
+		}
 		if err := reservePublishDestinations(ctx, publishOps, member); err != nil {
 			return err
 		}
@@ -253,6 +256,9 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 		if err := writePackage(ctx, recipe, workspace, source, version, inst, member, run); err != nil {
 			return err
 		}
+	}
+	if ctx.ReleaseBuild != nil && !ctx.Inv.DryRun {
+		return ctx.ReleaseBuild.qualify(ctx, recipe, workspace, source, version, instances, capturedSource, signKey, member)
 	}
 	for _, op := range publishOps.LocalDir {
 		if err := publishLocalDir(ctx, op, member); err != nil {
@@ -1425,9 +1431,12 @@ func writePeipkg(ctx *Context, workspace *WorkspaceConfig, inst PackageInstance,
 	// workspace symbol-version policy refines glibc-style sonames with a
 	// version floor) and pkgconfig(...) capabilities from .pc files.
 	for _, d := range []pack.DerivedDeps{
-		pack.DeriveELFDeps(files, inst.Version, workspace.symbolVersionPolicy()),
+		pack.DeriveELFDeps(files, inst.Version, workspace.symbolVersionPolicy(), workspace.symbolCapabilities()...),
 		pack.DerivePkgConfigDeps(files),
 	} {
+		if d.Err != nil {
+			return wrapDiag("derived_dependencies", instanceID(inst), d.Err)
+		}
 		manifest.Provides = mergeProvides(manifest.Provides, d.Provides)
 		manifest.Dependencies = mergeDeps(manifest.Dependencies, d.Dependencies)
 		for _, w := range d.Warnings {

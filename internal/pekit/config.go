@@ -184,6 +184,7 @@ type LocalSourceConfig struct {
 }
 
 type WorkspaceConfig struct {
+	Release      ReleaseConfig
 	SourceInputs []string
 	Isolation    IsolationConfig
 	Root         string
@@ -202,6 +203,8 @@ type WorkspaceConfig struct {
 // which sonames get a symbol-version floor during dependency derivation.
 type PolicyConfig struct {
 	SymbolVersions map[string]string
+	// SymbolCapabilities selects sonames whose exact ELF version nodes are capabilities.
+	SymbolCapabilities []string
 }
 
 // symbolVersionPolicy adapts the workspace policy to the pack derivation
@@ -211,6 +214,13 @@ func (w *WorkspaceConfig) symbolVersionPolicy() pack.SymbolVersionPolicy {
 		return nil
 	}
 	return pack.SymbolVersionPolicy(w.Policy.SymbolVersions)
+}
+
+func (w *WorkspaceConfig) symbolCapabilities() []string {
+	if w == nil {
+		return nil
+	}
+	return w.Policy.SymbolCapabilities
 }
 
 type IsolationConfig struct {
@@ -492,7 +502,13 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 		return WorkspaceConfig{}, err
 	}
 	cfg := WorkspaceConfig{Root: root, Path: path}
-	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true, "isolation": true, "source_package": true}
+	if value, ok := raw["release"]; ok {
+		cfg.Release, err = parseReleaseConfig(path, value)
+		if err != nil {
+			return cfg, err
+		}
+	}
+	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true, "isolation": true, "source_package": true, "release": true}
 	for key := range raw {
 		if !known[key] {
 			return WorkspaceConfig{}, diagAt("unknown_key", path, "unknown workspace key %q", key)
@@ -574,8 +590,7 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 	return cfg, nil
 }
 
-// parsePolicy parses the top-level [policy] table. Currently it carries one
-// sub-table, [policy.symbol_versions] (soname -> token prefix).
+// parsePolicy parses package-version floors and exact ELF version capabilities.
 func parsePolicy(path string, value any) (PolicyConfig, error) {
 	table, err := expectMap(path, "policy", value)
 	if err != nil {
@@ -584,6 +599,22 @@ func parsePolicy(path string, value any) (PolicyConfig, error) {
 	var out PolicyConfig
 	for key, raw := range table {
 		switch key {
+		case "symbol_capabilities":
+			values, err := expectStringSlice(path, "policy.symbol_capabilities", raw)
+			if err != nil {
+				return PolicyConfig{}, err
+			}
+			seen := map[string]bool{}
+			for _, name := range values {
+				if err := pack.ValidateCapabilityName(name); err != nil || strings.ContainsAny(name, "():/") {
+					return PolicyConfig{}, diagAt("invalid_value", path, "policy.symbol_capabilities: invalid soname %q", name)
+				}
+				if seen[name] {
+					return PolicyConfig{}, diagAt("invalid_value", path, "policy.symbol_capabilities: duplicate soname %q", name)
+				}
+				seen[name] = true
+			}
+			out.SymbolCapabilities = values
 		case "symbol_versions":
 			sv, err := expectMap(path, "policy.symbol_versions", raw)
 			if err != nil {

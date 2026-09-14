@@ -24,6 +24,11 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			workspace = &ws
 		}
 	}
+	if ctx.Inv.EffectiveCommand() == CommandRelease {
+		if err := preflightRelease(ctx, recipe, workspace); err != nil {
+			return err
+		}
+	}
 	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
 		cmd := ctx.Inv.EffectiveCommand()
 		if cmd != CommandLint && cmd != CommandLock {
@@ -85,8 +90,10 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	// Consuming commands run the scoped drift gates first, so no build/test/
 	// package/publish ever proceeds from a stale generated tree (unless
 	// --no-verify is passed).
-	if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
-		return err
+	if cmd != CommandRelease {
+		if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
+			return err
+		}
 	}
 	versions, err := resolveRecipeVersions(ctx, recipe)
 	if err != nil {
@@ -119,6 +126,10 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			}
 		case CommandPackage:
 			if err := packageOrPublish(ctx, effectiveRecipe, workspace, source, version, false, member); err != nil {
+				return err
+			}
+		case CommandRelease:
+			if err := releaseRecipe(ctx, effectiveRecipe, workspace, source, version, member); err != nil {
 				return err
 			}
 		case CommandPublish:

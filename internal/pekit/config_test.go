@@ -503,3 +503,29 @@ gate = true
 		t.Fatal("build target accepted test-only gate")
 	}
 }
+
+func TestWorkspaceExactSymbolCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{`["libstdc++.so.6"]`, true}, {`["libstdc++.so.6", "libOther.so.1"]`, true},
+		{`"libstdc++.so.6"`, false}, {`["elfver(fake)"]`, false}, {`["libfoo:bar"]`, false},
+		{`["libstdc++.so.6", "libstdc++.so.6"]`, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "workspace.pekit.toml")
+			writeFile(t, path, "include=['app']\n[policy]\nsymbol_capabilities="+tc.value+"\n")
+			cfg, err := LoadWorkspace(path)
+			if (err == nil) != tc.valid {
+				t.Fatalf("LoadWorkspace: %v", err)
+			}
+			if tc.valid && len(cfg.symbolCapabilities()) == 0 {
+				t.Fatal("exact policy not retained")
+			}
+		})
+	}
+	if (*WorkspaceConfig)(nil).symbolCapabilities() != nil {
+		t.Fatal("nil workspace should have no exact policy")
+	}
+}

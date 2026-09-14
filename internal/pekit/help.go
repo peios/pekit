@@ -16,7 +16,7 @@ const helpReference = "https://learn.peios.org/pekit/reference/cli"
 // commandOrder is the order commands are listed in; every key of commands
 // must appear (helpCoversEveryCommand checks).
 var commandOrder = []Command{
-	CommandBuild, CommandTest, CommandInstall, CommandPackage, CommandPublish,
+	CommandBuild, CommandTest, CommandInstall, CommandPackage, CommandPublish, CommandRelease,
 	CommandClean, CommandGen, CommandVerify, CommandLock, CommandLint,
 	CommandWorkspace, CommandHelp, CommandVersion,
 }
@@ -27,6 +27,7 @@ var commandSummary = map[Command]string{
 	CommandInstall:   "stage the builds an install target needs, then run it",
 	CommandPackage:   "build and write package artifacts (.peipkg, tar)",
 	CommandPublish:   "package, then publish to the configured destinations",
+	CommandRelease:   "qualify a fixed candidate in all release environments and promote one batch",
 	CommandClean:     "run the clean target and/or remove managed output",
 	CommandGen:       "run a gen target: write generated source into the tree",
 	CommandVerify:    "run gen verify_commands: a read-only drift check",
@@ -44,6 +45,7 @@ var commandSelectors = map[Command]string{
 	CommandInstall:   "install target names (default: main)",
 	CommandPackage:   "package selectors, `<package>` or `<package>:<instance>` (default: the only package, or --all)",
 	CommandPublish:   "package selectors, as for package",
+	CommandRelease:   "package selectors, as for package; requires workspace [release] policy",
 	CommandClean:     "at most one clean target name",
 	CommandGen:       "gen target names (default: main, or --all)",
 	CommandVerify:    "gen target names (default: main, or --all)",

@@ -244,7 +244,7 @@ func planWorkspaceSelectors(ctx *Context, ws WorkspaceConfig, members []Workspac
 		return plan, nil
 	}
 	cmd := ctx.Inv.DelegateCommand
-	if cmd != CommandBuild && cmd != CommandTest && cmd != CommandInstall && cmd != CommandClean && cmd != CommandPackage && cmd != CommandPublish {
+	if cmd != CommandBuild && cmd != CommandTest && cmd != CommandInstall && cmd != CommandClean && cmd != CommandPackage && cmd != CommandPublish && cmd != CommandRelease {
 		return plan, nil
 	}
 	availableByMember := map[string]map[string]bool{}
@@ -300,7 +300,7 @@ func workspaceMemberSelectors(ws WorkspaceConfig, member WorkspaceMember, cmd Co
 		for name := range recipe.Targets[cmd] {
 			out[name] = true
 		}
-	case CommandPackage, CommandPublish:
+	case CommandPackage, CommandPublish, CommandRelease:
 		pkgs, err := loadEffectivePackages(recipe, &ws, cleanSourceState(recipe))
 		if err != nil {
 			return nil, err
@@ -313,7 +313,7 @@ func workspaceMemberSelectors(ws WorkspaceConfig, member WorkspaceMember, cmd Co
 }
 
 func workspaceSelectorKey(cmd Command, selector string) string {
-	if cmd == CommandPackage || cmd == CommandPublish {
+	if cmd == CommandPackage || cmd == CommandPublish || cmd == CommandRelease {
 		def, _, _ := strings.Cut(selector, ":")
 		return def
 	}
