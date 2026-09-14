@@ -179,7 +179,14 @@ func TestReleaseRealIsolatedBuildAndGates(t *testing.T) {
 			if failure {
 				gate = "exit 7"
 			}
-			writeFile(t, filepath.Join(ws, "a/pekit.toml"), "[build.main]\ncommand='printf hello > \"$PEKIT_OUT/payload.txt\"'\n[test.check]\ngate=true\nneeds=['main']\ncommand="+fmt.Sprintf("%q", gate)+"\n")
+			build := `root=${PEKIT_OUT%/*}; root=${root%/*}
+test "$PEKIT_SOURCE_ROOT" = "$root/source"
+test "$PEKIT_LITERAL_ROOT" = "$PEKIT_SOURCE_ROOT"
+test ! -L "$PEKIT_SOURCE_ROOT"
+test ! -e "$PEKIT_SOURCE_ROOT/worker-mutation"
+printf private > "$PEKIT_SOURCE_ROOT/worker-mutation"
+printf hello > "$PEKIT_OUT/payload.txt"`
+			writeFile(t, filepath.Join(ws, "a/pekit.toml"), "[build.main]\ncommand="+fmt.Sprintf("%q", build)+"\n[test.check]\ngate=true\nneeds=['main']\ncommand="+fmt.Sprintf("%q", gate)+"\n")
 			p := filepath.Join(ws, "a/package.pekit.toml")
 			data, err := os.ReadFile(p)
 			if err != nil {
@@ -199,6 +206,13 @@ func TestReleaseRealIsolatedBuildAndGates(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			frozen, err := filepath.Glob(filepath.Join(ws, "a/out/.pekit-release-sources/candidate-*/*"))
+			if err != nil || len(frozen) != 1 {
+				t.Fatalf("missing frozen source: %v, %v", frozen, err)
+			}
+			if _, err := os.Stat(filepath.Join(frozen[0], "worker-mutation")); !os.IsNotExist(err) {
+				t.Fatalf("worker changed frozen source: %v", err)
 			}
 			paths, err := filepath.Glob(filepath.Join(ws, ".pekit/releases/candidate-*/*/*/qualification.json"))
 			if err != nil || len(paths) != 2 {

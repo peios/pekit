@@ -205,6 +205,17 @@ func releaseRecipe(ctx *Context, recipe RecipeConfig, ws *WorkspaceConfig, sourc
 		// job success markers from masquerading as the native candidate.
 		scoped := source
 		scoped.WorkBase = filepath.Join(source.OutBase, ".pekit-release-builds", filepath.Base(s.Directory), fmt.Sprintf("%x", id[:12]), env)
+		// Keep source beside build/ and test/ so debug-source remapping sees the
+		// same layout as ordinary builds. This coordinator-only alias is resolved
+		// when snapshotting; workers mount a private writable copy at this path.
+		if err = os.MkdirAll(scoped.WorkBase, 0700); err != nil {
+			return err
+		}
+		scoped.SourceRoot = filepath.Join(scoped.WorkBase, "source")
+		scoped.LiteralRoot = scoped.SourceRoot
+		if err = os.Symlink(frozenSource, scoped.SourceRoot); err != nil {
+			return err
+		}
 		log, err := os.OpenFile(filepath.Join(b.Directory, "events.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
