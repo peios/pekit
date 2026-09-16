@@ -2,12 +2,17 @@ package pekit
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/peios/peipkg/pack"
+	"github.com/peios/peipkg/repopub"
 )
 
 func TestCompactSourceBundle(t *testing.T) {
@@ -103,4 +108,42 @@ func TestCompactRealSourceTree(t *testing.T) {
 	}
 	info, _ := os.Stat(outer[0].Source)
 	t.Logf("verified %d source entries through %d-byte compact archive", len(entries), info.Size())
+	// Exercise the actual consumer's entry/decompression limits and signature
+	// verifier, not merely the producer and reconstruction script.
+	public, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(dir, "diagnostic-source.peipkg")
+	output, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for _, name := range []string{"prepared-source.tar", "build-inputs.json", "rebuild.py"} {
+		files["usr/src/dist/probe-1.0-1/"+name] = filepath.Join(dir, name)
+	}
+	err = pack.Pack(pack.PackOptions{
+		Manifest: pack.Manifest{
+			Name: "probe-source", Version: "1.0-1", Architecture: "noarch",
+			Description: "Source transport fixture", License: "GPL-3.0-or-later", LicenseClass: "free",
+			Build: pack.BuildInfo{Timestamp: "2026-01-01T00:00:00Z", FarmID: "test", SourceRef: "fixture"},
+		},
+		Files: files, SignKey: key, Out: output,
+	})
+	closeErr := output.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	inspected, err := repopub.InspectPackage(archive, []ed25519.PublicKey{public})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inspected.Signed || len(inspected.Payload) >= 100_000 {
+		t.Fatal("invalid compact package")
+	}
+	t.Logf("signed outer source archive accepted with %d payload entries", len(inspected.Payload))
 }
