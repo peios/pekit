@@ -1,6 +1,7 @@
 package pekit
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ type sourceBundleFile struct {
 	Identity string `json:"identity"`
 }
 type sourceBundleManifest struct {
+	PreparedArchive string             `json:"prepared_archive,omitempty"`
 	Schema          int                `json:"schema"`
 	Recipe          string             `json:"recipe"`
 	SourceVersion   string             `json:"source_version"`
@@ -158,9 +160,16 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 		}
 		manifest.Files = append(manifest.Files, sourceBundleFile{Path: strings.TrimPrefix(entry.Dest, root+"/"), Identity: identity})
 	}
+	entries, err = compactSourceBundle(entries, &manifest, root, stage, 90_000)
+	if err != nil {
+		return nil, err
+	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return nil, err
+	}
+	if len(data) >= 64<<20 {
+		return nil, diag("source_bundle_limit", "source identity manifest exceeds 64 MiB")
 	}
 	manifestPath := filepath.Join(stage, "build-inputs.json")
 	if err := os.WriteFile(manifestPath, append(data, '\n'), 0644); err != nil {
@@ -171,7 +180,7 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 		return nil, err
 	}
 	readmePath := filepath.Join(stage, "REBUILD.md")
-	readme := fmt.Sprintf("# Rebuilding %s\n\nThis schema-2 bundle contains pristine upstream archives, the prepared source tree (with patches already applied), the complete recipe tree, inherited workspace policy, declared shared inputs and build-environment records. File modes, link targets and hashes are listed in build-inputs.json. Verify the outer .peipkg signature using your distribution trust configuration before trusting this bundle.\n\nRun `python3 rebuild.py test` or `python3 rebuild.py package`. Additional Pekit flags may follow; PEKIT_REBUILD_ENV selects a captured environment (default: the original profile). A compatible Pekit, Python 3, Bubblewrap and the selected profile's root-preparation tools must be installed. The native profile needs a trusted repository at workspace/_peipkgRepo_; fresh Debian acquisition needs Docker and archive access. For a catalogue profile with retained-root support, set PEKIT_DEBIAN_REPLAY to the absolute path of build-environment and PEKIT_DEBIAN_ROOT_STORE to the retained archive directory before running rebuild.py; dependency-root replay invokes neither Docker nor APT. Root archives are stored separately from this source bundle. These are declared dependency services, not missing recipe sources. Signing, when required, uses your own operator-provided keys. Production private keys are never distributed.\n\nReconstruction uses the included prepared source with --local and the recorded upstream version. It never fetches upstream or reapplies patches. Local reconstruction artifacts carry local provenance; republishing them as original signed releases is not implied. When this job ran build.vendor, acquisition/vendor contains the captured vendored outputs as well. The generic reconstruction command may still run the declared acquisition stage; these captured sources are available for offline language-specific replay. The Debian preparer verifies matching policy, architecture, requested dependencies, inventory and root archive hashes before replay, with no acquisition fallback. Keep the referenced archives for supported releases. Other providers require their own historical dependency replay contract. Bit-for-bit package reproducibility remains a separate release check; a retained root does not freeze the host kernel, clock, CPU or signing identity. New normal jobs continue automatic upstream tracking.\n", version.Raw)
+	readme := fmt.Sprintf("# Rebuilding %s\n\nThis schema-%d bundle contains pristine upstream archives, the prepared source tree (with patches already applied), the complete recipe tree, inherited workspace policy, declared shared inputs and build-environment records. Large prepared trees travel in prepared-source.tar and are verified and unpacked by rebuild.py. File modes, link targets and hashes are listed in build-inputs.json. Verify the outer .peipkg signature using your distribution trust configuration before trusting this bundle.\n\nRun `python3 rebuild.py test` or `python3 rebuild.py package`. Additional Pekit flags may follow; PEKIT_REBUILD_ENV selects a captured environment (default: the original profile). A compatible Pekit, Python 3, Bubblewrap and the selected profile's root-preparation tools must be installed. The native profile needs a trusted repository at workspace/_peipkgRepo_; fresh Debian acquisition needs Docker and archive access. For a catalogue profile with retained-root support, set PEKIT_DEBIAN_REPLAY to the absolute path of build-environment and PEKIT_DEBIAN_ROOT_STORE to the retained archive directory before running rebuild.py; dependency-root replay invokes neither Docker nor APT. Root archives are stored separately from this source bundle. These are declared dependency services, not missing recipe sources. Signing, when required, uses your own operator-provided keys. Production private keys are never distributed.\n\nReconstruction uses the included prepared source with --local and the recorded upstream version. It never fetches upstream or reapplies patches. Local reconstruction artifacts carry local provenance; republishing them as original signed releases is not implied. When this job ran build.vendor, acquisition/vendor contains the captured vendored outputs as well. The generic reconstruction command may still run the declared acquisition stage; these captured sources are available for offline language-specific replay. The Debian preparer verifies matching policy, architecture, requested dependencies, inventory and root archive hashes before replay, with no acquisition fallback. Keep the referenced archives for supported releases. Other providers require their own historical dependency replay contract. Bit-for-bit package reproducibility remains a separate release check; a retained root does not freeze the host kernel, clock, CPU or signing identity. New normal jobs continue automatic upstream tracking.\n", version.Raw, manifest.Schema)
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return nil, err
 	}
@@ -179,62 +188,5 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 	return entries, nil
 }
 
-const sourceRebuildScript = `#!/usr/bin/env python3
-"""Verify and rebuild a Pekit corresponding-source bundle without its checkout."""
-import hashlib, json, os, pathlib, stat, sys
-root = pathlib.Path(__file__).resolve().parent
-manifest = json.loads((root / "build-inputs.json").read_text())
-if manifest.get("schema") != 2:
-    sys.exit("unsupported source bundle schema")
-restore_modes = []
-for entry in manifest["files"]:
-    relative = pathlib.PurePosixPath(entry["path"])
-    if relative.is_absolute() or ".." in relative.parts:
-        sys.exit("invalid source bundle path")
-    path = root / relative
-    if not path.resolve().is_relative_to(root):
-        sys.exit("source bundle path escapes: " + str(relative))
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode):
-        identity = "link:" + os.readlink(path)
-    elif stat.S_ISDIR(info.st_mode):
-        kind, mode_text = entry["identity"].split(":", 1)
-        mode = int(mode_text, 8)
-        if kind != "dir" or mode & ~0o777:
-            sys.exit("invalid source directory mode")
-        identity = entry["identity"]
-        restore_modes.append((path, mode))
-    elif stat.S_ISREG(info.st_mode):
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for block in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(block)
-        mode_text, expected_hash = entry["identity"].split(":", 1)
-        identity = mode_text + ":" + h.hexdigest()
-        mode = int(mode_text, 8)
-        if mode & ~0o777:
-            sys.exit("invalid source file mode")
-        restore_modes.append((path, mode))
-    else:
-        sys.exit("unsupported source bundle file: " + str(relative))
-    if identity != entry["identity"]:
-        sys.exit("source bundle input changed: " + str(relative))
-# Peipkg stores its own permissions; transport tar modes are not Unix source
-# modes. Restore the recorded build-input modes only after every hash verifies.
-for path, mode in restore_modes:
-    os.chmod(path, mode)
-command = sys.argv[1] if len(sys.argv) > 1 else "test"
-if command not in ("build", "test", "package"):
-    sys.exit("usage: rebuild.py [build|test|package] [additional Pekit flags]")
-recipe = root / manifest["recipe"]
-if not recipe.resolve().is_relative_to(root):
-    sys.exit("recipe escapes source bundle")
-args = ["pekit", "--recipe", str(recipe), command, "--local=" + str(root / "source")]
-if manifest["source_version"]:
-    args += ["--version", manifest["source_version"]]
-environment = os.environ.get("PEKIT_REBUILD_ENV", manifest["environment"])
-if environment:
-    args += ["--env", environment]
-args += sys.argv[2:]
-os.execvp(args[0], args)
-`
+//go:embed source_rebuild.py
+var sourceRebuildScript string
