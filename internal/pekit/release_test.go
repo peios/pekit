@@ -299,3 +299,50 @@ func TestReleaseLatestDoesNotChangeCandidateBetweenChecks(t *testing.T) {
 	}
 
 }
+
+func TestReleaseAcceptsLogicalClaimPaths(t *testing.T) {
+	ws, args := releaseFixture(t, "")
+	p := filepath.Join(ws, "a/package.pekit.toml")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, p, string(data)+`
+[provides]
+fixture-role='1'
+[claims.provides.fixture-role.command]
+target='/usr/share/a/payload.txt'
+path='/usr/bin/fixture-role'
+`)
+	p = filepath.Join(ws, "b/package.pekit.toml")
+	data, err = os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, p, string(data)+`
+[dependencies]
+fixture-role='*'
+[claims.dependencies.fixture-role.command]
+path='/usr/bin/fixture-consumer'
+`)
+	releaseCommit(t, ws)
+	if err := runRelease(t, ws, append([]string{"workspace", "release", "--all"}, args...)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(readPublishedIndex(t, filepath.Join(ws, "public/index/active.json")).Packages); got != 2 {
+		t.Fatalf("published %d packages", got)
+	}
+}
+
+func TestClaimPayloadPathRejectsTraversal(t *testing.T) {
+	for _, value := range []string{"", "/", "usr/bin/sh", "../usr/bin/sh", "/../usr/bin/sh", "/usr/../bin/sh", "//usr/bin/sh", "/usr/./bin/sh", "/usr/bin/sh/", "/usr/bin/\x00sh"} {
+		if _, err := claimPayloadPath(value); err == nil {
+			t.Errorf("accepted %q", value)
+		}
+	}
+	for value, want := range map[string]string{"/usr/bin/sh": "usr/bin/sh", "/init": "init", "/run/service/socket": "run/service/socket"} {
+		if got, err := claimPayloadPath(value); err != nil || got != want {
+			t.Errorf("%q: %q, %v", value, got, err)
+		}
+	}
+}

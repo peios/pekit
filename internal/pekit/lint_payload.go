@@ -3,6 +3,7 @@ package pekit
 import (
 	"bytes"
 	"debug/elf"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -149,7 +150,7 @@ func lintPayload(l *linter, recipe RecipeConfig, workspace *WorkspaceConfig, sou
 				for _, slots := range side {
 					for _, slot := range slots {
 						if slot.Path != "" {
-							if p, err := cleanRelPath(slot.Path); err == nil {
+							if p, err := claimPayloadPath(slot.Path); err == nil {
 								set.claims[p] = true
 							}
 						}
@@ -731,4 +732,13 @@ func lintELFRules(l *linter, set *lintPayloadSet, pkg lintPackage, libDirs []str
 			}
 		}
 	}
+}
+
+// Claims name absolute paths in the installed logical root. Payload indexes
+// instead use relative keys; this conversion must not accept traversal aliases.
+func claimPayloadPath(value string) (string, error) {
+	if !path.IsAbs(value) || value == "/" || path.Clean(value) != value {
+		return "", fmt.Errorf("invalid logical claim path %q", value)
+	}
+	return cleanRelPath(strings.TrimPrefix(value, "/"))
 }

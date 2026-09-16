@@ -120,7 +120,7 @@ func lintReleaseArchives(l *linter, instances []PackageInstance, key ed25519.Pri
 			for _, slots := range side {
 				for _, slot := range slots {
 					if slot.Path != "" {
-						p, e := cleanRelPath(slot.Path)
+						p, e := claimPayloadPath(slot.Path)
 						if e != nil {
 							return e
 						}
