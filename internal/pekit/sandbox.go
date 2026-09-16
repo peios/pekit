@@ -280,6 +280,9 @@ func executeSandbox(ctx *Context, command ShellCommand, env CommandEnv, cwd, mem
 	if !fileExists(filepath.Join(root, "usr/bin/sh")) && !fileExists(filepath.Join(root, "bin/sh")) {
 		return fmt.Errorf("sandbox root preparer did not provide a shell")
 	}
+	if err := ensureSandboxLocalhost(root); err != nil {
+		return err
+	}
 	stages, err := sandboxStages(s, job)
 	if err != nil {
 		return err
@@ -417,4 +420,42 @@ func makeInputMountpoint(root, path, source string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// Docker exports omit its bind-mounted hosts file. Supply deterministic local
+// resolution when a preparer leaves it empty, without exposing host aliases.
+func ensureSandboxLocalhost(root string) error {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := r.MkdirAll("etc", 0755); err != nil {
+		return err
+	}
+	info, err := r.Lstat("etc/hosts")
+	if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("sandbox hosts path is not a file")
+		}
+		if err := r.Remove("etc/hosts"); err != nil {
+			return err
+		}
+	}
+	f, err := r.OpenFile("etc/hosts", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n")
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

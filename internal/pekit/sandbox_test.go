@@ -80,6 +80,15 @@ func TestSandboxProbe(t *testing.T) {
 	if os.Getenv("HOST_SECRET") != "" || os.Getenv("PEKIT_KEYRING_SECRET") != "" {
 		t.Fatal("host environment leaked")
 	}
+	addresses, err := net.LookupHost("localhost")
+	if err != nil || len(addresses) == 0 {
+		t.Fatalf("localhost resolution: %v %v", addresses, err)
+	}
+	for _, address := range addresses {
+		if ip := net.ParseIP(address); ip == nil || !ip.IsLoopback() {
+			t.Fatalf("non-loopback localhost: %s", address)
+		}
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		t.Fatal(err)
@@ -320,5 +329,66 @@ description="Isolated signing regression fixture"
 	}
 	if err := verifyPIPDetached(data, sig, key.pub); err != nil {
 		t.Fatalf("packaged signature was stale after gate: %v", err)
+	}
+}
+
+func TestSandboxLocalhostFile(t *testing.T) {
+	for _, kind := range []string{"missing", "empty", "symlink", "populated", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "etc"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "etc/hosts")
+			sentinel := filepath.Join(t.TempDir(), "host-sentinel")
+			writeFile(t, sentinel, "private host alias")
+			switch kind {
+			case "empty":
+				writeFile(t, target, "")
+			case "populated":
+				writeFile(t, target, "127.0.0.1 localhost custom\n")
+			case "symlink":
+				if err := os.Symlink(sentinel, target); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(target, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ensureSandboxLocalhost(root)
+			if kind == "directory" {
+				if err == nil {
+					t.Fatal("accepted directory")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
+			if kind == "populated" {
+				expected = "127.0.0.1 localhost custom\n"
+			}
+			if string(data) != expected {
+				t.Fatalf("hosts: %q", data)
+			}
+			before := string(data)
+			if err := ensureSandboxLocalhost(root); err != nil {
+				t.Fatal(err)
+			}
+			data, _ = os.ReadFile(target)
+			if string(data) != before {
+				t.Fatal("not idempotent")
+			}
+			data, _ = os.ReadFile(sentinel)
+			if string(data) != "private host alias" {
+				t.Fatal("modified host")
+			}
+		})
 	}
 }
