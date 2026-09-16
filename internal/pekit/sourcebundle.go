@@ -90,10 +90,8 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 			return nil, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			real, err := filepath.EvalSymlinks(entry.Source)
-			link, _ := os.Readlink(entry.Source)
-			if err != nil || filepath.IsAbs(link) || !withinDirectory(inputs.Directory, real) {
-				return nil, diag("source_input_escape", "source bundle contains a missing or escaping link: %s", entry.Dest)
+			if !sourceLinkContained(inputs.Directory, entry.Source) {
+				return nil, diag("source_input_escape", "source bundle contains an unsafe link: %s", entry.Dest)
 			}
 		}
 	}

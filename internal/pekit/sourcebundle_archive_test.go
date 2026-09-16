@@ -20,6 +20,9 @@ func TestCompactSourceBundle(t *testing.T) {
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
 		writeFile(t, filepath.Join(dir, "inputs/source", name), name)
 	}
+	if err := os.Symlink("missing/fixture", filepath.Join(dir, "inputs/source/dangling")); err != nil {
+		t.Fatal(err)
+	}
 	entries, err := sourceTreeEntries(filepath.Join(dir, "inputs"), "bundle")
 	if err != nil {
 		t.Fatal(err)

@@ -30,6 +30,36 @@ def relative_path(value):
     return path
 
 
+def verify_contained(base, path):
+    """Permit internal dangling fixtures while rejecting unsafe link traversal."""
+    pending = list(path.relative_to(base).parts)
+    parts, hops = [], 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                reject("source link escapes")
+            parts.pop()
+            continue
+        candidate = base.joinpath(*parts, part)
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None and stat.S_ISLNK(info.st_mode):
+            hops += 1
+            target = os.readlink(candidate)
+            if hops > 40 or pathlib.PurePosixPath(target).is_absolute():
+                reject("absolute or cyclic source link")
+            pending = target.split("/") + pending
+            continue
+        if info is not None and pending and not stat.S_ISDIR(info.st_mode):
+            reject("source link parent is not a directory")
+        parts.append(part)
+
+
 def digest(path):
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -133,8 +163,7 @@ def unpack_prepared(manifest, identities):
         for destination, link in links:
             destination.symlink_to(link)
         for destination, _ in links:
-            if not destination.resolve(strict=True).is_relative_to(temporary / "source"):
-                reject("prepared source link escapes")
+            verify_contained(temporary / "source", destination)
         os.rename(temporary / "source", root / "source")
     finally:
         shutil.rmtree(temporary)
@@ -161,8 +190,7 @@ def main():
     restore_modes = []
     for name, identity in identities.items():
         path = root / name
-        if not path.resolve(strict=True).is_relative_to(root):
-            reject("source bundle path escapes: " + name)
+        verify_contained(root, path)
         info = path.lstat()
         kind, value = parse_identity(identity)
         if stat.S_ISLNK(info.st_mode) and kind == "link":

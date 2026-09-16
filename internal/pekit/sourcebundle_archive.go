@@ -24,8 +24,7 @@ func compactSourceBundle(entries []payloadEntry, manifest *sourceBundleManifest,
 				for range strings.Split(strings.TrimPrefix(entry.Dest, prefix+"/"), "/") {
 					sourceRoot = filepath.Dir(sourceRoot)
 				}
-				real, err := filepath.EvalSymlinks(entry.Source)
-				if err != nil || !withinDirectory(sourceRoot, real) {
+				if !sourceLinkContained(sourceRoot, entry.Source) {
 					return nil, diag("source_input_escape", "packed source link escapes prepared tree: %s", entry.Dest)
 				}
 			}

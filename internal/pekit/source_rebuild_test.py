@@ -97,13 +97,27 @@ class RebuildTests(unittest.TestCase):
         self.bundle()
         self.run_bundle()
 
-    def test_escaping_and_dangling_links(self):
-        for target in ["../../outside", "/etc/passwd", "missing", "link"]:
+    def test_escaping_cyclic_and_non_directory_links(self):
+        for target in ["../../outside", "../recipe", "/etc/passwd", "link", "file/child"]:
             with self.subTest(target=target):
                 self.members[-1] = ("source/link", tarfile.SYMTYPE, b"", target)
                 self.files["source/link"] = "link:" + target
                 self.bundle()
                 self.run_bundle()
+
+    def test_internal_dangling_link_roundtrip(self):
+        self.members[-1] = ("source/link", tarfile.SYMTYPE, b"", "missing/child")
+        self.files["source/link"] = "link:missing/child"
+        self.members.append(("source/chain", tarfile.SYMTYPE, b"", "link"))
+        self.files["source/chain"] = "link:link"
+        self.bundle()
+        self.run_bundle(True)
+        self.assertTrue((self.root / "source/link").is_symlink())
+        self.assertFalse((self.root / "source/link").exists())
+        self.run_bundle(True)
+        self.manifest["schema"] = 2
+        self.save()
+        self.run_bundle(True)
 
     def test_unsupported_types(self):
         for kind in [tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE, tarfile.GNUTYPE_SPARSE]:
