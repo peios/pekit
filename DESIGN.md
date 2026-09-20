@@ -3829,3 +3829,21 @@ Implementation-owned decisions:
 
 - Define the stable JSON plan object and NDJSON event schemas during
   implementation, following the output renderer contract in this design.
+
+
+## Corresponding-source transport limits
+
+Large prepared source trees use source-bundle schema 4: a deterministic gzip
+stream named `prepared-source.tar.gz`, plus the unchanged per-path identities in
+`build-inputs.json`. The embedded `rebuild.py` also reads older schema 2 and 3
+bundles; schema 3 retains its uncompressed `prepared-source.tar` name. Use the
+script shipped with the bundle so the reader understands that bundle's schema.
+
+Compression keeps prepared sources from consuming the outer package's entire
+4 GiB decompression allowance before pristine archives, vendored inputs and
+build metadata are added. It does not relax any limits: the decoded prepared tar
+stream, including headers and padding, stays within 4 GiB, as does the sum of its
+file sizes. The source identity manifest remains limited to 64 MiB including its
+final newline; large manifests use compact JSON when indentation would exceed
+that limit. Gzip integrity and every declared source identity are checked before
+Pekit is invoked. Whole-package entry/decompression limits remain unchanged.

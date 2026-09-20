@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify and rebuild a Pekit corresponding-source bundle without its checkout."""
+import gzip
 import hashlib
 import json
 import os
@@ -84,7 +85,7 @@ def parse_identity(identity):
 
 def unpack_prepared(manifest, identities):
     name = manifest.get("prepared_archive")
-    if name != "prepared-source.tar" or name not in identities:
+    if name != {3: "prepared-source.tar", 4: "prepared-source.tar.gz"}.get(manifest.get("schema")) or name not in identities:
         reject("invalid prepared source archive")
     archive = root / name
     if not stat.S_ISREG(archive.lstat().st_mode) or archive.stat().st_size > MAX_ARCHIVE:
@@ -114,50 +115,71 @@ def unpack_prepared(manifest, identities):
     class BoundedReader:
         def __init__(self, stream):
             self.stream = stream
+            self.position = 0
 
         def read(self, size=-1):
             if size < 0 or size > CHUNK:
                 reject("oversized prepared source tar header")
-            return self.stream.read(size)
+            data = self.stream.read(min(size, MAX_ARCHIVE - self.position + 1))
+            self.position += len(data)
+            if self.position > MAX_ARCHIVE:
+                reject("prepared source tar stream exceeds size limit")
+            return data
 
-        def __getattr__(self, name):
-            return getattr(self.stream, name)
+        def tell(self):
+            return self.position
+
+        def seek(self, offset, whence=0):
+            target = offset if whence == 0 else self.position + offset if whence == 1 else -1
+            if target < self.position or target > MAX_ARCHIVE:
+                reject("invalid prepared source tar seek")
+            while self.position < target:
+                if not self.read(min(CHUNK, target - self.position)):
+                    reject("truncated prepared source tar stream")
+            return self.position
 
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=".prepared-", dir=root))
     try:
         seen, links, total = set(), [], 0
-        with archive.open("rb") as stream, tarfile.open(fileobj=BoundedReader(stream), mode="r:") as tar:
-            for member in tar:
-                path = member.name.rstrip("/") if member.isdir() else member.name
-                relative_path(path)
-                if path not in expected or path in seen:
-                    reject("unexpected or duplicate prepared source member: " + path)
-                seen.add(path)
-                kind, _ = parse_identity(expected[path])
-                destination = temporary / path
-                if member.sparse is not None or member.size < 0:
-                    reject("sparse or invalid prepared source member")
-                total += member.size
-                if total > MAX_ARCHIVE:
-                    reject("prepared source exceeds size limit")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if member.isdir() and kind == "dir" and member.size == 0:
-                    destination.mkdir(exist_ok=True)
-                elif member.issym() and kind == "link" and member.size == 0:
-                    if member.linkname != expected[path][5:]:
-                        reject("prepared source link changed")
-                    links.append((destination, member.linkname))
-                elif member.isfile() and kind == "file":
-                    h = hashlib.sha256()
-                    with tar.extractfile(member) as source, destination.open("xb") as target:
-                        for block in iter(lambda: source.read(CHUNK), b""):
-                            h.update(block)
-                            target.write(block)
-                    if h.hexdigest() != expected[path].split(":", 1)[1]:
-                        reject("prepared source input changed: " + path)
-                else:
-                    reject("unsupported prepared source member: " + path)
-                tar.members.clear()
+        opener = gzip.open if manifest["schema"] == 4 else open
+        with opener(archive, "rb") as stream:
+            bounded = BoundedReader(stream)
+            with tarfile.open(fileobj=bounded, mode="r:") as tar:
+                for member in tar:
+                    path = member.name.rstrip("/") if member.isdir() else member.name
+                    relative_path(path)
+                    if path not in expected or path in seen:
+                        reject("unexpected or duplicate prepared source member: " + path)
+                    seen.add(path)
+                    kind, _ = parse_identity(expected[path])
+                    destination = temporary / path
+                    if member.sparse is not None or member.size < 0:
+                        reject("sparse or invalid prepared source member")
+                    total += member.size
+                    if total > MAX_ARCHIVE:
+                        reject("prepared source exceeds size limit")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if member.isdir() and kind == "dir" and member.size == 0:
+                        destination.mkdir(exist_ok=True)
+                    elif member.issym() and kind == "link" and member.size == 0:
+                        if member.linkname != expected[path][5:]:
+                            reject("prepared source link changed")
+                        links.append((destination, member.linkname))
+                    elif member.isfile() and kind == "file":
+                        h = hashlib.sha256()
+                        with tar.extractfile(member) as source, destination.open("xb") as target:
+                            for block in iter(lambda: source.read(CHUNK), b""):
+                                h.update(block)
+                                target.write(block)
+                        if h.hexdigest() != expected[path].split(":", 1)[1]:
+                            reject("prepared source input changed: " + path)
+                    else:
+                        reject("unsupported prepared source member: " + path)
+                    tar.members.clear()
+            # Read through padding and gzip trailers, enforcing the decoded
+            # stream cap even after tar's end marker and validating gzip CRC.
+            while bounded.read(CHUNK):
+                pass
         if seen != set(expected):
             reject("missing prepared source members")
         for destination, link in links:
@@ -175,7 +197,7 @@ def main():
     if len(data) > MAX_MANIFEST:
         reject("source identity manifest exceeds size limit")
     manifest = json.loads(data)
-    if manifest.get("schema") not in (2, 3):
+    if manifest.get("schema") not in (2, 3, 4):
         reject("unsupported source bundle schema")
     identities = {}
     for entry in manifest["files"]:
@@ -185,7 +207,7 @@ def main():
             reject("duplicate source bundle path")
         parse_identity(entry["identity"])
         identities[name] = entry["identity"]
-    if manifest["schema"] == 3:
+    if manifest["schema"] in (3, 4):
         unpack_prepared(manifest, identities)
     restore_modes = []
     for name, identity in identities.items():
@@ -226,5 +248,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, TypeError, OSError, RuntimeError, tarfile.TarError) as error:
+    except (ValueError, KeyError, TypeError, OSError, EOFError, RuntimeError, tarfile.TarError) as error:
         sys.exit("source bundle verification failed: " + str(error))

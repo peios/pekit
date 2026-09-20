@@ -1,4 +1,5 @@
 """Adversarial reconstruction tests invoked by Go against the embedded script."""
+import gzip
 import hashlib
 import io
 import json
@@ -67,7 +68,7 @@ class RebuildTests(unittest.TestCase):
 
     def test_altered_archive(self):
         self.bundle()
-        with (self.root / "prepared-source.tar").open("ab") as f:
+        with (self.root / self.manifest["prepared_archive"]).open("ab") as f:
             f.write(b"tamper")
         self.run_bundle()
 
@@ -150,6 +151,54 @@ class RebuildTests(unittest.TestCase):
         self.bundle()
         (self.root / "source").symlink_to("recipe")
         self.run_bundle()
+
+
+class CompressedRebuildTests(RebuildTests):
+    def bundle(self):
+        super().bundle()
+        raw = self.root / "prepared-source.tar"
+        archive = self.root / "prepared-source.tar.gz"
+        archive.write_bytes(gzip.compress(raw.read_bytes(), mtime=0))
+        raw.unlink()
+        self.files.pop(raw.name)
+        self.files[archive.name] = "0644:" + hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.manifest.update(schema=4, prepared_archive=archive.name,
+                             files=[{"path": p, "identity": i} for p, i in self.files.items()])
+        self.save()
+
+    def rewrite_archive(self, data):
+        archive = self.root / self.manifest["prepared_archive"]
+        archive.write_bytes(data)
+        self.files[archive.name] = "0644:" + hashlib.sha256(data).hexdigest()
+        self.manifest["files"] = [{"path": p, "identity": i} for p, i in self.files.items()]
+        self.save()
+
+    def test_truncated_and_invalid_checksum(self):
+        self.bundle()
+        data = (self.root / self.manifest["prepared_archive"]).read_bytes()
+        for changed in (data[:-4], data[:-8] + bytes([data[-8] ^ 1]) + data[-7:]):
+            with self.subTest(data=changed[-8:]):
+                self.rewrite_archive(changed)
+                self.run_bundle()
+                self.assertFalse((self.root / "source").exists())
+
+    def test_unknown_archive_name_or_schema_pair(self):
+        for name, schema in (("prepared-source.tar.xz", 4), ("prepared-source.tar.gz", 3)):
+            self.bundle()
+            self.manifest.update(prepared_archive=name, schema=schema)
+            self.save()
+            self.run_bundle()
+
+    def test_decoded_padding_limit(self):
+        self.bundle()
+        data = gzip.decompress((self.root / self.manifest["prepared_archive"]).read_bytes())
+        self.rewrite_archive(gzip.compress(data + b"\0" * 65536, mtime=0))
+        # A reduced test-only bound demonstrates high-ratio/padding accounting;
+        # the production consumer keeps the unchanged4GiB constant.
+        (self.root / "rebuild.py").write_bytes(SCRIPT.replace(b"MAX_ARCHIVE = 4 << 30", b"MAX_ARCHIVE = 16384"))
+        result = self.run_bundle()
+        self.assertIn("tar stream exceeds size limit", result.stderr)
+        self.assertFalse((self.root / "source").exists())
 
 
 if __name__ == "__main__":

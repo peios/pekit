@@ -2,9 +2,11 @@ package pekit
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +34,7 @@ func TestCompactSourceBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outer) != 1 || manifest.Schema != 3 || manifest.PreparedArchive != "prepared-source.tar" {
+	if len(outer) != 1 || manifest.Schema != 4 || manifest.PreparedArchive != "prepared-source.tar.gz" {
 		t.Fatalf("unexpected compaction: %+v %+v", outer, manifest)
 	}
 	first, err := os.ReadFile(outer[0].Source)
@@ -90,7 +92,7 @@ func TestCompactRealSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outer) != 1 || manifest.Schema != 3 {
+	if len(outer) != 1 || manifest.Schema != 4 {
 		t.Fatalf("expected large source compaction; got %d entries", len(outer))
 	}
 	data, err := json.Marshal(manifest)
@@ -123,7 +125,7 @@ func TestCompactRealSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string]string{}
-	for _, name := range []string{"prepared-source.tar", "build-inputs.json", "rebuild.py"} {
+	for _, name := range []string{"prepared-source.tar.gz", "build-inputs.json", "rebuild.py"} {
 		files["usr/src/dist/probe-1.0-1/"+name] = filepath.Join(dir, name)
 	}
 	err = pack.Pack(pack.PackOptions{
@@ -149,4 +151,40 @@ func TestCompactRealSourceTree(t *testing.T) {
 		t.Fatal("invalid compact package")
 	}
 	t.Logf("signed outer source archive accepted with %d payload entries", len(inspected.Payload))
+}
+
+func TestPreparedTarWriterLimit(t *testing.T) {
+	var output bytes.Buffer
+	writer := &preparedTarWriter{writer: &output, written: (4 << 30) - 1}
+	if n, err := writer.Write([]byte{0}); n != 1 || err != nil {
+		t.Fatalf("boundary write: %d %v", n, err)
+	}
+	if n, err := writer.Write([]byte{0}); n != 0 || err == nil {
+		t.Fatalf("overflow write: %d %v", n, err)
+	}
+	if output.Len() != 1 {
+		t.Fatal("overflow data reached compressed writer")
+	}
+}
+
+func TestPreparedTarGzipHeader(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "file")
+	writeFile(t, source, "content")
+	archive := filepath.Join(dir, "prepared-source.tar.gz")
+	if err := writeTarArchive(archive, []payloadEntry{{Source: source, Dest: "source/file"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(archive)
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	if !zr.ModTime.IsZero() || zr.Name != "" || zr.Comment != "" {
+		t.Fatal("noncanonical gzip header")
+	}
+	if _, err := io.Copy(io.Discard, zr); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -2,6 +2,7 @@ package pekit
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
@@ -1281,6 +1282,11 @@ func filterCoveredDirectoryMatches(root string, matches []string) []string {
 }
 
 func writeTar(path string, entries []payloadEntry) error {
+	return writeTarArchive(path, entries, false)
+}
+
+// compressedPrepared bounds every uncompressed tar byte, including headers and padding.
+func writeTarArchive(path string, entries []payloadEntry, compressedPrepared bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return wrapDiag("mkdir", filepath.Dir(path), err)
 	}
@@ -1290,7 +1296,17 @@ func writeTar(path string, entries []payloadEntry) error {
 	}
 	tmpPath := f.Name()
 	defer os.Remove(tmpPath)
-	tw := tar.NewWriter(f)
+	defer f.Close()
+	var output io.Writer = f
+	var compressed *gzip.Writer
+	if compressedPrepared {
+		compressed, err = gzip.NewWriterLevel(f, gzip.BestSpeed)
+		if err != nil {
+			return wrapDiag("gzip", path, err)
+		}
+		output = &preparedTarWriter{writer: compressed}
+	}
+	tw := tar.NewWriter(output)
 	for _, entry := range entries {
 		info, err := os.Lstat(entry.Source)
 		if err != nil {
@@ -1332,6 +1348,11 @@ func writeTar(path string, entries []payloadEntry) error {
 	if err := tw.Close(); err != nil {
 		_ = f.Close()
 		return wrapDiag("tar", path, err)
+	}
+	if compressed != nil {
+		if err := compressed.Close(); err != nil {
+			return wrapDiag("gzip", path, err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		return wrapDiag("tar", path, err)
