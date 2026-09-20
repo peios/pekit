@@ -204,6 +204,9 @@ func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, s
 		values["PEKIT_VERSION_PRERELEASE"] = version.Prerelease
 		values["PEKIT_VERSION_BUILDMETA"] = version.BuildMeta
 	}
+	for _, input := range source.Inputs {
+		values["PEKIT_INPUT_"+inputEnvName(input.Name)] = input.Root
+	}
 	seenDeps := map[string]string{}
 	for _, dep := range target.Needs {
 		name := "PEKIT_" + targetEnvName(dep) + "_OUT"

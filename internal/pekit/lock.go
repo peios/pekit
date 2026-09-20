@@ -36,6 +36,22 @@ const lockFileHeader = `# pekit.lock — machine-written by pekit; records pinne
 type LockFile struct {
 	Schema  int          `toml:"schema"`
 	Sources []LockSource `toml:"source,omitempty"`
+	Inputs  []LockInput  `toml:"input,omitempty"`
+}
+
+// LockInput pins one [input.<name>] upstream. It asserts the same thing a
+// url [[source]] entry does — these bytes, verified by this key — and differs
+// only in being addressed by name, because a recipe may have several and each
+// carries its own version.
+type LockInput struct {
+	Name    string `toml:"name"`
+	Version string `toml:"version"`
+	URL     string `toml:"url,omitempty"`
+	SHA256  string `toml:"sha256,omitempty"`
+	// SignatureKey is the hex fingerprint of the pinned upstream key that
+	// verified these bytes; empty when no signature block is configured.
+	SignatureKey string `toml:"signature_key,omitempty"`
+	LockedAt     string `toml:"locked_at,omitempty"`
 }
 
 type LockSource struct {
@@ -123,12 +139,34 @@ func (l *LockFile) Put(entry LockSource) {
 	l.Sources = append(l.Sources, entry)
 }
 
+// FindInput returns the pin for a named input, or nil when it is not locked.
+func (l *LockFile) FindInput(name string) *LockInput {
+	for i := range l.Inputs {
+		if l.Inputs[i].Name == name {
+			return &l.Inputs[i]
+		}
+	}
+	return nil
+}
+
+// PutInput inserts or replaces the entry for its name.
+func (l *LockFile) PutInput(entry LockInput) {
+	if existing := l.FindInput(entry.Name); existing != nil {
+		*existing = entry
+		return
+	}
+	l.Inputs = append(l.Inputs, entry)
+}
+
 // SaveLockFile writes the lock atomically with entries in stable version
 // order, so an unattended update produces a one-entry diff.
 func SaveLockFile(recipeRoot string, lock LockFile) error {
 	lock.Schema = lockSchema
 	sort.SliceStable(lock.Sources, func(i, j int) bool {
 		return compareVersionText(lock.Sources[i].Version, lock.Sources[j].Version) < 0
+	})
+	sort.SliceStable(lock.Inputs, func(i, j int) bool {
+		return lock.Inputs[i].Name < lock.Inputs[j].Name
 	})
 	var buf bytes.Buffer
 	buf.WriteString(lockFileHeader)

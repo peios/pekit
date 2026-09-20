@@ -189,6 +189,15 @@ func (s *sandboxCommand) job(ctx *Context) (*buildJob, error) {
 		}
 		job.Inputs[input] = copy
 	}
+	// Recipe inputs are declared upstreams, already fetched and verified. Bind
+	// each read-only at its own path: a worker must read the exact materialised
+	// bytes and cannot alter them.
+	for _, input := range s.Source.Inputs {
+		if input.Root == "" {
+			continue
+		}
+		job.Inputs[input.Root] = input.Root
+	}
 	controlRecord := filepath.Join(dir, "source-inputs.json")
 	if reuse {
 		data, err := os.ReadFile(controlRecord)

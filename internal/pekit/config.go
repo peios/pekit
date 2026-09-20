@@ -68,8 +68,27 @@ type RecipeConfig struct {
 	Wrap          ShellCommand
 	Targets       map[Command]map[string]TargetConfig
 	Source        SourceConfig
+	Inputs        []InputConfig
 	Delegate      DelegateConfig
 	SourcePackage SourcePackageConfig
+}
+
+// InputConfig is an additional authenticated upstream input, declared as
+// [input.<name>]. A recipe has exactly one [source]; an input is how it names
+// the other upstreams a build consumes — the Peios kernel needs both its pkm
+// tree and the pristine Linux tarball. Inputs are fetched, signature-checked
+// and pinned by exactly the same code as [source.url], and they are recorded
+// in pekit.lock so the bytes stay independently verifiable.
+//
+// An input never participates in version discovery: its version is its own,
+// pinned by an exact `versions` constraint, and moving it is a deliberate act.
+// A patch series applies to the source tree, so inputs do not take one.
+type InputConfig struct {
+	Name string
+	// Version is the exact version the pin resolved to. Rendering {{version}}
+	// inside an input block substitutes this, never the recipe's version.
+	Version string
+	URL     URLSourceConfig
 }
 
 // SourcePackageConfig controls the corresponding-source package a recipe
@@ -402,7 +421,7 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	known := map[string]bool{
 		"out_dir": true, "env": true, "wrap": true, "source": true, "delegate": true,
 		"build": true, "test": true, "install": true, "clean": true, "gen": true,
-		"source_package": true,
+		"source_package": true, "input": true,
 	}
 	for key := range raw {
 		if !known[key] {
@@ -432,6 +451,12 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	}
 	if v, ok := raw["source"]; ok {
 		cfg.Source, err = parseSource(path, root, v)
+		if err != nil {
+			return RecipeConfig{}, err
+		}
+	}
+	if v, ok := raw["input"]; ok {
+		cfg.Inputs, err = parseInputs(path, v)
 		if err != nil {
 			return RecipeConfig{}, err
 		}
@@ -1349,6 +1374,74 @@ func parseTargetDependencies(path, key string, value any) (map[string]map[string
 		out[provider] = deps
 	}
 	return out, nil
+}
+
+// inputNamePattern keeps a name usable as the PEKIT_INPUT_<NAME> suffix after
+// upper-casing and mapping '-' to '_', so two names cannot collide there.
+var inputNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
+
+func parseInputs(path string, value any) ([]InputConfig, error) {
+	table, err := expectMap(path, "input", value)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(table))
+	for name := range table {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	seenEnv := map[string]string{}
+	inputs := make([]InputConfig, 0, len(names))
+	for _, name := range names {
+		if !inputNamePattern.MatchString(name) {
+			return nil, diagAt("invalid_name", path, "input name %q must be lower-case alphanumeric words separated by hyphens", name)
+		}
+		env := inputEnvName(name)
+		if prev, dup := seenEnv[env]; dup {
+			return nil, diagAt("input_collision", path, "inputs %q and %q both export PEKIT_INPUT_%s", prev, name, env)
+		}
+		seenEnv[env] = name
+		inputTable, err := expectMap(path, "input."+name, table[name])
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := inputTable["patch_series"]; ok {
+			return nil, diagAt("unknown_key", path, "input.%s does not take patch_series; a patch series applies to [source]", name)
+		}
+		cfg, err := parseURLSource(path, inputTable)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.URL == "" {
+			return nil, diagAt("invalid_source", path, "input.%s requires url", name)
+		}
+		// An input is deliberately pinned: it is not swept by --latest, so the
+		// constraint has to name one version rather than a range to select from.
+		version, err := exactConstraintVersion(cfg.Versions)
+		if err != nil {
+			return nil, diagAt("invalid_versions", path, "input.%s: %s", name, err.Error())
+		}
+		inputs = append(inputs, InputConfig{Name: name, Version: version, URL: cfg})
+	}
+	return inputs, nil
+}
+
+// exactConstraintVersion accepts the pinned forms an input may use — "= X" or
+// a bare "X" — and rejects anything that would leave pekit choosing a version.
+func exactConstraintVersion(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("versions must pin one version, e.g. versions = \"= 7.0.9\"")
+	}
+	pinned := strings.TrimSpace(strings.TrimPrefix(trimmed, "="))
+	if pinned == "" || strings.ContainsAny(pinned, "<>=*,| \t") {
+		return "", fmt.Errorf("versions = %q selects a range; an input must pin one version, e.g. versions = \"= 7.0.9\"", raw)
+	}
+	return pinned, nil
+}
+
+func inputEnvName(name string) string {
+	return strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 }
 
 func parseSource(path, root string, value any) (SourceConfig, error) {

@@ -272,6 +272,20 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 	if l.on("source.signature.required") && s.URL.URL != "" && !s.URL.Signature.Configured() {
 		l.report("source.signature.required", "", path, "[source.url] verifies no upstream signature; add [source.url.signature] with the release key")
 	}
+	// An input is an upstream download like any other, so it answers to the
+	// same rules; naming the block keeps the finding actionable.
+	for _, input := range recipe.Inputs {
+		field := "input." + input.Name
+		if l.on("source.signature.required") && !input.URL.Signature.Configured() {
+			l.report("source.signature.required", "", path, "[%s] verifies no upstream signature; add [%s.signature] with the release key", field, field)
+		}
+		if l.on("source.signature.fingerprint") {
+			lintSignatureFingerprints(l, path, field+".signature", input.URL.Signature)
+		}
+		if l.on("source.signature.keys") {
+			lintSignatureKeys(l, recipe, field+".signature", input.URL.Signature)
+		}
+	}
 	if l.on("source.signature.fingerprint") {
 		lintSignatureFingerprints(l, path, "source.url.signature", s.URL.Signature)
 		lintSignatureFingerprints(l, path, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)

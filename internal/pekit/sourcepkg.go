@@ -149,6 +149,19 @@ func writeSourcePackage(ctx *Context, recipe RecipeConfig, workspace *WorkspaceC
 	default:
 		return diag("unsupported_source", "source package cannot be built from a %s source", source.Kind)
 	}
+	// Declared inputs are upstream bytes the build consumed, so corresponding
+	// source carries them too, each under its own name and byte-for-byte as
+	// fetched. Their hashes are in pekit.lock, so a recipient can verify them
+	// independently of us.
+	for _, input := range source.Inputs {
+		if input.Artifact == "" {
+			continue
+		}
+		if !fileExists(input.Artifact) {
+			return diag("missing_source_artifact", "cached input artifact %s does not exist", input.Artifact)
+		}
+		entries = append(entries, payloadEntry{Source: input.Artifact, Dest: root + "/upstream/" + input.Name + "/" + filepath.Base(input.Artifact)})
+	}
 	entries, err := bundleEntries(ctx, captured, source, version, root, inst.Stage, entries)
 	if err != nil {
 		return err

@@ -34,6 +34,9 @@ type SourceState struct {
 	Timestamp     int64
 	Local         bool
 	Unanchored    bool
+	// Inputs are the recipe's additional authenticated upstreams, in name
+	// order. Each is fetched, verified and pinned exactly as a url source is.
+	Inputs []InputState
 	// Artifact is the cached download of a url source — the pristine
 	// upstream bytes, exactly what the lock hash covers. Empty for other
 	// kinds and on dry runs.
@@ -75,6 +78,20 @@ type SourceManifest struct {
 }
 
 func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceState, error) {
+	state, err := resolveSourceTree(ctx, recipe, version)
+	if err != nil {
+		return SourceState{}, err
+	}
+	// Inputs are resolved after the source so a broken [source] is reported
+	// first; they are independent of it and of each other.
+	state.Inputs, err = resolveInputs(ctx, recipe, state.OutBase)
+	if err != nil {
+		return SourceState{}, err
+	}
+	return state, nil
+}
+
+func resolveSourceTree(ctx *Context, recipe RecipeConfig, version Version) (SourceState, error) {
 	outBase := recipe.OutDir
 	if !filepath.IsAbs(outBase) {
 		outBase = filepath.Join(recipe.Root, outBase)
