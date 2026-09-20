@@ -162,12 +162,9 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 	if err != nil {
 		return nil, err
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := encodeSourceBundleManifest(manifest)
 	if err != nil {
 		return nil, err
-	}
-	if len(data) >= 64<<20 {
-		return nil, diag("source_bundle_limit", "source identity manifest exceeds 64 MiB")
 	}
 	manifestPath := filepath.Join(stage, "build-inputs.json")
 	if err := os.WriteFile(manifestPath, append(data, '\n'), 0644); err != nil {
@@ -188,3 +185,23 @@ func bundleEntries(ctx *Context, inputs *sourceInputs, source SourceState, versi
 
 //go:embed source_rebuild.py
 var sourceRebuildScript string
+
+// Preserve readable manifests when they fit. Large identity lists may fit the
+// consumer's unchanged limit once insignificant JSON whitespace is removed.
+func encodeSourceBundleManifest(manifest sourceBundleManifest) ([]byte, error) {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if len(data) >= 64<<20 {
+		data, err = json.Marshal(manifest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Leave room for the newline appended by bundleEntries.
+	if len(data) >= 64<<20 {
+		return nil, diag("source_bundle_limit", "source identity manifest exceeds 64 MiB")
+	}
+	return data, nil
+}
