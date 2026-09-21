@@ -83,13 +83,24 @@ type RecipeConfig struct {
 // An input never participates in version discovery: its version is its own,
 // pinned by an exact `versions` constraint, and moving it is a deliberate act.
 // A patch series applies to the source tree, so inputs do not take one.
+//
+// A delegated build brings its inputs with it: when the recipe delegates
+// build, the source tree's own [input.*] blocks join the recipe's (see
+// delegatedInputs), because the borrowed targets are what consume them.
 type InputConfig struct {
 	Name string
 	// Version is the exact version the pin resolved to. Rendering {{version}}
 	// inside an input block substitutes this, never the recipe's version.
 	Version string
 	URL     URLSourceConfig
+	// Path is the pekit.toml that declared the input — the recipe's own, or a
+	// delegated source tree's. Its signature key_files resolve against that
+	// file's directory, where they are committed alongside the declaration.
+	Path string
 }
+
+// KeyRoot is the directory an input's relative signature key_files name.
+func (c InputConfig) KeyRoot() string { return filepath.Dir(c.Path) }
 
 // SourcePackageConfig controls the corresponding-source package a recipe
 // emits alongside its binary packages. Emission defaults on for any
@@ -1421,7 +1432,7 @@ func parseInputs(path string, value any) ([]InputConfig, error) {
 		if err != nil {
 			return nil, diagAt("invalid_versions", path, "input.%s: %s", name, err.Error())
 		}
-		inputs = append(inputs, InputConfig{Name: name, Version: version, URL: cfg})
+		inputs = append(inputs, InputConfig{Name: name, Version: version, URL: cfg, Path: path})
 	}
 	return inputs, nil
 }

@@ -39,10 +39,11 @@ type LockFile struct {
 	Inputs  []LockInput  `toml:"input,omitempty"`
 }
 
-// LockInput pins one [input.<name>] upstream. It asserts the same thing a
-// url [[source]] entry does — these bytes, verified by this key — and differs
-// only in being addressed by name, because a recipe may have several and each
-// carries its own version.
+// LockInput pins one version of one [input.<name>] upstream. It asserts the
+// same thing a url [[source]] entry does — these bytes, verified by this key —
+// and is keyed by (name, version) the way [[source]] entries are keyed by
+// version: a delegated source may pin a different version of an input at each
+// of its releases, and every one of them must stay verifiable.
 type LockInput struct {
 	Name    string `toml:"name"`
 	Version string `toml:"version"`
@@ -139,19 +140,20 @@ func (l *LockFile) Put(entry LockSource) {
 	l.Sources = append(l.Sources, entry)
 }
 
-// FindInput returns the pin for a named input, or nil when it is not locked.
-func (l *LockFile) FindInput(name string) *LockInput {
+// FindInput returns the pin for one version of a named input, or nil when that
+// version is not locked.
+func (l *LockFile) FindInput(name, version string) *LockInput {
 	for i := range l.Inputs {
-		if l.Inputs[i].Name == name {
+		if l.Inputs[i].Name == name && l.Inputs[i].Version == version {
 			return &l.Inputs[i]
 		}
 	}
 	return nil
 }
 
-// PutInput inserts or replaces the entry for its name.
+// PutInput inserts or replaces the entry for its name and version.
 func (l *LockFile) PutInput(entry LockInput) {
-	if existing := l.FindInput(entry.Name); existing != nil {
+	if existing := l.FindInput(entry.Name, entry.Version); existing != nil {
 		*existing = entry
 		return
 	}
@@ -166,7 +168,10 @@ func SaveLockFile(recipeRoot string, lock LockFile) error {
 		return compareVersionText(lock.Sources[i].Version, lock.Sources[j].Version) < 0
 	})
 	sort.SliceStable(lock.Inputs, func(i, j int) bool {
-		return lock.Inputs[i].Name < lock.Inputs[j].Name
+		if lock.Inputs[i].Name != lock.Inputs[j].Name {
+			return lock.Inputs[i].Name < lock.Inputs[j].Name
+		}
+		return compareVersionText(lock.Inputs[i].Version, lock.Inputs[j].Version) < 0
 	})
 	var buf bytes.Buffer
 	buf.WriteString(lockFileHeader)
@@ -288,7 +293,7 @@ func applyURLLockWithPatches(ctx *Context, recipe RecipeConfig, cfg URLSourceCon
 		}
 		for i, patch := range patches {
 			if patch.Config.Signature.Configured() && entry.Patches[i].SignatureKey == "" {
-				fpr, err := verifyURLSignature(ctx, recipe, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
+				fpr, err := verifyURLSignature(ctx, recipe.Root, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
 				if err != nil {
 					return urlLockState{}, err
 				}
@@ -315,7 +320,7 @@ func applyURLLockWithPatches(ctx *Context, recipe RecipeConfig, cfg URLSourceCon
 	}
 	for i, patch := range patches {
 		if patch.Config.Signature.Configured() {
-			fpr, err := verifyURLSignature(ctx, recipe, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
+			fpr, err := verifyURLSignature(ctx, recipe.Root, patch.Config.Signature, patch.URL, patch.Artifact, patch.Version, "source.url.patch_series.signature")
 			if err != nil {
 				return urlLockState{}, err
 			}
@@ -476,9 +481,18 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 		if err != nil {
 			return err
 		}
-		if len(lock.Sources) == 0 {
+		if len(lock.Sources) == 0 && len(lock.Inputs) == 0 {
 			ctx.Renderer.Event(Event{Type: "lock_status", Member: member, Path: lockFilePath(recipe.Root), Message: "no locked sources"})
 			return nil
+		}
+		// Inputs are listed too: a delegated source's inputs are declared in
+		// the fetched tree, so the lock is the one place a reader sees them.
+		for _, entry := range lock.Inputs {
+			msg := "input " + entry.Name + " url sha256:" + entry.SHA256
+			if entry.SignatureKey != "" {
+				msg += " signed by " + shortFingerprint(entry.SignatureKey)
+			}
+			ctx.Renderer.Event(Event{Type: "lock_status", Member: member, Version: entry.Version, Message: msg})
 		}
 		for _, entry := range lock.Sources {
 			msg := ""

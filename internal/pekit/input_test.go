@@ -2,6 +2,7 @@ package pekit
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func TestInputIsFetchedLockedAndExportedToTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := lock.FindInput("kernel")
+	entry := lock.FindInput("kernel", "7.0.9")
 	if entry == nil {
 		t.Fatal("expected a lock entry for input kernel")
 	}
@@ -156,6 +157,267 @@ command = "true"
 	}
 	if diagCode(err) != "invalid_name" {
 		t.Fatalf("expected invalid_name, got %v (%s)", diagCode(err), err)
+	}
+}
+
+// A delegated source declares the input its borrowed build reads. The
+// delegating recipe declares nothing, yet the input is fetched, verified with
+// the key committed beside the source's pekit.toml, and pinned in the
+// delegating recipe's own lock — the source tree is never written to.
+func TestDelegatedSourceDeclaresItsInput(t *testing.T) {
+	dir := t.TempDir()
+	signer := newTestSigner(t)
+	inputURL := "https://example.test/linux-7.0.9.tar.gz"
+	artifact := makeTarGz(t, "linux-7.0.9", "from-delegated-input")
+	serveURLs(t, map[string][]byte{
+		inputURL:          artifact,
+		inputURL + ".sig": detachSign(t, signer, artifact),
+	})
+	source := filepath.Join(dir, "src")
+	writeFile(t, filepath.Join(source, "pekit.toml"), `
+[input.kernel]
+url = "https://example.test/linux-{{version}}.tar.gz"
+versions = "= 7.0.9"
+extract = true
+root = "linux-{{version}}"
+
+[input.kernel.signature]
+key_files = ["keys/upstream.key"]
+
+[build]
+command = 'cat "$PEKIT_INPUT_KERNEL/payload.txt" > "$PEKIT_OUT/input"'
+`)
+	if err := os.MkdirAll(filepath.Join(source, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "keys", "upstream.key"), armoredPublicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+delegate = true
+
+[source.local]
+path = "../src"
+`)
+	chdir(t, recipe)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--local"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(findStageFile(t, recipe, "input")); got != "from-delegated-input" {
+		t.Fatalf("input payload = %q, want %q", got, "from-delegated-input")
+	}
+	lock, err := LoadLockFile(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock.FindInput("kernel", "7.0.9")
+	if entry == nil {
+		t.Fatal("expected the delegating recipe to lock the source's input")
+	}
+	if want := hex.EncodeToString(signer.PrimaryKey.Fingerprint); entry.SignatureKey != want {
+		t.Fatalf("signature_key = %q, want %q", entry.SignatureKey, want)
+	}
+	if fileExists(filepath.Join(source, "pekit.lock")) {
+		t.Fatal("the delegated source tree must not be written to")
+	}
+}
+
+// A recipe input replaces a delegated source's input of the same name as a
+// whole, the same rule that governs delegated targets.
+func TestRecipeInputReplacesDelegatedInput(t *testing.T) {
+	dir := t.TempDir()
+	serveURLs(t, map[string][]byte{
+		"https://example.test/from-source-7.0.9.tar.gz": makeTarGz(t, "linux-7.0.9", "source-declared"),
+		"https://example.test/from-recipe-7.0.9.tar.gz": makeTarGz(t, "linux-7.0.9", "recipe-declared"),
+	})
+	source := filepath.Join(dir, "src")
+	writeFile(t, filepath.Join(source, "pekit.toml"), `
+[input.kernel]
+url = "https://example.test/from-source-{{version}}.tar.gz"
+versions = "= 7.0.9"
+extract = true
+root = "linux-{{version}}"
+
+[build]
+command = 'cat "$PEKIT_INPUT_KERNEL/payload.txt" > "$PEKIT_OUT/input"'
+`)
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+delegate = true
+
+[source.local]
+path = "../src"
+
+[input.kernel]
+url = "https://example.test/from-recipe-{{version}}.tar.gz"
+versions = "= 7.0.9"
+extract = true
+root = "linux-{{version}}"
+`)
+	chdir(t, recipe)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--local"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(findStageFile(t, recipe, "input")); got != "recipe-declared" {
+		t.Fatalf("input payload = %q, want the recipe's own input", got)
+	}
+}
+
+// Without build delegation the source tree's pekit.toml is not the build's
+// definition, so its inputs are not the build's either: nothing is fetched.
+func TestUndelegatedRecipeIgnoresSourceInputs(t *testing.T) {
+	dir := t.TempDir()
+	serveURLs(t, map[string][]byte{})
+	source := filepath.Join(dir, "src")
+	writeFile(t, filepath.Join(source, "pekit.toml"), `
+[input.kernel]
+url = "https://example.test/unserved-7.0.9.tar.gz"
+versions = "= 7.0.9"
+
+[build]
+command = "false"
+`)
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+
+[source.local]
+path = "../src"
+
+[build]
+command = 'printf "%s" "${PEKIT_INPUT_KERNEL:-unset}" > "$PEKIT_OUT/input"'
+`)
+	chdir(t, recipe)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--local"}); err != nil {
+		t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	if got := findStageFile(t, recipe, "input"); got != "unset" {
+		t.Fatalf("PEKIT_INPUT_KERNEL = %q, want it unset", got)
+	}
+}
+
+// Input pins are keyed by version, as [[source]] pins are: moving an input is
+// an edit to its `versions`, the new version is verified and pinned on first
+// use, and the old pin stays valid for builds that still name it. Each
+// version is materialised apart, so a tree extracted for one is never served
+// for another.
+func TestInputPinsAreKeyedByVersion(t *testing.T) {
+	dir := t.TempDir()
+	responses := map[string][]byte{
+		"https://example.test/app-1.0.tar.gz":      makeTarGz(t, "app-1.0", "from-source"),
+		"https://example.test/linux-7.0.9.tar.gz":  makeTarGz(t, "linux-7.0.9", "seven-oh-nine"),
+		"https://example.test/linux-7.0.10.tar.gz": makeTarGz(t, "linux-7.0.10", "seven-oh-ten"),
+	}
+	serveURLs(t, responses)
+	recipeFor := func(version string) string {
+		return strings.NewReplacer("linux-7.0.9", "linux-"+version, "= 7.0.9", "= "+version).Replace(inputTestRecipe)
+	}
+	writeFile(t, filepath.Join(dir, "pekit.toml"), recipeFor("7.0.9"))
+	chdir(t, dir)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	build := func(want string) {
+		t.Helper()
+		if err := app.Run([]string{"build", "--version", "1.0"}); err != nil {
+			t.Fatalf("build failed: %v\nstderr=%s", err, stderr.String())
+		}
+		if got := strings.TrimSpace(findStageFile(t, dir, "input")); got != want {
+			t.Fatalf("input payload = %q, want %q", got, want)
+		}
+	}
+	build("seven-oh-nine")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), recipeFor("7.0.10"))
+	build("seven-oh-ten")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), recipeFor("7.0.9"))
+	build("seven-oh-nine")
+
+	lock, err := LoadLockFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"7.0.9", "7.0.10"} {
+		url := "https://example.test/linux-" + version + ".tar.gz"
+		entry := lock.FindInput("kernel", version)
+		if entry == nil || entry.SHA256 != sha256Hex(responses[url]) {
+			t.Fatalf("expected kernel %s pinned to its bytes, got %+v", version, entry)
+		}
+	}
+	if len(lock.Inputs) != 2 || lock.Inputs[0].Version != "7.0.9" || lock.Inputs[1].Version != "7.0.10" {
+		t.Fatalf("expected two pins in version order, got %+v", lock.Inputs)
+	}
+}
+
+// Lint answers a delegated source's inputs from where they were declared: the
+// finding names the fetched pekit.toml, and key_files resolve beside it — the
+// delegating recipe need not carry a copy of the upstream key.
+func TestLintChecksDelegatedInputsWhereDeclared(t *testing.T) {
+	dir := t.TempDir()
+	signer := newTestSigner(t)
+	kernel := makeTarGz(t, "linux-7.0.9", "kernel")
+	serveURLs(t, map[string][]byte{
+		"https://example.test/linux-7.0.9.tar.gz":     kernel,
+		"https://example.test/linux-7.0.9.tar.gz.sig": detachSign(t, signer, kernel),
+		"https://example.test/firmware-1.0.tar.gz":    makeTarGz(t, "firmware-1.0", "firmware"),
+	})
+	source := filepath.Join(dir, "src")
+	writeFile(t, filepath.Join(source, "pekit.toml"), `
+[input.kernel]
+url = "https://example.test/linux-{{version}}.tar.gz"
+versions = "= 7.0.9"
+
+[input.kernel.signature]
+key_files = ["keys/upstream.key"]
+
+[input.firmware]
+url = "https://example.test/firmware-{{version}}.tar.gz"
+versions = "= 1.0"
+
+[build.main]
+command = "true"
+`)
+	writeFile(t, filepath.Join(source, "lint.pekit.toml"), `
+[source]
+signature.required = true
+signature.keys     = true
+`)
+	if err := os.MkdirAll(filepath.Join(source, "keys"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "keys", "upstream.key"), armoredPublicKeyBytes(t, signer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe := filepath.Join(dir, "recipe")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+out_dir = "out"
+delegate = true
+
+[source.local]
+path = "../src"
+`)
+	events, err := lintEvents(t, recipe, "lint")
+	if diagCode(err) != "lint_failed" {
+		t.Fatalf("want lint_failed for the unsigned delegated input, got %v", err)
+	}
+	rules := lintRules(events["lint"])
+	if rules["source.signature.keys"] != 0 {
+		t.Fatalf("the source's committed key was looked for in the wrong place: %#v", events["lint"])
+	}
+	if rules["source.signature.required"] != 1 {
+		t.Fatalf("want one unsigned-input finding, got %#v", events["lint"])
+	}
+	for _, e := range events["lint"] {
+		if e.Rule == "source.signature.required" && e.Path != filepath.Join(source, "pekit.toml") {
+			t.Fatalf("finding names %s, want the source's pekit.toml", e.Path)
+		}
 	}
 }
 

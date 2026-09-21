@@ -83,8 +83,12 @@ func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceSt
 		return SourceState{}, err
 	}
 	// Inputs are resolved after the source so a broken [source] is reported
-	// first; they are independent of it and of each other.
-	state.Inputs, err = resolveInputs(ctx, recipe, state.OutBase)
+	// first, and because a delegated source tree may declare some of them.
+	inputs, err := delegatedInputs(recipe, state.SourceRoot)
+	if err != nil {
+		return SourceState{}, err
+	}
+	state.Inputs, err = resolveInputs(ctx, recipe, inputs, state.OutBase)
 	if err != nil {
 		return SourceState{}, err
 	}

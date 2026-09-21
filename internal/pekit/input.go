@@ -3,6 +3,7 @@ package pekit
 import (
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Additional authenticated upstream inputs.
@@ -18,6 +19,12 @@ import (
 // lockfile pinning. What differs is that there may be several, each carries
 // its own version, and none of them is swept by version discovery — an input
 // is pinned, and moving it is an explicit act.
+//
+// Inputs belong with the targets that read them. When a recipe delegates its
+// build, those targets come from the fetched source tree, and so do the
+// inputs they need: the source's own [input.*] blocks join the recipe's. The
+// delegating recipe still resolves, verifies and locks them, so its lockfile
+// remains the one trust record for everything the build consumed.
 
 // InputState is a materialised input, as targets and the source package see it.
 type InputState struct {
@@ -35,14 +42,59 @@ func inputBase(outBase string) string {
 	return filepath.Join(outBase, "_inputs")
 }
 
-// resolveInputs materialises every declared input. Order follows the recipe's
-// sorted names so a failure is reported the same way on every run.
-func resolveInputs(ctx *Context, recipe RecipeConfig, outBase string) ([]InputState, error) {
-	if len(recipe.Inputs) == 0 {
+// inputDirName keys an input's cache and materialisation by version as well
+// as name. Delegated sources can pin a different version at each release, and
+// a tree extracted for one version must never be reused for another.
+func inputDirName(cfg InputConfig) string {
+	return cfg.Name + "-" + cfg.Version
+}
+
+// delegatedInputs returns the inputs a build of sourceRoot consumes: the
+// recipe's own, plus — when the recipe delegates its build — those declared by
+// the source tree's pekit.toml. A recipe input replaces a source input of the
+// same name as a whole, the same rule that governs delegated targets.
+func delegatedInputs(recipe RecipeConfig, sourceRoot string) ([]InputConfig, error) {
+	if !recipe.Delegate.AllowsBuild() || sourceRoot == "" || sourceRoot == recipe.Root {
+		return recipe.Inputs, nil
+	}
+	path := filepath.Join(sourceRoot, "pekit.toml")
+	if !fileExists(path) {
+		return recipe.Inputs, nil
+	}
+	delegated, err := LoadRecipe(path)
+	if err != nil {
+		return nil, err
+	}
+	return mergeInputs(recipe.Inputs, delegated.Inputs), nil
+}
+
+func mergeInputs(own, delegated []InputConfig) []InputConfig {
+	if len(delegated) == 0 {
+		return own
+	}
+	merged := make([]InputConfig, 0, len(own)+len(delegated))
+	declared := map[string]bool{}
+	for _, input := range own {
+		declared[input.Name] = true
+		merged = append(merged, input)
+	}
+	for _, input := range delegated {
+		if !declared[input.Name] {
+			merged = append(merged, input)
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
+	return merged
+}
+
+// resolveInputs materialises every input. Order follows the sorted names so a
+// failure is reported the same way on every run.
+func resolveInputs(ctx *Context, recipe RecipeConfig, inputs []InputConfig, outBase string) ([]InputState, error) {
+	if len(inputs) == 0 {
 		return nil, nil
 	}
-	states := make([]InputState, 0, len(recipe.Inputs))
-	for _, cfg := range recipe.Inputs {
+	states := make([]InputState, 0, len(inputs))
+	for _, cfg := range inputs {
 		state, err := resolveInput(ctx, recipe, outBase, cfg)
 		if err != nil {
 			return nil, err
@@ -70,13 +122,13 @@ func resolveInput(ctx *Context, recipe RecipeConfig, outBase string, cfg InputCo
 		return InputState{}, wrapDiag("invalid_path", "input."+cfg.Name+".root", err)
 	}
 
-	target := filepath.Join(inputBase(outBase), cfg.Name)
+	target := filepath.Join(inputBase(outBase), inputDirName(cfg))
 	if ctx.Inv.DryRun {
 		// Nothing is fetched, but targets still need a stable path to render.
 		return InputState{Name: cfg.Name, Version: cfg.Version, Root: target}, nil
 	}
 
-	rawDir := filepath.Join(outBase, "_source_cache", "input", cfg.Name)
+	rawDir := filepath.Join(outBase, "_source_cache", "input", inputDirName(cfg))
 	artifact := filepath.Join(rawDir, urlArtifactName(renderedURL))
 	// A repin must judge freshly downloaded bytes, not re-bless the cache.
 	if ctx.Inv.RefreshSource || ctx.Inv.Repin {
@@ -100,10 +152,12 @@ func resolveInput(ctx *Context, recipe RecipeConfig, outBase string, cfg InputCo
 	return InputState{Name: cfg.Name, Version: cfg.Version, Root: target, Artifact: artifact}, nil
 }
 
-// applyInputLock enforces the lockfile against a fetched input: a locked input
-// must hash to its pin; an unlocked one is verified — signature first, when
-// configured — and pinned. The lock runs on cache hits too, so a poisoned
-// cache is caught the same as changed upstream bytes.
+// applyInputLock enforces the lockfile against a fetched input: a locked
+// version must hash to its pin; an unlocked one is verified — signature
+// first, when configured — and pinned, exactly as a new version of a url
+// source is. The lock runs on cache hits too, so a poisoned cache is caught
+// the same as changed upstream bytes. The pin always goes to the recipe being
+// built, including for an input a delegated source declared.
 func applyInputLock(ctx *Context, recipe RecipeConfig, cfg InputConfig, renderedURL, artifact string, version Version) error {
 	lock, err := LoadLockFile(recipe.Root)
 	if err != nil {
@@ -113,22 +167,17 @@ func applyInputLock(ctx *Context, recipe RecipeConfig, cfg InputConfig, rendered
 	if err != nil {
 		return wrapDiag("lock_hash", artifact, err)
 	}
-	entry := lock.FindInput(cfg.Name)
+	entry := lock.FindInput(cfg.Name, cfg.Version)
 	if entry != nil && !ctx.Inv.Repin {
-		if entry.Version != cfg.Version {
-			return diag("lock_mismatch",
-				"input %q is locked at version %s but the recipe now pins %s; run `pekit lock --repin` to accept the change",
-				cfg.Name, entry.Version, cfg.Version)
-		}
 		if entry.SHA256 != hash {
 			return diag("lock_mismatch",
-				"input %q hashes to sha256:%s but is locked to sha256:%s — upstream's published bytes changed; if that change is legitimate, run `pekit lock --repin`",
-				cfg.Name, hash, entry.SHA256)
+				"input %q %s hashes to sha256:%s but is locked to sha256:%s — upstream's published bytes changed; if that change is legitimate, run `pekit lock --repin`",
+				cfg.Name, cfg.Version, hash, entry.SHA256)
 		}
 		// A configured signature must have been recorded when the pin was
 		// taken; a pin from before the block was added is not evidence.
 		if cfg.URL.Signature.Configured() && entry.SignatureKey == "" {
-			fpr, err := verifyURLSignature(ctx, recipe, cfg.URL.Signature, renderedURL, artifact, version, "input."+cfg.Name+".signature")
+			fpr, err := verifyURLSignature(ctx, cfg.KeyRoot(), cfg.URL.Signature, renderedURL, artifact, version, "input."+cfg.Name+".signature")
 			if err != nil {
 				return err
 			}
@@ -141,7 +190,7 @@ func applyInputLock(ctx *Context, recipe RecipeConfig, cfg InputConfig, rendered
 
 	fingerprint := ""
 	if cfg.URL.Signature.Configured() {
-		fingerprint, err = verifyURLSignature(ctx, recipe, cfg.URL.Signature, renderedURL, artifact, version, "input."+cfg.Name+".signature")
+		fingerprint, err = verifyURLSignature(ctx, cfg.KeyRoot(), cfg.URL.Signature, renderedURL, artifact, version, "input."+cfg.Name+".signature")
 		if err != nil {
 			return err
 		}

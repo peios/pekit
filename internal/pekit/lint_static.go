@@ -273,17 +273,23 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 		l.report("source.signature.required", "", path, "[source.url] verifies no upstream signature; add [source.url.signature] with the release key")
 	}
 	// An input is an upstream download like any other, so it answers to the
-	// same rules; naming the block keeps the finding actionable.
+	// same rules; naming the block keeps the finding actionable. A delegated
+	// source's input is reported against, and resolves its keys beside, the
+	// fetched pekit.toml that declared it.
 	for _, input := range recipe.Inputs {
 		field := "input." + input.Name
+		declared := input.Path
+		if declared == "" {
+			declared = path
+		}
 		if l.on("source.signature.required") && !input.URL.Signature.Configured() {
-			l.report("source.signature.required", "", path, "[%s] verifies no upstream signature; add [%s.signature] with the release key", field, field)
+			l.report("source.signature.required", "", declared, "[%s] verifies no upstream signature; add [%s.signature] with the release key", field, field)
 		}
 		if l.on("source.signature.fingerprint") {
-			lintSignatureFingerprints(l, path, field+".signature", input.URL.Signature)
+			lintSignatureFingerprints(l, declared, field+".signature", input.URL.Signature)
 		}
 		if l.on("source.signature.keys") {
-			lintSignatureKeys(l, recipe, field+".signature", input.URL.Signature)
+			lintSignatureKeys(l, filepath.Dir(declared), field+".signature", input.URL.Signature)
 		}
 	}
 	if l.on("source.signature.fingerprint") {
@@ -291,8 +297,8 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 		lintSignatureFingerprints(l, path, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
 	}
 	if l.on("source.signature.keys") {
-		lintSignatureKeys(l, recipe, "source.url.signature", s.URL.Signature)
-		lintSignatureKeys(l, recipe, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
+		lintSignatureKeys(l, recipe.Root, "source.url.signature", s.URL.Signature)
+		lintSignatureKeys(l, recipe.Root, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
 	}
 	if l.on("source.patches.headers") && s.Patches != "" {
 		lintPatchHeaders(l, recipe)
@@ -410,11 +416,11 @@ func lintSignatureFingerprints(l *linter, path, block string, sig URLSignatureCo
 	}
 }
 
-func lintSignatureKeys(l *linter, recipe RecipeConfig, block string, sig URLSignatureConfig) {
+func lintSignatureKeys(l *linter, keyRoot string, block string, sig URLSignatureConfig) {
 	for _, key := range sig.KeyFiles {
 		resolved := key
 		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(recipe.Root, key)
+			resolved = filepath.Join(keyRoot, key)
 		}
 		st, err := os.Stat(resolved)
 		if err != nil || st.IsDir() || st.Size() == 0 {

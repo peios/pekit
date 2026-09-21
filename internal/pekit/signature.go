@@ -34,13 +34,15 @@ const armoredSigMarker = "-----BEGIN PGP SIGNATURE-----"
 // a URL artifact and verifies it against the recipe's pinned keys, returning
 // the hex fingerprint of the signing key's primary key.
 func verifySourceSignature(ctx *Context, recipe RecipeConfig, cfg URLSourceConfig, renderedURL, artifact string, version Version) (string, error) {
-	return verifyURLSignature(ctx, recipe, cfg.Signature, renderedURL, artifact, version, "source.url.signature")
+	return verifyURLSignature(ctx, recipe.Root, cfg.Signature, renderedURL, artifact, version, "source.url.signature")
 }
 
-// verifyURLSignature is shared by the base URL artifact and every artifact in
-// a remote patch series. The field name keeps diagnostics pointed at the
-// configuration block that supplied the trust policy.
-func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureConfig, renderedURL, artifact string, version Version, field string) (string, error) {
+// verifyURLSignature is shared by the base URL artifact, every artifact in a
+// remote patch series, and every input. The field name keeps diagnostics
+// pointed at the configuration block that supplied the trust policy; keyRoot
+// is the directory of the pekit.toml that declared it, which its relative
+// key_files name.
+func verifyURLSignature(ctx *Context, keyRoot string, sigCfg URLSignatureConfig, renderedURL, artifact string, version Version, field string) (string, error) {
 	sigURL, err := renderSignatureURL(sigCfg.URL, renderedURL, version)
 	if err != nil {
 		return "", err
@@ -52,7 +54,7 @@ func verifyURLSignature(ctx *Context, recipe RecipeConfig, sigCfg URLSignatureCo
 				"fetch signature %s: %v — upstream may have stopped publishing signatures; verify why before removing [source.url.signature]", sigURL, err)
 		}
 	}
-	keyring, err := loadPinnedKeys(recipe.Root, sigCfg.KeyFiles)
+	keyring, err := loadPinnedKeys(keyRoot, sigCfg.KeyFiles)
 	if err != nil {
 		return "", err
 	}

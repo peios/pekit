@@ -20,6 +20,9 @@ func mergeDelegatedRecipe(base RecipeConfig, source SourceState) (RecipeConfig, 
 		return RecipeConfig{}, err
 	}
 	out := base
+	// The borrowed targets bring the inputs they read; ResolveSource has
+	// already fetched and locked these, and lint checks them here.
+	out.Inputs = mergeInputs(base.Inputs, delegated.Inputs)
 	for kind, targets := range delegated.Targets {
 		if out.Targets[kind] == nil {
 			out.Targets[kind] = map[string]TargetConfig{}
