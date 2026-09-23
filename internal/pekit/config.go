@@ -260,6 +260,10 @@ type IsolationConfig struct {
 type SandboxConfig struct {
 	Prepare        ShellCommand
 	NetworkTargets []string
+	// Entry runs inside the sandbox ahead of every target command, which it
+	// receives as arguments and must exec. It is an argv whose program is an
+	// absolute path the preparer places in the root.
+	Entry []string
 }
 
 type EnvFile struct {
@@ -733,6 +737,11 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 				env.Sandbox.Prepare, err = parseCommand(path, "sandbox.command", v)
 			case "network_targets":
 				env.Sandbox.NetworkTargets, err = expectStringSlice(path, "sandbox.network_targets", v)
+			case "entry":
+				env.Sandbox.Entry, err = expectStringSlice(path, "sandbox.entry", v)
+				if err == nil {
+					err = validateSandboxEntry(path, env.Sandbox.Entry)
+				}
 			default:
 				return env, diagAt("unknown_key", path, "unknown sandbox key %q", key)
 			}
@@ -751,6 +760,19 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	}
 
 	return env, nil
+}
+
+// validateSandboxEntry requires an argv whose program is a clean absolute
+// path: it names a file inside the prepared root, never one on the host.
+func validateSandboxEntry(path string, entry []string) error {
+	if len(entry) == 0 {
+		return diagAt("invalid_value", path, "sandbox.entry must name a program")
+	}
+	program := entry[0]
+	if !filepath.IsAbs(program) || filepath.Clean(program) != program || program == "/" {
+		return diagAt("invalid_value", path, "sandbox.entry program must be a clean absolute path inside the root, got %q", program)
+	}
+	return nil
 }
 
 // parseEnvLintAllow reads an env file's [lint.allow] table: whole lint rules

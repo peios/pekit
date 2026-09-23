@@ -292,6 +292,9 @@ func executeSandbox(ctx *Context, command ShellCommand, env CommandEnv, cwd, mem
 	if err := ensureSandboxLocalhost(root); err != nil {
 		return err
 	}
+	if err := checkSandboxEntry(root, s.Profile.Entry); err != nil {
+		return err
+	}
 	stages, err := sandboxStages(s, job)
 	if err != nil {
 		return err
@@ -374,6 +377,8 @@ func executeSandbox(ctx *Context, command ShellCommand, env CommandEnv, cwd, mem
 	if script == "" {
 		script = "exec " + shellJoin(command.Args)
 	}
+	// A profile entry runs first, inside the sandbox, and execs the target.
+	args = append(args, s.Profile.Entry...)
 	args = append(args, "/bin/sh", "-euc", env.Script+"\n"+script)
 	// bwrap owns PID 1 in the new namespace. When the target exits it kills and
 	// reaps remaining descendants before returning to coordinator signing.
@@ -382,6 +387,24 @@ func executeSandbox(ctx *Context, command ShellCommand, env CommandEnv, cwd, mem
 	}
 	if s.Target.Kind == CommandGen {
 		return syncGeneratedSource(s, job, before, baseline)
+	}
+	return nil
+}
+
+// checkSandboxEntry requires the preparer to have supplied the profile's entry
+// program as an executable regular file, resolved within the root.
+func checkSandboxEntry(root string, entry []string) error {
+	if len(entry) == 0 {
+		return nil
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	st, err := r.Stat(strings.TrimPrefix(entry[0], "/"))
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0111 == 0 {
+		return diag("sandbox_entry", "sandbox root preparer did not provide executable entry %s", entry[0])
 	}
 	return nil
 }

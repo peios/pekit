@@ -244,6 +244,66 @@ verify_on_test=[]
 	}
 }
 
+func TestSandboxEntryConfig(t *testing.T) {
+	dir := t.TempDir()
+	for name, entry := range map[string]string{
+		"relative": `["entry"]`,
+		"unclean":  `["/usr/../entry"]`,
+		"root":     `["/"]`,
+		"empty":    `[]`,
+	} {
+		path := filepath.Join(dir, name+".env.pekit.toml")
+		writeFile(t, path, "[sandbox]\ncommand='true'\nentry="+entry+"\n")
+		if _, err := LoadEnvFile(path, false); err == nil || !strings.Contains(err.Error(), "sandbox.entry") {
+			t.Fatalf("%s entry accepted: %v", name, err)
+		}
+	}
+	path := filepath.Join(dir, "valid.env.pekit.toml")
+	writeFile(t, path, "[sandbox]\ncommand='true'\nentry=['/usr/libexec/entry', '--flag']\n")
+	env, err := LoadEnvFile(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(env.Sandbox.Entry, " ") != "/usr/libexec/entry --flag" {
+		t.Fatalf("entry = %q", env.Sandbox.Entry)
+	}
+}
+
+func TestSandboxEntry(t *testing.T) {
+	if os.Getenv("PEKIT_TEST_SANDBOX") != "1" {
+		t.Skip("set PEKIT_TEST_SANDBOX=1 on a host with unprivileged namespaces")
+	}
+	image := sandboxFixtureRoot(t)
+	ws := t.TempDir()
+	recipe := filepath.Join(ws, "recipe")
+	writeFile(t, filepath.Join(ws, "workspace.pekit.toml"), "include=['recipe']\n[isolation]\nenabled=true\n")
+	writeFile(t, filepath.Join(ws, "entry.sh"), "#!/bin/sh\nexport ENTRY_ARG=\"$1\"\nshift\nexec \"$@\"\n")
+	prepare := "cp -a " + shellQuote(image+"/.") + " \"$PEKIT_SANDBOX_ROOT\"; cp " + shellQuote(filepath.Join(ws, "entry.sh")) + " \"$PEKIT_SANDBOX_ROOT/entry\"; chmod 0755 \"$PEKIT_SANDBOX_ROOT/entry\""
+	writeFile(t, filepath.Join(ws, "test.env.pekit.toml"), "[sandbox]\ncommand="+fmt.Sprintf("%q", prepare)+"\nentry=['/entry', 'ran']\n")
+	writeFile(t, filepath.Join(ws, "missing.env.pekit.toml"), "[sandbox]\ncommand="+fmt.Sprintf("%q", "cp -a "+shellQuote(image+"/.")+" \"$PEKIT_SANDBOX_ROOT\"")+"\nentry=['/entry']\n")
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), `
+[build.main]
+command='test "$ENTRY_ARG" = ran; printf built > "$PEKIT_OUT/marker"'
+`)
+	oldwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Chdir(recipe); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"build", "--env=test"}); err != nil {
+		t.Fatalf("%v\n%s\n%s", err, stdout.String(), stderr.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(recipe, "out/build/main/marker")); err != nil || string(got) != "built" {
+		t.Fatalf("target did not run through entry: %q %v", got, err)
+	}
+	err := app.Run([]string{"build", "--env=missing"})
+	if err == nil || !strings.Contains(err.Error(), "did not provide executable entry") {
+		t.Fatalf("missing entry accepted: %v", err)
+	}
+}
+
 func TestSourceSnapshotDoesNotBindSymlinkRoot(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source")
