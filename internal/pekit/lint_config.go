@@ -73,6 +73,7 @@ var lintKeys = []lintKeySpec{
 	{ID: "source.signature.fingerprint", Kind: lintString, Enum: []string{"full"}},
 	{ID: "source.signature.keys", Kind: lintBool},
 	{ID: "source.patches.headers", Kind: lintBool},
+	{ID: "source.patches.status", Kind: lintBool},
 	// [build]
 	{ID: "build.dependencies.providers", Kind: lintStrings},
 	{ID: "build.test", Kind: lintBool},

@@ -391,6 +391,33 @@ legacy-thing = "1"
 	}
 }
 
+// source.patches.status wants every patch to say where it stands upstream, so
+// the next upgrade knows which patches it can drop.
+func TestLintPatchStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lint.pekit.toml"), "[source]\npatches.status = true\n")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `
+[source]
+patches = "patches"
+
+[source.url]
+url = "https://example.org/thing-1.0.tar.gz"
+
+[build.main]
+command = "true"
+`)
+	writeFile(t, filepath.Join(dir, "patches", "series"), "0001-a.patch\n0002-b.patch\n0003-c.patch\n0004-d.patch\n")
+	hunk := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+	writeFile(t, filepath.Join(dir, "patches", "0001-a.patch"), "Description: peios-only change\nOrigin: vendor, Peios\nForwarded: not-needed\n\n"+hunk)
+	writeFile(t, filepath.Join(dir, "patches", "0002-b.patch"), "Description: backport\nOrigin: upstream, https://example.org/commit/1\n\n"+hunk)
+	writeFile(t, filepath.Join(dir, "patches", "0003-c.patch"), "Description: fixed in 2.0\nAuthor: Someone\nApplied-Upstream: 2.0\n\n"+hunk)
+	writeFile(t, filepath.Join(dir, "patches", "0004-d.patch"), "Description: says nothing\nAuthor: Someone\nForwarded:\n\n"+hunk)
+	events, _ := lintEvents(t, dir, "lint")
+	if got := lintRules(events["lint"])["source.patches.status"]; got != 1 {
+		t.Fatalf("source.patches.status findings = %d, want 1 (0004 only): %#v", got, events["lint"])
+	}
+}
+
 // A same-family pin written as "{{version}}-N" goes stale when the family
 // revision is bumped; {{release}} is the drift-proof spelling.
 func TestLintReportsHandWrittenFamilyRevisions(t *testing.T) {

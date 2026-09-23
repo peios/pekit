@@ -317,7 +317,7 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 		lintSignatureKeys(l, recipe.Root, "source.url.signature", s.URL.Signature)
 		lintSignatureKeys(l, recipe.Root, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
 	}
-	if l.on("source.patches.headers") && s.Patches != "" {
+	if (l.on("source.patches.headers") || l.on("source.patches.status")) && s.Patches != "" {
 		lintPatchHeaders(l, recipe)
 	}
 }
@@ -461,28 +461,42 @@ func lintPatchHeaders(l *linter, recipe RecipeConfig) {
 	}
 	for _, entry := range ps.Entries {
 		path := filepath.Join(ps.Dir, filepath.FromSlash(entry))
-		desc, origin, err := patchHeaderFields(path)
+		h, err := patchHeaderFields(path)
 		if err != nil {
 			l.report("source.patches.headers", "", path, "patch cannot be read: %s", err)
 			continue
 		}
-		var missing []string
-		if !desc {
-			missing = append(missing, "Description or Subject")
+		if l.on("source.patches.headers") {
+			var missing []string
+			if !h.desc {
+				missing = append(missing, "Description or Subject")
+			}
+			if !h.origin {
+				missing = append(missing, "Origin, Author or From")
+			}
+			if len(missing) > 0 {
+				l.report("source.patches.headers", "", path, "patch header lacks a %s line", strings.Join(missing, " line and a "))
+			}
 		}
-		if !origin {
-			missing = append(missing, "Origin, Author or From")
-		}
-		if len(missing) > 0 {
-			l.report("source.patches.headers", "", path, "patch header lacks a %s line", strings.Join(missing, " line and a "))
+		if l.on("source.patches.status") && !h.status {
+			l.report("source.patches.status", "", path, "patch header does not record its upstream status: add Forwarded: (a URL, no, or not-needed), Applied-Upstream:, or Origin: upstream/backport")
 		}
 	}
 }
 
-func patchHeaderFields(path string) (desc, origin bool, err error) {
+type patchHeader struct {
+	desc, origin, status bool
+}
+
+// patchHeaderFields reads the DEP-3 or git format-patch header ahead of the
+// first hunk. status records whether the patch says where it stands upstream:
+// Forwarded (a URL, "no" or "not-needed"), Applied-Upstream, a Bug link, or an
+// Origin that is itself upstream or a backport.
+func patchHeaderFields(path string) (patchHeader, error) {
+	var h patchHeader
 	f, err := os.Open(path)
 	if err != nil {
-		return false, false, err
+		return h, err
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -493,14 +507,27 @@ func patchHeaderFields(path string) (desc, origin bool, err error) {
 			break
 		}
 		lower := strings.ToLower(line)
+		value := func(prefix string) string { return strings.TrimSpace(lower[len(prefix):]) }
 		switch {
-		case strings.HasPrefix(lower, "description:"), strings.HasPrefix(lower, "subject:"):
-			desc = true
-		case strings.HasPrefix(lower, "origin:"), strings.HasPrefix(lower, "author:"), strings.HasPrefix(lower, "from:"):
-			origin = true
+		case strings.HasPrefix(lower, "description:"):
+			h.desc = h.desc || value("description:") != ""
+		case strings.HasPrefix(lower, "subject:"):
+			h.desc = h.desc || value("subject:") != ""
+		case strings.HasPrefix(lower, "origin:"):
+			h.origin = true
+			v := value("origin:")
+			if strings.HasPrefix(v, "upstream") || strings.HasPrefix(v, "backport") {
+				h.status = true
+			}
+		case strings.HasPrefix(lower, "author:"), strings.HasPrefix(lower, "from:"):
+			h.origin = true
+		case strings.HasPrefix(lower, "forwarded:"):
+			h.status = h.status || value("forwarded:") != ""
+		case strings.HasPrefix(lower, "applied-upstream:"), strings.HasPrefix(lower, "bug:"):
+			h.status = true
 		}
 	}
-	return desc, origin, sc.Err()
+	return h, sc.Err()
 }
 
 // --- build -----------------------------------------------------------------

@@ -383,6 +383,11 @@ func lintScripts(l *linter, set *lintPayloadSet, pkg lintPackage, binDirs []stri
 				l.report("payload.scripts", name, dest, "#!%s names no program", interp)
 				continue
 			}
+			// env itself is an interpreter path like any other: a policy that
+			// omits it forbids PATH-dependent shebangs.
+			if !knownInterp[interp] && !set.has(strings.TrimPrefix(interp, "/")) {
+				l.report("payload.scripts", name, dest, "interpreter %s is neither shipped by this recipe nor in payload.interpreters", interp)
+			}
 			prog := fields[1]
 			if !knownBase[prog] && !set.hasProgram(prog, binDirs) {
 				l.report("payload.scripts", name, dest, "interpreter %s is neither shipped by this recipe nor in payload.interpreters", prog)
