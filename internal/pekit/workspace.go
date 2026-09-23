@@ -3,7 +3,6 @@ package pekit
 import (
 	"fmt"
 	"strings"
-	"sync"
 )
 
 type WorkspaceMember struct {
@@ -29,6 +28,10 @@ func runWorkspace(ctx *Context) error {
 	}
 	if len(members) == 0 {
 		return diag("empty_workspace", "workspace has no members")
+	}
+	members, err = filterMembersByTag(ctx.Inv, members)
+	if err != nil {
+		return err
 	}
 	ctx.Renderer.Event(Event{Type: "workspace", Command: string(ctx.Inv.DelegateCommand), Path: ws.Path, Message: fmt.Sprintf("loaded workspace with %d members", len(members))})
 	resolvedKeyrings, err := resolveKeyrings(ctx.Inv, ws.Root, &ws)
@@ -61,7 +64,18 @@ func runWorkspace(ctx *Context) error {
 			return err
 		}
 	}
-	results := runWorkspaceMembers(ctx, ws, members, selectorPlan)
+	waits, err := planWorkspaceOrder(ctx, ws, members, selectorPlan)
+	if err != nil {
+		return err
+	}
+	if ctx.Inv.DryRun || ctx.Inv.Verbose {
+		for _, member := range members {
+			if _, ordered := waits[member.ID]; ordered {
+				ctx.Renderer.Event(Event{Type: "workspace_order", Member: member.ID, Message: describeWaits(waits[member.ID])})
+			}
+		}
+	}
+	results := runWorkspaceMembers(ctx, ws, members, selectorPlan, waits)
 	failed := 0
 	succeeded := 0
 	skipped := 0
@@ -169,72 +183,111 @@ type workspaceSelectorPlan struct {
 	Skip      map[string]string
 }
 
-func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember, selectorPlan workspaceSelectorPlan) []memberResult {
+// runWorkspaceMembers runs up to --jobs members at once. A member starts once
+// every member it waits for has finished (see planWorkspaceOrder); among
+// runnable members, lower ids start first. When nothing is runnable and
+// nothing is running, the remaining members wait on each other in a cycle and
+// breakCycle chooses one to start anyway. A member runs even if one it waited
+// for failed: it then resolves that dependency from what the provider already
+// has, as an unordered run would.
+func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember, selectorPlan workspaceSelectorPlan, waits map[string][]string) []memberResult {
 	jobs := ctx.Inv.Jobs
 	if jobs < 1 {
 		jobs = 1
 	}
 	results := make([]memberResult, len(members))
-	work := make(chan int)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	stop := false
-	worker := func() {
-		defer wg.Done()
-		for idx := range work {
-			mu.Lock()
-			if stop {
-				results[idx] = memberResult{Member: members[idx], Skipped: true}
-				mu.Unlock()
-				continue
+	started := make([]bool, len(members))
+	pos := map[string]int{}
+	for idx, member := range members {
+		pos[member.ID] = idx
+	}
+	remaining := map[string]int{}
+	dependents := map[string][]string{}
+	for _, member := range members {
+		for _, w := range waits[member.ID] {
+			if _, ok := pos[w]; ok {
+				remaining[member.ID]++
+				dependents[w] = append(dependents[w], member.ID)
 			}
-			mu.Unlock()
-			member := members[idx]
-			if reason := selectorPlan.Skip[member.ID]; reason != "" {
-				ctx.Renderer.Event(Event{Type: "member_skipped", Member: member.ID, Message: reason})
-				results[idx] = memberResult{Member: member, Skipped: true}
-				continue
-			}
-			memberCtx := *ctx
-			memberInv := ctx.Inv
-			memberInv.Command = memberInv.DelegateCommand
-			memberInv.WorkspaceMode = false
-			memberInv.WorkspaceFlag = ws.Path
-			memberInv.SuppressUnsupportedVersion = memberInv.AllowUnused
-			if selectors, ok := selectorPlan.Selectors[member.ID]; ok {
-				memberInv.Positionals = append([]string(nil), selectors...)
-				memberInv.AfterDoubleDash = nil
-			}
-			memberCtx.Inv = memberInv
-			err := runRecipe(&memberCtx, member.ID, member.RecipePath)
-			results[idx] = memberResult{Member: member, Err: err}
-			if err != nil {
-				ctx.Renderer.Error(Diagnostic{Code: "member_failed", Member: member.ID, Message: err.Error()})
-				if ctx.Inv.FailFast {
-					mu.Lock()
-					stop = true
-					mu.Unlock()
+		}
+	}
+	ready := map[string]bool{}
+	for _, member := range members {
+		if remaining[member.ID] == 0 {
+			ready[member.ID] = true
+		}
+	}
+	done := make(chan int)
+	running, stop := 0, false
+	start := func(id string) {
+		delete(ready, id)
+		idx := pos[id]
+		started[idx] = true
+		running++
+		go func(idx int) {
+			results[idx] = runWorkspaceMember(ctx, ws, members[idx], selectorPlan)
+			done <- idx
+		}(idx)
+	}
+	for {
+		for !stop && running < jobs && len(ready) > 0 {
+			start(readyOrder(ready)[0])
+		}
+		if running == 0 && !stop {
+			blocked := map[string]int{}
+			for idx, member := range members {
+				if !started[idx] {
+					blocked[member.ID] = remaining[member.ID]
 				}
 			}
+			if len(blocked) > 0 {
+				start(breakCycle(blocked))
+			}
 		}
-	}
-	for i := 0; i < jobs; i++ {
-		wg.Add(1)
-		go worker()
+		if running == 0 {
+			break
+		}
+		idx := <-done
+		running--
+		if results[idx].Err != nil && ctx.Inv.FailFast {
+			stop = true
+		}
+		for _, dep := range dependents[members[idx].ID] {
+			remaining[dep]--
+			if remaining[dep] == 0 && !started[pos[dep]] {
+				ready[dep] = true
+			}
+		}
 	}
 	for idx := range members {
-		mu.Lock()
-		shouldStop := stop
-		mu.Unlock()
-		if shouldStop {
+		if !started[idx] {
 			results[idx] = memberResult{Member: members[idx], Skipped: true}
-			continue
 		}
-		work <- idx
 	}
-	close(work)
-	wg.Wait()
 	return results
+}
+
+func runWorkspaceMember(ctx *Context, ws WorkspaceConfig, member WorkspaceMember, selectorPlan workspaceSelectorPlan) memberResult {
+	if reason := selectorPlan.Skip[member.ID]; reason != "" {
+		ctx.Renderer.Event(Event{Type: "member_skipped", Member: member.ID, Message: reason})
+		return memberResult{Member: member, Skipped: true}
+	}
+	memberCtx := *ctx
+	memberInv := ctx.Inv
+	memberInv.Command = memberInv.DelegateCommand
+	memberInv.WorkspaceMode = false
+	memberInv.WorkspaceFlag = ws.Path
+	memberInv.SuppressUnsupportedVersion = memberInv.AllowUnused
+	if selectors, ok := selectorPlan.Selectors[member.ID]; ok {
+		memberInv.Positionals = append([]string(nil), selectors...)
+		memberInv.AfterDoubleDash = nil
+	}
+	memberCtx.Inv = memberInv
+	err := runRecipe(&memberCtx, member.ID, member.RecipePath)
+	if err != nil {
+		ctx.Renderer.Error(Diagnostic{Code: "member_failed", Member: member.ID, Message: err.Error()})
+	}
+	return memberResult{Member: member, Err: err}
 }
 
 func planWorkspaceSelectors(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember) (workspaceSelectorPlan, error) {

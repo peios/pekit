@@ -102,6 +102,15 @@ type Invocation struct {
 	All        bool
 	OutputOnly bool
 	TargetOnly bool
+
+	// Tags and ExcludeTags select workspace members by their recipe tags:
+	// a member runs when it carries any of Tags (or Tags is empty) and none
+	// of ExcludeTags. Only valid in workspace mode.
+	Tags        []string
+	ExcludeTags []string
+	// delegated marks the parse of a workspace's delegated command, where
+	// workspace-only flags such as --tag are accepted.
+	delegated bool
 }
 
 func (i Invocation) EffectiveCommand() Command {

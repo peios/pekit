@@ -96,6 +96,11 @@ var workspaceFlagHelp = [][2]string{
 	{"--fail-fast", "stop scheduling members after the first failure"},
 }
 
+var workspaceTagHelp = [][2]string{
+	{"--tag <tag>", "run only members whose recipe tags include <tag> (repeatable: any)"},
+	{"--exclude-tag <tag>", "skip members whose recipe tags include <tag> (repeatable)"},
+}
+
 // usageText renders the overview (topic "") or one command's help.
 func usageText(topic string) string {
 	var b strings.Builder
@@ -120,6 +125,12 @@ func usageText(topic string) string {
 		b.WriteString("Workspace flags (before the delegated command):\n")
 		writeRows(&b, workspaceFlagHelp)
 		b.WriteString("\nThe delegated command takes its own flags, after its name.\n")
+		b.WriteString("\nMember selection (after the delegated command):\n")
+		writeRows(&b, workspaceTagHelp)
+		b.WriteString("\nMembers run in dependency order: a member waits for the members that\n")
+		b.WriteString("produce the packages its gate targets install under the selected env's\n")
+		b.WriteString("dependency provider. When only a dependency cycle remains, the member with\n")
+		b.WriteString("the fewest unfinished dependencies starts first.\n")
 	case CommandHelp:
 		b.WriteString("Usage:\n  pekit help [<command>]\n  pekit --help\n  pekit <command> --help\n")
 	case CommandVersion:

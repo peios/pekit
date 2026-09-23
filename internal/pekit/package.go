@@ -408,6 +408,9 @@ func mergePackageConfig(base, over PackageConfig) PackageConfig {
 	if over.Format != "" {
 		out.Format = over.Format
 	}
+	if over.DependencyProvider != "" {
+		out.DependencyProvider = over.DependencyProvider
+	}
 	if over.ClearOut != nil {
 		out.ClearOut = over.ClearOut
 	}

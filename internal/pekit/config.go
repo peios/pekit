@@ -71,6 +71,10 @@ type RecipeConfig struct {
 	Inputs        []InputConfig
 	Delegate      DelegateConfig
 	SourcePackage SourcePackageConfig
+	// Tags label a workspace member for selection with --tag/--exclude-tag.
+	// Membership is catalogue policy: only the member recipe's own tags
+	// count, never a delegated source's.
+	Tags []string
 }
 
 // InputConfig is an additional authenticated upstream input, declared as
@@ -289,8 +293,14 @@ type PackageLayer struct {
 }
 
 type PackageConfig struct {
-	Format    string
-	ClearOut  *bool
+	Format string
+	// DependencyProvider names the dependency namespace the package's
+	// runtime [dependencies] belong to, matching an env file's
+	// dependency_provider. Workspace ordering follows runtime dependencies
+	// only for packages whose provider is the selected env's. Inherited
+	// through package layers like format; empty means undeclared.
+	DependencyProvider string
+	ClearOut           *bool
 	Builds    []string
 	Package   PackageMeta
 	Files     map[string]PackageFileEntry
@@ -440,11 +450,27 @@ func LoadRecipe(path string) (RecipeConfig, error) {
 	known := map[string]bool{
 		"out_dir": true, "env": true, "wrap": true, "source": true, "delegate": true,
 		"build": true, "test": true, "install": true, "clean": true, "gen": true,
-		"source_package": true, "input": true,
+		"source_package": true, "input": true, "tags": true,
 	}
 	for key := range raw {
 		if !known[key] {
 			return RecipeConfig{}, diagAt("unknown_key", path, "unknown recipe key %q", key)
+		}
+	}
+	if v, ok := raw["tags"]; ok {
+		cfg.Tags, err = expectStringSlice(path, "tags", v)
+		if err != nil {
+			return RecipeConfig{}, err
+		}
+		seen := map[string]bool{}
+		for _, tag := range cfg.Tags {
+			if err := validateSelector("tag", tag); err != nil {
+				return RecipeConfig{}, diagAt("invalid_value", path, "tags: %v", err)
+			}
+			if seen[tag] {
+				return RecipeConfig{}, diagAt("invalid_value", path, "tags: duplicate tag %q", tag)
+			}
+			seen[tag] = true
 		}
 	}
 	if v, ok := raw["out_dir"]; ok {
@@ -907,7 +933,7 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 	}
 	cfg := PackageConfig{Files: map[string]PackageFileEntry{}, Symlinks: map[string]PackageSymlinkEntry{}}
 	known := map[string]bool{
-		"format": true, "clear_out": true, "builds": true, "package": true, "files": true, "symlinks": true,
+		"format": true, "dependency_provider": true, "clear_out": true, "builds": true, "package": true, "files": true, "symlinks": true,
 		"excludes": true, "multipack": true, "publish": true, "dependencies": true, "optional_dependencies": true,
 		"conflicts": true, "provides": true, "replaces": true, "side_effects": true, "sd_overrides": true,
 		"claims": true,
@@ -920,6 +946,15 @@ func LoadPackageFile(path string) (PackageConfig, error) {
 	if v, ok := raw["format"]; ok {
 		cfg.Format, err = expectString(path, "format", v)
 		if err != nil {
+			return PackageConfig{}, err
+		}
+	}
+	if v, ok := raw["dependency_provider"]; ok {
+		cfg.DependencyProvider, err = expectString(path, "dependency_provider", v)
+		if err != nil {
+			return PackageConfig{}, err
+		}
+		if err := validateSelector("dependency provider", cfg.DependencyProvider); err != nil {
 			return PackageConfig{}, err
 		}
 	}

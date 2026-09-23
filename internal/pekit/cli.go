@@ -23,6 +23,9 @@ const (
 	flagCleanMode
 	flagRepin
 	flagStrict
+	// flagTag selects workspace members; every delegated command accepts
+	// it, and validateInvocation rejects it outside workspace mode.
+	flagTag
 )
 
 var commandFlags = map[Command]map[flagUse]bool{
@@ -73,7 +76,11 @@ var commandFlags = map[Command]map[flagUse]bool{
 }
 
 func ParseInvocation(args []string, cwd string) (Invocation, error) {
-	inv := Invocation{Args: append([]string(nil), args...), Cwd: cwd, Jobs: 1, KeyringValues: map[string]string{}, ResolvedKeyringEnv: map[string]string{}}
+	return parseInvocation(args, cwd, false)
+}
+
+func parseInvocation(args []string, cwd string, delegated bool) (Invocation, error) {
+	inv := Invocation{Args: append([]string(nil), args...), Cwd: cwd, Jobs: 1, KeyringValues: map[string]string{}, ResolvedKeyringEnv: map[string]string{}, delegated: delegated}
 	var used []flagUse
 	i := 0
 	commandSeen := false
@@ -194,7 +201,7 @@ func parseWorkspaceTail(inv *Invocation, args []string, used *[]flagUse) error {
 			}
 			inv.DelegateCommand = cmd
 			tail := append([]string{string(cmd)}, args[i+1:]...)
-			sub, err := ParseInvocation(tail, inv.Cwd)
+			sub, err := parseInvocation(tail, inv.Cwd, true)
 			if err != nil {
 				return err
 			}
@@ -230,6 +237,8 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.AllowUnsigned = sub.AllowUnsigned
 	inv.Repin = sub.Repin
 	inv.All = sub.All
+	inv.Tags = sub.Tags
+	inv.ExcludeTags = sub.ExcludeTags
 	inv.OutputOnly = sub.OutputOnly
 	inv.TargetOnly = sub.TargetOnly
 	inv.AllowUnused = inv.AllowUnused || sub.AllowUnused
@@ -286,6 +295,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.OutputOnly || inv.TargetOnly {
 		out = append(out, flagCleanMode)
+	}
+	if len(inv.Tags) > 0 || len(inv.ExcludeTags) > 0 {
+		out = append(out, flagTag)
 	}
 	return out
 }
@@ -458,6 +470,20 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.All = true
 		return true, i + 1, flagAll, nil
+	case "--tag", "--exclude-tag":
+		v, next, err := flagValue(args, i, value, hasValue, name)
+		if err != nil {
+			return false, i, -1, err
+		}
+		if err := validateSelector("tag", v); err != nil {
+			return false, i, -1, err
+		}
+		if name == "--tag" {
+			inv.Tags = append(inv.Tags, v)
+		} else {
+			inv.ExcludeTags = append(inv.ExcludeTags, v)
+		}
+		return true, next, flagTag, nil
 	case "--output-only":
 		if hasValue {
 			return false, i, -1, diag("unexpected_flag_value", "--output-only does not take a value")
@@ -535,8 +561,14 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 			return diag("strict_bypass", "--strict cannot be combined with %s", strings.Join(bypass, ", "))
 		}
 	}
+	if (len(inv.Tags) > 0 || len(inv.ExcludeTags) > 0) && !inv.WorkspaceMode && !inv.delegated {
+		return diag("invalid_flags", "--tag and --exclude-tag select workspace members; use them with the workspace command")
+	}
 	caps := commandFlags[cmd]
 	for _, u := range used {
+		if u == flagTag {
+			continue
+		}
 		if !caps[u] {
 			if !inv.AllowUnused {
 				return diag("unsupported_flag", "%s does not support %s", cmd, flagUseName(u))
@@ -639,6 +671,8 @@ func flagUseName(u flagUse) string {
 		return "clean mode flags"
 	case flagStrict:
 		return "--strict"
+	case flagTag:
+		return "--tag/--exclude-tag"
 	default:
 		return fmt.Sprintf("flag group %d", u)
 	}
