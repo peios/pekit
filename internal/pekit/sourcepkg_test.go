@@ -358,3 +358,77 @@ func TestWorseLicenseClass(t *testing.T) {
 		}
 	}
 }
+
+func TestConjoinLicenses(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"single", []string{"MIT"}, "MIT"},
+		// elfutils: a member's OR expression must not be rebound by the
+		// surrounding ANDs.
+		{"or member stays grouped", []string{"GPL-2.0-or-later OR LGPL-3.0-or-later", "GPL-3.0-or-later"},
+			"(GPL-2.0-or-later OR LGPL-3.0-or-later) AND GPL-3.0-or-later"},
+		// kmod: overlapping members share terms, which appear once.
+		{"shared terms deduplicated", []string{"GPL-2.0-or-later", "GPL-2.0-or-later AND LGPL-2.1-or-later", "LGPL-2.1-or-later"},
+			"GPL-2.0-or-later AND LGPL-2.1-or-later"},
+		{"parenthesised conjunction flattened", []string{"(MIT AND BSD-3-Clause)", "MIT"}, "BSD-3-Clause AND MIT"},
+		{"nested or kept, conjunction around it flattened", []string{"((MIT OR Apache-2.0) AND Unicode-3.0) AND MIT"},
+			"(MIT OR Apache-2.0) AND MIT AND Unicode-3.0"},
+		{"whitespace normalised before comparison", []string{"( MIT  OR Apache-2.0 )", "(MIT OR Apache-2.0)"}, "(MIT OR Apache-2.0)"},
+		{"top-level or is one term", []string{"MIT AND BSD-2-Clause OR ISC", "ISC"}, "(MIT AND BSD-2-Clause OR ISC) AND ISC"},
+		{"exception kept with its license", []string{"GPL-2.0-only WITH Linux-syscall-note", "MIT"}, "GPL-2.0-only WITH Linux-syscall-note AND MIT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := conjoinLicenses(tc.in)
+			if got != tc.want {
+				t.Fatalf("conjoinLicenses(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if err := validateSPDXExpression(got); err != nil {
+				t.Fatalf("result %q is not valid SPDX: %v", got, err)
+			}
+		})
+	}
+}
+
+// A license that covers only source-package material (xxHash's GPL-2.0-only
+// test programs, which no binary member ships) is declared on the recipe and
+// joins the members' licenses.
+func TestSourcePackageDeclaresSourceOnlyLicense(t *testing.T) {
+	dir := t.TempDir()
+	recipe := filepath.Join(dir, "app")
+	rawURL := "https://example.test/app-1.0.tar.gz"
+	serveURLs(t, map[string][]byte{rawURL: makeTarGz(t, "app-1.0", "payload")})
+	writeFile(t, filepath.Join(recipe, "pekit.toml"), lockTestRecipe+`
+[source_package]
+license = "GPL-2.0-only"
+`)
+	writeFile(t, filepath.Join(recipe, "package.pekit.toml"), sourcePkgMemberDef)
+	chdir(t, recipe)
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run([]string{"package", "--version", "1.0"}); err != nil {
+		t.Fatalf("package failed: %v\nstderr=%s", err, stderr.String())
+	}
+	srcArtifact := globOne(t, filepath.Join(recipe, "out", "*", "package", "*", "app-source_1.0-1_noarch.peipkg"))
+	if got := readPeipkgManifest(t, srcArtifact).License; got != "GPL-2.0-only AND MIT" {
+		t.Fatalf("source package license = %q, want GPL-2.0-only AND MIT", got)
+	}
+	binary := globOne(t, filepath.Join(recipe, "out", "*", "package", "*", "app_1.0-1_x86_64.peipkg"))
+	if got := readPeipkgManifest(t, binary).License; got != "MIT" {
+		t.Fatalf("binary license = %q; the source-only license must not reach members", got)
+	}
+}
+
+func TestSourcePackageLicenseMustBeSPDX(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), lockTestRecipe+`
+[source_package]
+license = "GPL-2.0-only and MIT"
+`)
+	if _, err := LoadRecipe(filepath.Join(dir, "pekit.toml")); diagCode(err) != "invalid_value" {
+		t.Fatalf("want invalid_value, got %v", err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/peios/peipkg/pack"
@@ -42,7 +43,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 	}
 	versionText := members[0].Version
 	homepage := members[0].Config.Package.Homepage
-	licenses := map[string]bool{}
+	var licenses []string
 	licenseClass := members[0].Config.Package.LicenseClass
 	for i, m := range members {
 		if m.Version != versionText {
@@ -54,7 +55,7 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 			homepage = ""
 		}
 		if l := m.Config.Package.License; l != "" {
-			licenses[l] = true
+			licenses = append(licenses, l)
 		}
 		if i > 0 {
 			licenseClass = worseLicenseClass(licenseClass, m.Config.Package.LicenseClass)
@@ -64,9 +65,13 @@ func planSourcePackage(recipe RecipeConfig, source SourceState, instances []Pack
 	if name == "" {
 		name = filepath.Base(recipe.Root) + "-source"
 	}
-	// The source package contains the members' licensed material, so its
-	// license is the conjunction of theirs.
-	license := strings.Join(sortedKeys(licenses), " AND ")
+	// The source package contains the members' licensed material, plus
+	// whatever only the source carries, so its license is the conjunction
+	// of theirs and the recipe's source_package.license.
+	if recipe.SourcePackage.License != "" {
+		licenses = append(licenses, recipe.SourcePackage.License)
+	}
+	license := conjoinLicenses(licenses)
 	base := strings.TrimSuffix(name, "-source")
 	cfg := PackageConfig{
 		Format: "peipkg",
@@ -278,4 +283,99 @@ func worseLicenseClass(a, b string) string {
 		return b
 	}
 	return a
+}
+
+// conjoinLicenses renders the conjunction of SPDX expressions as one valid,
+// deterministic expression. Each expression is split into its top-level AND
+// terms; a term containing OR keeps its parentheses so the surrounding ANDs
+// cannot rebind it (AND binds tighter than OR). Equal terms appear once, and
+// terms are sorted.
+func conjoinLicenses(exprs []string) string {
+	seen := map[string]bool{}
+	var terms []string
+	for _, expr := range exprs {
+		for _, term := range spdxConjuncts(tokenizeSPDX(expr)) {
+			if !seen[term] {
+				seen[term] = true
+				terms = append(terms, term)
+			}
+		}
+	}
+	sort.Strings(terms)
+	return strings.Join(terms, " AND ")
+}
+
+// spdxConjuncts returns the rendered top-level AND terms of a token stream,
+// flattening parenthesised conjunctions. An expression with a top-level OR is
+// one term, parenthesised.
+func spdxConjuncts(tokens []string) []string {
+	for len(tokens) >= 2 && tokens[0] == "(" && spdxClosingParen(tokens, 0) == len(tokens)-1 {
+		tokens = tokens[1 : len(tokens)-1]
+	}
+	if len(tokens) == 0 {
+		return nil
+	}
+	if len(spdxSplitTopLevel(tokens, "OR")) > 1 {
+		return []string{"(" + renderSPDX(tokens) + ")"}
+	}
+	parts := spdxSplitTopLevel(tokens, "AND")
+	if len(parts) == 1 {
+		return []string{renderSPDX(tokens)}
+	}
+	var terms []string
+	for _, part := range parts {
+		terms = append(terms, spdxConjuncts(part)...)
+	}
+	return terms
+}
+
+// spdxClosingParen returns the index of the parenthesis closing the one at
+// open, or -1 when the stream is unbalanced.
+func spdxClosingParen(tokens []string, open int) int {
+	depth := 0
+	for i := open; i < len(tokens); i++ {
+		switch tokens[i] {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// spdxSplitTopLevel splits tokens at every op outside parentheses.
+func spdxSplitTopLevel(tokens []string, op string) [][]string {
+	var parts [][]string
+	depth, start := 0, 0
+	for i, tok := range tokens {
+		switch tok {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		case op:
+			if depth == 0 {
+				parts = append(parts, tokens[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, tokens[start:])
+}
+
+// renderSPDX joins tokens with single spaces, attaching parentheses to what
+// they enclose.
+func renderSPDX(tokens []string) string {
+	var b strings.Builder
+	for i, tok := range tokens {
+		if i > 0 && tok != ")" && tokens[i-1] != "(" {
+			b.WriteByte(' ')
+		}
+		b.WriteString(tok)
+	}
+	return b.String()
 }

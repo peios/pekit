@@ -114,6 +114,10 @@ type SourcePackageConfig struct {
 	WorkspaceInputs []string
 	Name            string
 	Enabled         *bool
+	// License is an SPDX expression for material only the source package
+	// carries — upstream test programs, build helpers, recipe files — that
+	// no binary member ships. It is conjoined with the members' licenses.
+	License string
 }
 
 func (c SourcePackageConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
@@ -2027,7 +2031,7 @@ func parseSourcePackage(path string, value any) (SourcePackageConfig, error) {
 		return SourcePackageConfig{}, err
 	}
 	cfg := SourcePackageConfig{}
-	known := map[string]bool{"name": true, "enabled": true, "workspace_inputs": true}
+	known := map[string]bool{"name": true, "enabled": true, "workspace_inputs": true, "license": true}
 	for key, raw := range table {
 		if !known[key] {
 			return SourcePackageConfig{}, diagAt("unknown_key", path, "unknown source_package key %q", key)
@@ -2042,6 +2046,14 @@ func parseSourcePackage(path string, value any) (SourcePackageConfig, error) {
 				return SourcePackageConfig{}, diagAt("invalid_value", path, "source_package.name must not be empty")
 			}
 			cfg.Name = name
+		case "license":
+			cfg.License, err = expectString(path, "source_package.license", raw)
+			if err != nil {
+				return SourcePackageConfig{}, err
+			}
+			if err := validateSPDXExpression(cfg.License); err != nil {
+				return SourcePackageConfig{}, diagAt("invalid_value", path, "source_package.license is not a valid SPDX expression: %v", err)
+			}
 		case "workspace_inputs":
 			cfg.WorkspaceInputs, err = expectStringSlice(path, "source_package.workspace_inputs", raw)
 			if err != nil {
