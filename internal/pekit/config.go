@@ -168,6 +168,14 @@ type URLSourceConfig struct {
 	ChecksumByVersion map[string]string
 	Signature         URLSignatureConfig
 	PatchSeries       URLPatchSeriesConfig
+
+	// manifestKind and manifestProvenance let a source kind built on top of
+	// a URL download (PyPI) record its own identity in source.pekit.json.
+	// The manifest must be written and matched with that identity; writing
+	// "url" and relabelling afterwards made every later resolution see a
+	// mismatch and discard the staged builds.
+	manifestKind       string
+	manifestProvenance string
 }
 
 // URLPatchSeriesConfig describes an upstream-maintained, incremental patch

@@ -467,11 +467,16 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		Timestamp:     sourceTimestamp,
 		Patches:       patchesHash,
 	}
-	if checksum != "" && dirExists(sourceRoot) {
-		if err := os.RemoveAll(filepath.Join(outBase, scope)); err != nil {
-			return SourceState{}, wrapDiag("clean_source", filepath.Join(outBase, scope), err)
-		}
+	if cfg.manifestKind != "" {
+		expectedManifest.Kind = cfg.manifestKind
 	}
+	if cfg.manifestProvenance != "" {
+		expectedManifest.ProvenanceRef = cfg.manifestProvenance
+	}
+	// The manifest records the checksum, so a changed artifact already fails
+	// the match below. A matching source keeps its scope: removing it here
+	// used to discard every staged build of a checksum-known source (PyPI),
+	// so lint straight after test found nothing to inspect.
 	if dirExists(sourceRoot) && !sourceManifestMatches(manifestPath, expectedManifest) {
 		if err := os.RemoveAll(filepath.Join(outBase, scope)); err != nil {
 			return SourceState{}, wrapDiag("clean_source", filepath.Join(outBase, scope), err)

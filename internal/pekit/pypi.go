@@ -7,8 +7,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -97,40 +95,23 @@ func resolvePyPISource(ctx *Context, recipe RecipeConfig, outBase string, cfg Py
 		}
 	}
 
+	provenance := fmt.Sprintf("pypi:%s@%s#sha256:%s",
+		normalizePyPIProject(cfg.Project), version.Raw, candidate.SHA256)
 	state, err := resolveURLSource(ctx, recipe, outBase, URLSourceConfig{
-		URL:               candidate.URL,
-		Extract:           true,
-		Root:              candidate.Root,
-		Checksum:          "sha256:" + candidate.SHA256,
-		ChecksumByVersion: map[string]string{},
+		URL:                candidate.URL,
+		Extract:            true,
+		Root:               candidate.Root,
+		Checksum:           "sha256:" + candidate.SHA256,
+		ChecksumByVersion:  map[string]string{},
+		manifestKind:       "pypi",
+		manifestProvenance: provenance,
 	}, version)
 	if err != nil {
 		return SourceState{}, err
 	}
 	state.Kind = "pypi"
-	state.ProvenanceRef = fmt.Sprintf("pypi:%s@%s#sha256:%s",
-		normalizePyPIProject(cfg.Project), version.Raw, candidate.SHA256)
-	if !ctx.Inv.DryRun {
-		if err := relabelPyPISourceManifest(state); err != nil {
-			return SourceState{}, err
-		}
-	}
+	state.ProvenanceRef = provenance
 	return state, nil
-}
-
-func relabelPyPISourceManifest(state SourceState) error {
-	manifestPath := filepath.Join(state.WorkBase, "source.pekit.json")
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return wrapDiag("read_file", manifestPath, err)
-	}
-	var manifest SourceManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return wrapDiag("source_manifest", manifestPath, err)
-	}
-	manifest.Kind = state.Kind
-	manifest.ProvenanceRef = state.ProvenanceRef
-	return writeSourceManifest(manifestPath, manifest)
 }
 
 // lockedPyPICandidate makes a previously selected version independent of the

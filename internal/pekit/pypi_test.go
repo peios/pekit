@@ -177,6 +177,24 @@ license = "MIT"
 	if err != nil || string(value) != "two" {
 		t.Fatalf("build output = %q, %v", value, err)
 	}
+
+	// Resolving the same locked source again must keep the staged build. The
+	// manifest used to be written as "url" and relabelled "pypi" afterwards,
+	// so every later resolution saw a mismatch and discarded the whole scope.
+	before, err := os.Stat(valueFiles[len(valueFiles)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run([]string{"build", "--version", "2.0.0", "--no-build"}); err != nil {
+		t.Fatalf("reusing the staged build failed: %v\nstderr=%s", err, stderr.String())
+	}
+	after, err := os.Stat(valueFiles[len(valueFiles)-1])
+	if err != nil {
+		t.Fatalf("staged build discarded on re-resolution: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("staged build was rebuilt instead of reused")
+	}
 }
 
 func TestPyPIEnumerationExcludesYankedPrereleaseAndWheels(t *testing.T) {
