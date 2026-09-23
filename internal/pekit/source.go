@@ -202,7 +202,7 @@ func resolveLocalSource(ctx *Context, recipe RecipeConfig, outBase string, sourc
 		SourceRoot:    path,
 		LiteralRoot:   path,
 		ProvenanceRef: "local:" + path,
-		Timestamp:     ctx.Start.Unix(),
+		Timestamp:     localSourceTimestamp(ctx, path),
 		Local:         true,
 	}, nil
 }
@@ -446,8 +446,11 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 	manifestPath := filepath.Join(outBase, scope, "source.pekit.json")
 	provenance := "url:" + renderedURL
 	unanchored := checksum == "" && !lockState.Locked
-	sourceTimestamp := int64(0)
-	if !unanchored {
+	// The release's own date: the newest member of the archive, which the
+	// locked bytes fix. A download that is not a tar archive falls back to
+	// the recipe's last commit (PEI-94).
+	sourceTimestamp := archiveTimestamp(artifact)
+	if sourceTimestamp == 0 && !unanchored {
 		sourceTimestamp = gitWorktreeTimestamp(recipe.Root)
 	}
 	if checksum != "" {
@@ -1181,11 +1184,15 @@ func gitObjectTimestamp(repoDir, ref string) int64 {
 	return ts
 }
 
+// gitWorktreeTimestamp is the commit time of the last commit touching root,
+// which may be a subdirectory of its repository (a recipe inside pkgs, a
+// local first-party tree). 0 when root is not inside a Git work tree or no
+// commit touches it.
 func gitWorktreeTimestamp(root string) int64 {
-	if root == "" || !pathExists(filepath.Join(root, ".git")) {
+	if root == "" || !dirExists(root) {
 		return 0
 	}
-	out, err := commandOutput(root, "git", "log", "-1", "--format=%ct")
+	out, err := commandOutput(root, "git", "log", "-1", "--format=%ct", "--", ".")
 	if err != nil {
 		return 0
 	}
@@ -1194,6 +1201,55 @@ func gitWorktreeTimestamp(root string) int64 {
 		return 0
 	}
 	return ts
+}
+
+// localSourceTimestamp dates a local tree by its last commit, so repeated
+// builds of the same checkout agree; a tree outside Git has no stable date and
+// takes the build's start time.
+func localSourceTimestamp(ctx *Context, path string) int64 {
+	if ts := gitWorktreeTimestamp(path); ts > 0 {
+		return ts
+	}
+	return ctx.Start.Unix()
+}
+
+// archiveTimestamp is the newest modification time of any member of a tar
+// artifact, 0 when the artifact is not a readable tar archive. The result is
+// cached beside the artifact: the download is immutable once locked (a repin
+// removes the cache directory), so the archive is walked once, not on every
+// resolve.
+func archiveTimestamp(artifact string) int64 {
+	cache := artifact + ".pekit-mtime"
+	if data, err := os.ReadFile(cache); err == nil {
+		if ts, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			return ts
+		}
+	}
+	ts := walkArchiveTimestamp(artifact)
+	_ = os.WriteFile(cache, []byte(strconv.FormatInt(ts, 10)+"\n"), 0o644)
+	return ts
+}
+
+func walkArchiveTimestamp(artifact string) int64 {
+	stream, err := openTarStream(artifact)
+	if err != nil {
+		return 0
+	}
+	defer stream.Close()
+	tr := tar.NewReader(stream)
+	newest := int64(0)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return newest
+		}
+		if err != nil {
+			return 0
+		}
+		if ts := hdr.ModTime.Unix(); ts > newest {
+			newest = ts
+		}
+	}
 }
 
 func pathExists(path string) bool {

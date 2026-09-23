@@ -190,6 +190,13 @@ func managedEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, s
 		"PEKIT_BUILD_TIMESTAMP":  strconv.FormatInt(ctx.Start.Unix(), 10),
 		"PEKIT_SOURCE_TIMESTAMP": strconv.FormatInt(source.Timestamp, 10),
 	}
+	// SOURCE_DATE_EPOCH (reproducible-builds.org) is the source's own date,
+	// so toolchains that stamp outputs — man pages, archives, __DATE__ — stamp
+	// the release rather than the build (PEI-94). A source with no stable date
+	// exports none rather than 0, which tools would read as 1970.
+	if source.Timestamp > 0 {
+		values["SOURCE_DATE_EPOCH"] = strconv.FormatInt(source.Timestamp, 10)
+	}
 	if workspace != nil {
 		values["PEKIT_WORKSPACE_ROOT"] = workspace.Root
 	} else {
