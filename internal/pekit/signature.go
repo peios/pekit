@@ -58,6 +58,9 @@ func verifyURLSignature(ctx *Context, keyRoot string, sigCfg URLSignatureConfig,
 	if err != nil {
 		return "", wrapDiag("signature_invalid", sigPath, err)
 	}
+	if sigCfg.Of == "checksums" {
+		return verifyChecksumManifest(keyRoot, sigCfg, sigBytes, sigURL, renderedURL, artifact, field)
+	}
 	open := func() (io.ReadCloser, error) { return openSignedData(artifact, sigCfg.Of) }
 	return verifyPinnedSignature(keyRoot, sigCfg, open, sigBytes, "signature "+sigURL, field)
 }

@@ -1,6 +1,7 @@
 package pekit
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1943,8 +1944,8 @@ func parseURLSignature(path, field string, value any) (URLSignatureConfig, error
 		if err != nil {
 			return URLSignatureConfig{}, err
 		}
-		if cfg.Of != "artifact" && cfg.Of != "decompressed" {
-			return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.of must be \"artifact\" or \"decompressed\"", field)
+		if cfg.Of != "artifact" && cfg.Of != "decompressed" && cfg.Of != "checksums" {
+			return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.of must be \"artifact\", \"decompressed\" or \"checksums\"", field)
 		}
 	}
 	if v, ok := table["key_files"]; ok {
@@ -1966,6 +1967,23 @@ func parseURLSignature(path, field string, value any) (URLSignatureConfig, error
 		cfg.IgnoreExpiry, err = expectBool(path, field+".ignore_expiry", v)
 		if err != nil {
 			return URLSignatureConfig{}, err
+		}
+	}
+	// A checksum manifest is a separate file with no conventional name, and
+	// its signer vouches for every artifact it lists: name the file, and pin
+	// the signer by full fingerprint rather than trusting any key in the files.
+	if cfg.Of == "checksums" {
+		if cfg.URL == "" {
+			return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.of = \"checksums\" requires url, the checksum manifest's location", field)
+		}
+		if len(cfg.Fingerprints) == 0 {
+			return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.of = \"checksums\" requires fingerprints", field)
+		}
+		for _, fpr := range cfg.Fingerprints {
+			norm := normalizeFingerprint(fpr)
+			if _, err := hex.DecodeString(norm); err != nil || (len(norm) != 40 && len(norm) != 64) {
+				return URLSignatureConfig{}, diagAt("invalid_signature", path, "%s.fingerprints entry %q is not a full v4 or v6 key fingerprint", field, fpr)
+			}
 		}
 	}
 	return cfg, nil
