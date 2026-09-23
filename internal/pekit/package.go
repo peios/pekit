@@ -50,7 +50,7 @@ type payloadEntry struct {
 
 func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, publish bool, member string) error {
 	var capturedSource *sourceInputs
-	if !ctx.Inv.DryRun && (ctx.ReleaseBuild != nil || (recipe.SourcePackage.IsEnabled() && !source.Local && (source.Kind == "url" || source.Kind == "git" || source.Kind == "pypi"))) {
+	if !ctx.Inv.DryRun && recipe.SourcePackage.IsEnabled() && !source.Local && (source.Kind == "url" || source.Kind == "git" || source.Kind == "pypi") {
 		var err error
 		capturedSource, err = prepareSourceBundle(ctx, recipe, workspace, source)
 		if err != nil {
@@ -84,18 +84,18 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	if err != nil {
 		return err
 	}
-	gates := releaseGates(recipe)
-	if ctx.Inv.NoGates && len(gates) > 0 {
-		names := make([]string, 0, len(gates))
+	gates := gateTargets(recipe)
+	if ctx.Inv.NoGates {
+		names := []string{"lint"}
 		for _, gate := range gates {
 			names = append(names, gate.Name)
 		}
-		ctx.Renderer.Event(Event{Type: "warning", Member: member, Version: version.Raw, Message: "skipping release gates: " + strings.Join(names, ", ")})
+		ctx.Renderer.Event(Event{Type: "warning", Member: member, Version: version.Raw, Message: "skipping gates: " + strings.Join(names, ", ")})
 		gates = nil
 	}
-	// A release gate may cover a build that the selected package does not
-	// otherwise consume. Recipe-wide gates are part of the release contract, so
-	// stage the union once and make every needed output available to the test.
+	// A gate may cover a build that the selected package does not otherwise
+	// consume. Recipe-wide gates are part of what a package promises, so stage
+	// the union once and make every needed output available to the test.
 	buildSet := make(map[string]bool, len(buildNames))
 	for _, name := range buildNames {
 		buildSet[name] = true
@@ -220,9 +220,6 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 		if err != nil {
 			return err
 		}
-		if err := guardProductionPublish(workspace, publishOps); err != nil {
-			return err
-		}
 		if err := reservePublishDestinations(ctx, publishOps, member); err != nil {
 			return err
 		}
@@ -258,8 +255,12 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 			return err
 		}
 	}
-	if ctx.ReleaseBuild != nil && !ctx.Inv.DryRun {
-		return ctx.ReleaseBuild.qualify(ctx, recipe, workspace, source, version, instances, capturedSource, signKey, member)
+	// Lint the written archives before anything is published: a finding stops
+	// the run with the artifacts on disk for inspection but unpublished.
+	if !ctx.Inv.DryRun && !ctx.Inv.NoGates {
+		if err := lintGate(ctx, recipe, workspace, source, version, instances, signKey, member); err != nil {
+			return err
+		}
 	}
 	for _, op := range publishOps.LocalDir {
 		if err := publishLocalDir(ctx, op, member); err != nil {
@@ -274,7 +275,7 @@ func packageOrPublish(ctx *Context, recipe RecipeConfig, workspace *WorkspaceCon
 	return nil
 }
 
-func releaseGates(recipe RecipeConfig) []TargetConfig {
+func gateTargets(recipe RecipeConfig) []TargetConfig {
 	tests := recipe.Targets[CommandTest]
 	out := make([]TargetConfig, 0, len(tests))
 	for _, name := range sortedKeys(tests) {

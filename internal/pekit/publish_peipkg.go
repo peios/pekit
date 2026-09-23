@@ -65,9 +65,20 @@ func publishPeipkgRepository(ctx *Context, op plannedPeipkgPublish, repositoryKe
 			})
 		}
 
+		// --strict asks the publisher to check the repository it would produce:
+		// every active package's install closure, and an upgrade from every
+		// previously active one. Ordinary publication skips this so that a
+		// bootstrap can publish packages ahead of the dependencies they need.
+		var qualification *repopub.Qualification
+		if ctx.Inv.Strict {
+			qualification, err = strictQualification(op.Dir, paths)
+			if err != nil {
+				return wrapDiag("peipkg_repository_publish", op.Dir, err)
+			}
+		}
 		result, err := repopub.Publish(op.Dir, repopub.PublishOptions{
 			Key: repositoryKey.Key, Paths: paths, GeneratedAt: at,
-			AllowUnsigned: ctx.Inv.AllowUnsigned,
+			AllowUnsigned: ctx.Inv.AllowUnsigned, Qualification: qualification,
 		})
 		if err != nil {
 			return diagAt("peipkg_repository_publish", op.Dir,
@@ -81,6 +92,25 @@ func publishPeipkgRepository(ctx *Context, op plannedPeipkgPublish, repositoryKe
 		}
 		return nil
 	})
+}
+
+// strictQualification binds a publication to the repository's current state
+// and the exact archive bytes, which is what makes the publisher run its
+// closure and upgrade checks.
+func strictQualification(dir string, paths []string) (*repopub.Qualification, error) {
+	base, err := repopub.StateDigest(dir)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]string, len(paths))
+	for _, p := range paths {
+		sum, err := fileSHA256(p)
+		if err != nil {
+			return nil, err
+		}
+		hashes[p] = sum
+	}
+	return &repopub.Qualification{BaseState: base, Artifacts: hashes}, nil
 }
 
 func resolvePeipkgSigningKeys(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig,

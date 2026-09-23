@@ -16,7 +16,7 @@ const helpReference = "https://learn.peios.org/pekit/reference/cli"
 // commandOrder is the order commands are listed in; every key of commands
 // must appear (helpCoversEveryCommand checks).
 var commandOrder = []Command{
-	CommandBuild, CommandTest, CommandInstall, CommandPackage, CommandPublish, CommandRelease,
+	CommandBuild, CommandTest, CommandInstall, CommandPackage, CommandPublish,
 	CommandClean, CommandGen, CommandVerify, CommandLock, CommandLint,
 	CommandWorkspace, CommandHelp, CommandVersion,
 }
@@ -25,9 +25,8 @@ var commandSummary = map[Command]string{
 	CommandBuild:     "run build targets and stage their output under out_dir",
 	CommandTest:      "stage the builds a test target needs, then run it",
 	CommandInstall:   "stage the builds an install target needs, then run it",
-	CommandPackage:   "build and write package artifacts (.peipkg, tar)",
+	CommandPackage:   "build, run the gates and lint, then write package artifacts (.peipkg, tar)",
 	CommandPublish:   "package, then publish to the configured destinations",
-	CommandRelease:   "qualify a fixed candidate in all release environments and promote one batch",
 	CommandClean:     "run the clean target and/or remove managed output",
 	CommandGen:       "run a gen target: write generated source into the tree",
 	CommandVerify:    "run gen verify_commands: a read-only drift check",
@@ -45,7 +44,6 @@ var commandSelectors = map[Command]string{
 	CommandInstall:   "install target names (default: main)",
 	CommandPackage:   "package selectors, `<package>` or `<package>:<instance>` (default: the only package, or --all)",
 	CommandPublish:   "package selectors, as for package",
-	CommandRelease:   "package selectors, as for package; requires workspace [release] policy",
 	CommandClean:     "at most one clean target name",
 	CommandGen:       "gen target names (default: main, or --all)",
 	CommandVerify:    "gen target names (default: main, or --all)",
@@ -70,13 +68,14 @@ var flagGroupHelp = map[flagUse][][2]string{
 	},
 	flagNoBuild:         {{"--no-build[=<targets>]", "reuse already-staged build targets (all, or the named ones)"}},
 	flagNoVerify:        {{"--no-verify[=<gen targets>]", "skip the gen drift-check pre-flight (all, or the named ones)"}},
-	flagNoGates:         {{"--no-gates", "skip gated tests before packaging (rapid iteration only)"}},
+	flagNoGates:         {{"--no-gates", "skip gated tests and lint when packaging (rapid iteration only)"}},
 	flagEnv:             {{"--env <name>", "select env-file layers: main (default), none, or <name>.env.pekit.toml"}},
 	flagKeyring:         {{"--keyring <name|path>", "load a keyring file (repeatable)"}, {"--keyring.<path>=<value>", "set one keyring value inline (repeatable)"}},
 	flagRefreshSource:   {{"--refresh-source", "re-fetch the source, ignoring the cache; the lock still applies"}},
 	flagAllowUnanchored: {{"--allow-unanchored", "permit publishing from a source with no checksum and no lock entry"}},
 	flagAllowUnsigned:   {{"--allow-unsigned", "permit publishing peipkg packages without a signing key"}},
 	flagAll:             {{"--all", "act on every package, or every gen target"}},
+	flagStrict:          {{"--strict", "require a clean committed catalogue, a locked source and no bypass flags; publish also checks every install and upgrade closure"}},
 	flagCleanMode:       {{"--output-only", "remove managed output without running the clean target"}, {"--target-only", "run the clean target without removing managed output"}},
 	flagRepin:           {{"--repin", "replace the lock entry for the selected exact version"}},
 }

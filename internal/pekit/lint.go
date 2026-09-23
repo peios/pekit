@@ -172,6 +172,13 @@ func runLint(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, memb
 		if len(l.cfg.Files) == 0 {
 			return missingLintConfig(recipe.Root)
 		}
+		// A payload built in an environment with its own lint exemptions is
+		// judged here the way the package gate judges it.
+		if explicitSource {
+			if err := applyEnvLintAllow(ctx, effective, workspace, &l.cfg); err != nil {
+				return err
+			}
+		}
 		emitLintConfig(ctx, member, l.cfg)
 		if err := lintStatic(l, effective, workspace, source); err != nil {
 			return err

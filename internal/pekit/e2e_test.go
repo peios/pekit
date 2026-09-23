@@ -134,9 +134,9 @@ format = "tar"
 	if err != nil || len(artifacts) != 1 {
 		t.Fatalf("expected one bypassed artifact, got %v (err=%v)", artifacts, err)
 	}
-	if !strings.Contains(stderr.String(), "skipping release gates: release") &&
-		!strings.Contains(stdout.String(), "skipping release gates: release") {
-		t.Fatal("--no-gates did not report the skipped release gate")
+	if !strings.Contains(stderr.String(), "skipping gates: lint, release") &&
+		!strings.Contains(stdout.String(), "skipping gates: lint, release") {
+		t.Fatal("--no-gates did not report the skipped gates")
 	}
 }
 

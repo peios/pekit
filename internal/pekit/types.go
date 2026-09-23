@@ -18,7 +18,6 @@ const (
 	CommandClean     Command = "clean"
 	CommandPackage   Command = "package"
 	CommandPublish   Command = "publish"
-	CommandRelease   Command = "release"
 	CommandGen       Command = "gen"
 	CommandVerify    Command = "verify"
 	CommandLock      Command = "lock"
@@ -35,7 +34,6 @@ var commands = map[string]Command{
 	"clean":     CommandClean,
 	"package":   CommandPackage,
 	"publish":   CommandPublish,
-	"release":   CommandRelease,
 	"gen":       CommandGen,
 	"verify":    CommandVerify,
 	"lock":      CommandLock,
@@ -84,9 +82,13 @@ type Invocation struct {
 	Local       *string
 	PreferLocal *string
 
-	NoBuild               *string
-	NoVerify              *string
-	NoGates               bool
+	NoBuild  *string
+	NoVerify *string
+	NoGates  bool
+	// Strict holds a build, test, package or publish to the production
+	// contract: a clean committed catalogue, an anchored source and no bypass
+	// flags; publish additionally runs the repository closure checks.
+	Strict                bool
 	EnvName               string
 	Keyrings              []string
 	KeyringValues         map[string]string
@@ -122,8 +124,6 @@ type App struct {
 }
 
 type Context struct {
-	Release         *releaseSession
-	ReleaseBuild    *releaseBuild
 	Jobs            map[string]*buildJob
 	App             *App
 	Inv             Invocation

@@ -24,8 +24,8 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			workspace = &ws
 		}
 	}
-	if ctx.Inv.EffectiveCommand() == CommandRelease {
-		if err := preflightRelease(ctx, recipe, workspace); err != nil {
+	if ctx.Inv.Strict {
+		if err := preflightStrict(recipe, workspace); err != nil {
 			return err
 		}
 	}
@@ -92,10 +92,8 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 	// Consuming commands run the scoped drift gates first, so no build/test/
 	// package/publish ever proceeds from a stale generated tree (unless
 	// --no-verify is passed).
-	if cmd != CommandRelease {
-		if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
-			return err
-		}
+	if err := preflightVerify(ctx, recipe, workspace, member); err != nil {
+		return err
 	}
 	versions, err := resolveRecipeVersions(ctx, recipe)
 	if err != nil {
@@ -111,6 +109,9 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 		}
 		if ctx.Inv.Verbose {
 			ctx.Renderer.Event(Event{Type: "source", Member: member, Version: version.Raw, Path: source.SourceRoot, Message: source.Kind + " " + source.ProvenanceRef})
+		}
+		if ctx.Inv.Strict && (source.Local || source.Unanchored) {
+			return diag("strict_provenance", "--strict requires a source pinned in pekit.lock; version %s is local or unlocked", version.Raw)
 		}
 		effectiveRecipe, err := mergeDelegatedRecipe(recipe, source)
 		if err != nil {
@@ -128,10 +129,6 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 			}
 		case CommandPackage:
 			if err := packageOrPublish(ctx, effectiveRecipe, workspace, source, version, false, member); err != nil {
-				return err
-			}
-		case CommandRelease:
-			if err := releaseRecipe(ctx, effectiveRecipe, workspace, source, version, member); err != nil {
 				return err
 			}
 		case CommandPublish:

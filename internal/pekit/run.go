@@ -59,21 +59,10 @@ func (a *App) Run(args []string) error {
 	for _, suppressed := range inv.Suppressed {
 		renderer.Event(Event{Type: "unused_suppressed", Message: suppressed})
 	}
-	if inv.EffectiveCommand() == CommandRelease && !inv.DryRun {
-		ctx.Release = &releaseSession{}
-	}
 	if inv.WorkspaceMode {
 		err = runWorkspace(ctx)
 	} else {
 		err = runRecipe(ctx, "", "")
-	}
-	if ctx.Release != nil {
-		if err == nil {
-			err = ctx.Release.promote(ctx)
-		}
-		if err != nil {
-			ctx.Release.fail(err)
-		}
 	}
 	if inv.JSON {
 		if inv.DryRun {

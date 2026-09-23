@@ -22,26 +22,24 @@ const (
 	flagAll
 	flagCleanMode
 	flagRepin
+	flagStrict
 )
 
 var commandFlags = map[Command]map[flagUse]bool{
 	CommandBuild: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagStrict: true,
 	},
 	CommandTest: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagStrict: true,
 	},
 	CommandInstall: {
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true,
 	},
 	CommandPackage: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true,
-	},
-	CommandRelease: {
-		flagVersion: true, flagKeyring: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true, flagStrict: true,
 	},
 	CommandPublish: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true, flagStrict: true,
 	},
 	CommandClean: {
 		flagEnv: true, flagKeyring: true, flagCleanMode: true,
@@ -222,6 +220,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.NoBuild = sub.NoBuild
 	inv.NoVerify = sub.NoVerify
 	inv.NoGates = sub.NoGates
+	inv.Strict = sub.Strict
 	inv.EnvName = sub.EnvName
 	inv.Keyrings = sub.Keyrings
 	inv.KeyringValues = sub.KeyringValues
@@ -263,6 +262,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.NoGates {
 		out = append(out, flagNoGates)
+	}
+	if inv.Strict {
+		out = append(out, flagStrict)
 	}
 	if inv.EnvName != "" {
 		out = append(out, flagEnv)
@@ -406,6 +408,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.NoGates = true
 		return true, i + 1, flagNoGates, nil
+	case "--strict":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--strict does not take a value")
+		}
+		inv.Strict = true
+		return true, i + 1, flagStrict, nil
 	case "--env":
 		v, next, err := flagValue(args, i, value, hasValue, name)
 		if err != nil {
@@ -506,6 +514,27 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 	if inv.OutputOnly && inv.TargetOnly {
 		return diag("invalid_flags", "--output-only and --target-only are mutually exclusive")
 	}
+	// --strict is the production contract: it forbids the flags that skip a
+	// check or substitute an unreviewed source, so they fail here rather than
+	// being silently ignored.
+	if inv.Strict {
+		var bypass []string
+		for _, f := range []struct {
+			set  bool
+			name string
+		}{
+			{inv.NoGates, "--no-gates"}, {inv.NoBuild != nil, "--no-build"}, {inv.NoVerify != nil, "--no-verify"},
+			{inv.Local != nil, "--local"}, {inv.PreferLocal != nil, "--prefer-local"},
+			{inv.AllowUnanchored, "--allow-unanchored"}, {inv.AllowUnsigned, "--allow-unsigned"},
+		} {
+			if f.set {
+				bypass = append(bypass, f.name)
+			}
+		}
+		if len(bypass) > 0 {
+			return diag("strict_bypass", "--strict cannot be combined with %s", strings.Join(bypass, ", "))
+		}
+	}
 	caps := commandFlags[cmd]
 	for _, u := range used {
 		if !caps[u] {
@@ -534,7 +563,7 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 		if len(selectors) > 1 {
 			return diag("invalid_selector", "clean accepts at most one target selector")
 		}
-	case CommandPackage, CommandPublish, CommandRelease:
+	case CommandPackage, CommandPublish:
 		if inv.All && len(selectors) > 0 {
 			return diag("invalid_flags", "--all cannot be combined with package selectors")
 		}
@@ -608,6 +637,8 @@ func flagUseName(u flagUse) string {
 		return "--all"
 	case flagCleanMode:
 		return "clean mode flags"
+	case flagStrict:
+		return "--strict"
 	default:
 		return fmt.Sprintf("flag group %d", u)
 	}

@@ -214,7 +214,6 @@ type LocalSourceConfig struct {
 }
 
 type WorkspaceConfig struct {
-	Release      ReleaseConfig
 	SourceInputs []string
 	Isolation    IsolationConfig
 	Root         string
@@ -269,6 +268,11 @@ type EnvFile struct {
 	Env                []EnvVar
 	Wrap               ShellCommand
 	DependencyProvider string
+	// LintAllow exempts whole lint rules for artifacts built in this
+	// environment, rule -> reason. It is for a limitation of the environment
+	// itself (a foreign toolchain whose startup objects carry no CET notes),
+	// never for a package's own defects.
+	LintAllow map[string]string
 }
 
 type PackageLayer struct {
@@ -538,13 +542,7 @@ func LoadWorkspace(path string) (WorkspaceConfig, error) {
 		return WorkspaceConfig{}, err
 	}
 	cfg := WorkspaceConfig{Root: root, Path: path}
-	if value, ok := raw["release"]; ok {
-		cfg.Release, err = parseReleaseConfig(path, value)
-		if err != nil {
-			return cfg, err
-		}
-	}
-	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true, "isolation": true, "source_package": true, "release": true}
+	known := map[string]bool{"include": true, "exclude": true, "env": true, "wrap": true, "policy": true, "isolation": true, "source_package": true}
 	for key := range raw {
 		if !known[key] {
 			return WorkspaceConfig{}, diagAt("unknown_key", path, "unknown workspace key %q", key)
@@ -684,10 +682,16 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 		return EnvFile{}, err
 	}
 	env := EnvFile{Path: path}
-	known := map[string]bool{"env": true, "wrap": true, "dependency_provider": true, "sandbox": true}
+	known := map[string]bool{"env": true, "wrap": true, "dependency_provider": true, "sandbox": true, "lint": true}
 	for key := range raw {
 		if !known[key] {
 			return EnvFile{}, diagAt("unknown_key", path, "unknown env-file key %q", key)
+		}
+	}
+	if v, ok := raw["lint"]; ok {
+		env.LintAllow, err = parseEnvLintAllow(path, v)
+		if err != nil {
+			return EnvFile{}, err
 		}
 	}
 	if _, hasEnv := raw["env"]; !hasEnv {
@@ -747,6 +751,40 @@ func LoadEnvFile(path string, missingOK bool) (EnvFile, error) {
 	}
 
 	return env, nil
+}
+
+// parseEnvLintAllow reads an env file's [lint.allow] table: whole lint rules
+// the environment exempts, each with the reason the environment needs it.
+func parseEnvLintAllow(path string, value any) (map[string]string, error) {
+	table, err := expectMap(path, "lint", value)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for key, v := range table {
+		if key != "allow" {
+			return nil, diagAt("unknown_key", path, "unknown env-file lint key %q", key)
+		}
+		entries, err := expectMap(path, "lint.allow", v)
+		if err != nil {
+			return nil, err
+		}
+		for rule, v := range entries {
+			spec, ok := lintKeyIndex[rule]
+			if !ok || spec.Param {
+				return nil, diagAt("unknown_key", path, "unknown lint rule %q in lint.allow", rule)
+			}
+			reason, err := expectString(path, "lint.allow."+rule, v)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(reason) == "" {
+				return nil, diagAt("missing_reason", path, "lint.allow.%s requires a reason", rule)
+			}
+			out[rule] = reason
+		}
+	}
+	return out, nil
 }
 
 func LoadPackageLayers(root, owner string) ([]PackageLayer, error) {
