@@ -391,6 +391,36 @@ legacy-thing = "1"
 	}
 }
 
+// A same-family pin written as "{{version}}-N" goes stale when the family
+// revision is bumped; {{release}} is the drift-proof spelling.
+func TestLintReportsHandWrittenFamilyRevisions(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "lint.pekit.toml"), "[package]\ndependencies = \"consistent\"\n")
+	writeFile(t, filepath.Join(dir, "pekit.toml"), "[build.main]\ncommand = \"true\"\n")
+	writeFile(t, filepath.Join(dir, "package.pekit.toml"), `
+format = "peipkg"
+
+[package]
+name = "org.example.thing"
+version = "{{version}}-3"
+
+[dependencies]
+"org.example.thing-libs" = "= {{version}}-1"
+"org.example.thing-data" = "= {{release}}"
+"org.example.other" = ">= {{version}}"
+
+[provides]
+thing = "{{version}}-1"
+`)
+	events, err := lintEvents(t, dir, "lint")
+	if diagCode(err) != "lint_failed" {
+		t.Fatalf("want lint_failed, got %v", err)
+	}
+	if got := lintRules(events["lint"])["package.dependencies"]; got != 2 {
+		t.Fatalf("package.dependencies findings = %d, want 2: %#v", got, events["lint"])
+	}
+}
+
 func TestLintCleanRecipeAndAllow(t *testing.T) {
 	ws := t.TempDir()
 	writeFile(t, filepath.Join(ws, "workspace.pekit.toml"), "include = [\"./*\"]\n")

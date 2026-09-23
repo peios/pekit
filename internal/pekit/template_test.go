@@ -67,3 +67,30 @@ func TestRenderTemplatePreservesArbitraryNumericCoreAndFirstThreeCompatibility(t
 		t.Errorf("RenderTemplate = %q", out)
 	}
 }
+
+// {{release}} is the rendered package version of the definition being
+// rendered, so same-family pins follow a revision bump automatically. It is
+// meaningless outside a package manifest and must say so rather than render
+// empty.
+func TestRenderTemplateRelease(t *testing.T) {
+	v := mustParseVersion("1.13.2")
+	out, err := RenderTemplate("= {{release}}", TemplateContext{Version: v, Release: "1.13.2-3"})
+	if err != nil || out != "= 1.13.2-3" {
+		t.Fatalf("RenderTemplate = %q, %v", out, err)
+	}
+	if _, err := RenderTemplate("= {{release}}", TemplateContext{Version: v}); err == nil ||
+		!strings.Contains(err.Error(), "package relations") {
+		t.Fatalf("RenderTemplate without a release = %v, want a diagnostic", err)
+	}
+	meta, err := renderPackageMeta(PackageMeta{
+		Name:         "org.example.thing-debuginfo",
+		Version:      "{{version}}-3",
+		Dependencies: map[string]string{"org.example.thing": "= {{release}}"},
+	}, TemplateContext{Version: v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := meta.Dependencies["org.example.thing"]; got != "= 1.13.2-3" {
+		t.Fatalf("rendered dependency = %q, want = 1.13.2-3", got)
+	}
+}

@@ -683,6 +683,7 @@ func renderPackageMeta(meta PackageMeta, ctx TemplateContext) (PackageMeta, erro
 	if meta.Version, err = renderPackageString("package.version", meta.Version, ctx); err != nil {
 		return PackageMeta{}, err
 	}
+	ctx.Release = meta.Version
 	if meta.Architecture, err = renderPackageString("package.architecture", meta.Architecture, ctx); err != nil {
 		return PackageMeta{}, err
 	}

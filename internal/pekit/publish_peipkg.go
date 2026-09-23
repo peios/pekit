@@ -79,10 +79,17 @@ func publishPeipkgRepository(ctx *Context, op plannedPeipkgPublish, repositoryKe
 		result, err := repopub.Publish(op.Dir, repopub.PublishOptions{
 			Key: repositoryKey.Key, Paths: paths, GeneratedAt: at,
 			AllowUnsigned: ctx.Inv.AllowUnsigned, Qualification: qualification,
+			Replace: ctx.Inv.Replace,
 		})
 		if err != nil {
 			return diagAt("peipkg_repository_publish", op.Dir,
 				"publish to peipkg repository with signing key %s: %v", repositoryKey.Path, err)
+		}
+		for _, old := range result.Replaced {
+			ctx.Renderer.Event(Event{
+				Type: "warning", Member: member, Path: op.Dir,
+				Message: "replaced published package " + old,
+			})
 		}
 		for _, inst := range op.Instances {
 			ctx.Renderer.Event(Event{

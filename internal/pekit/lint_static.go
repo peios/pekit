@@ -220,7 +220,24 @@ func lintDependencyConsistency(l *linter, name, path string, meta PackageMeta) {
 	if _, ok := meta.Conflicts[name]; ok {
 		l.report("package.dependencies", name, path, "package conflicts with itself")
 	}
+	// A relation that spells out "{{version}}-N" repeats the family revision
+	// by hand, and goes stale (an exact pin nothing satisfies) as soon as
+	// package.version is bumped. {{release}} renders the package's own
+	// version-revision, so it cannot drift.
+	for section, values := range map[string]map[string]string{
+		"dependencies":          meta.Dependencies,
+		"optional_dependencies": meta.OptionalDependencies,
+		"provides":              meta.Provides,
+	} {
+		for _, dep := range sortedKeys(values) {
+			if handWrittenReleaseRE.MatchString(values[dep]) {
+				l.report("package.dependencies", name, path, "%s %q = %q repeats the family revision by hand; use \"= {{release}}\"", section, dep, values[dep])
+			}
+		}
+	}
 }
+
+var handWrittenReleaseRE = regexp.MustCompile(`\{\{version\}\}-[0-9]`)
 
 // --- source ----------------------------------------------------------------
 

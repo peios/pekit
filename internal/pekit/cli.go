@@ -19,6 +19,7 @@ const (
 	flagRefreshSource
 	flagAllowUnanchored
 	flagAllowUnsigned
+	flagReplace
 	flagAll
 	flagCleanMode
 	flagRepin
@@ -42,7 +43,7 @@ var commandFlags = map[Command]map[flagUse]bool{
 		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAll: true, flagStrict: true,
 	},
 	CommandPublish: {
-		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagAll: true, flagStrict: true,
+		flagVersion: true, flagLocal: true, flagNoBuild: true, flagNoVerify: true, flagNoGates: true, flagEnv: true, flagKeyring: true, flagRefreshSource: true, flagAllowUnanchored: true, flagAllowUnsigned: true, flagReplace: true, flagAll: true, flagStrict: true,
 	},
 	CommandClean: {
 		flagEnv: true, flagKeyring: true, flagCleanMode: true,
@@ -235,6 +236,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.RefreshSource = sub.RefreshSource
 	inv.AllowUnanchored = sub.AllowUnanchored
 	inv.AllowUnsigned = sub.AllowUnsigned
+	inv.Replace = sub.Replace
 	inv.Repin = sub.Repin
 	inv.All = sub.All
 	inv.Tags = sub.Tags
@@ -286,6 +288,9 @@ func delegatedUsedFlags(inv Invocation) []flagUse {
 	}
 	if inv.AllowUnanchored {
 		out = append(out, flagAllowUnanchored)
+	}
+	if inv.Replace {
+		out = append(out, flagReplace)
 	}
 	if inv.Repin {
 		out = append(out, flagRepin)
@@ -458,6 +463,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.AllowUnsigned = true
 		return true, i + 1, flagAllowUnsigned, nil
+	case "--replace":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--replace does not take a value")
+		}
+		inv.Replace = true
+		return true, i + 1, flagReplace, nil
 	case "--repin":
 		if hasValue {
 			return false, i, -1, diag("unexpected_flag_value", "--repin does not take a value")
@@ -552,6 +563,7 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 			{inv.NoGates, "--no-gates"}, {inv.NoBuild != nil, "--no-build"}, {inv.NoVerify != nil, "--no-verify"},
 			{inv.Local != nil, "--local"}, {inv.PreferLocal != nil, "--prefer-local"},
 			{inv.AllowUnanchored, "--allow-unanchored"}, {inv.AllowUnsigned, "--allow-unsigned"},
+			{inv.Replace, "--replace"},
 		} {
 			if f.set {
 				bypass = append(bypass, f.name)
@@ -663,6 +675,8 @@ func flagUseName(u flagUse) string {
 		return "--allow-unanchored"
 	case flagAllowUnsigned:
 		return "--allow-unsigned"
+	case flagReplace:
+		return "--replace"
 	case flagRepin:
 		return "--repin"
 	case flagAll:

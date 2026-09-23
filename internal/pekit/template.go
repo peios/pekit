@@ -8,6 +8,12 @@ import (
 type TemplateContext struct {
 	Version   Version
 	Multipack string
+	// Release is the rendered package version (upstream version plus
+	// revision) of the package definition being rendered. It is set only
+	// while rendering a package manifest, after package.version itself, so
+	// same-family relations can pin `= {{release}}` instead of repeating a
+	// hand-written revision that goes stale on the next bump.
+	Release string
 }
 
 var templateRE = regexp.MustCompile(`\{\{([A-Za-z0-9_]+)\}\}`)
@@ -25,6 +31,13 @@ func RenderTemplate(raw string, ctx TemplateContext) (string, error) {
 				return ""
 			}
 			return ctx.Multipack
+		}
+		if name == "release" {
+			if ctx.Release == "" {
+				firstErr = fmt.Errorf("{{release}} is only available in package relations, after package.version")
+				return ""
+			}
+			return ctx.Release
 		}
 		vars := ctx.Version.TemplateVars()
 		value, ok := vars[name]

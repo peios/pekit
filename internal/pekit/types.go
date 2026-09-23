@@ -97,6 +97,7 @@ type Invocation struct {
 	RefreshSource         bool
 	AllowUnanchored       bool
 	AllowUnsigned         bool
+	Replace               bool
 	Repin                 bool
 
 	All        bool

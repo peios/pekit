@@ -74,6 +74,7 @@ var flagGroupHelp = map[flagUse][][2]string{
 	flagRefreshSource:   {{"--refresh-source", "re-fetch the source, ignoring the cache; the lock still applies"}},
 	flagAllowUnanchored: {{"--allow-unanchored", "permit publishing from a source with no checksum and no lock entry"}},
 	flagAllowUnsigned:   {{"--allow-unsigned", "permit publishing peipkg packages without a signing key"}},
+	flagReplace:         {{"--replace", "overwrite already-published peipkg packages of the same version (bootstrap only; breaks retention)"}},
 	flagAll:             {{"--all", "act on every package, or every gen target"}},
 	flagStrict:          {{"--strict", "require a clean committed catalogue, a locked source and no bypass flags; publish also checks every install and upgrade closure"}},
 	flagCleanMode:       {{"--output-only", "remove managed output without running the clean target"}, {"--target-only", "run the clean target without removing managed output"}},
