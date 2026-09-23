@@ -90,7 +90,7 @@ func BuildCommandEnv(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConf
 			return CommandEnv{}, err
 		}
 		if profile.Sandbox.Prepare.Empty() {
-			return CommandEnv{}, diag("isolation_required", "workspace requires a sandbox environment; select --env peipkg or --env debian")
+			return CommandEnv{}, diag("isolation_required", "workspace requires a sandbox environment; give it an env.pekit.toml with [sandbox] or select one with --env <name>")
 		}
 		// Only workspace policy selects the coordinator root and provider.
 		dependencyProvider = profile.DependencyProvider

@@ -1231,7 +1231,7 @@ func targetConfigKey(kind Command, key string) bool {
 		return kind == CommandTest
 	case "dependencies":
 		// A test stage runs in a composed root just as a build does, and
-		// under --env peipkg that root holds nothing the stage does not
+		// under a peipkg provider that root holds nothing the stage does not
 		// name — not even a shell (PEI-489).
 		return kind == CommandBuild || kind == CommandTest
 	case "sign":

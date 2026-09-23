@@ -37,7 +37,7 @@ func runRecipe(ctx *Context, member, recipePathOverride string) error {
 				return err
 			}
 			if profile.Sandbox.Prepare.Empty() {
-				return diag("isolation_required", "workspace requires a sandbox environment; select --env peipkg or --env debian")
+				return diag("isolation_required", "workspace requires a sandbox environment; give it an env.pekit.toml with [sandbox] or select one with --env <name>")
 			}
 		}
 		unlock, err := lockBuildJob(recipe)
