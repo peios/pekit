@@ -393,7 +393,7 @@ func lintScripts(l *linter, set *lintPayloadSet, pkg lintPackage, binDirs []stri
 				l.report("payload.scripts", name, dest, "interpreter %s is neither shipped by this recipe nor in payload.interpreters", prog)
 			}
 			effective = prog
-		} else if !knownInterp[interp] && !set.has(strings.TrimPrefix(interp, "/")) {
+		} else if !knownInterp[interp] && !set.has(strings.TrimPrefix(interp, "/")) && !shipsMergedUsr(set, interp) {
 			l.report("payload.scripts", name, dest, "interpreter %s is neither shipped by this recipe nor in payload.interpreters", interp)
 		}
 		if shell := path.Base(effective); lintShellNames[shell] {
@@ -402,6 +402,18 @@ func lintScripts(l *linter, set *lintPayloadSet, pkg lintPackage, binDirs []stri
 			}
 		}
 	}
+}
+
+// shipsMergedUsr accepts /bin/x or /sbin/x as naming the recipe's own
+// usr/bin/x or usr/sbin/x: on a merged-/usr system the root directories are
+// views of /usr, so a script may name its interpreter through them.
+func shipsMergedUsr(s *lintPayloadSet, interp string) bool {
+	for _, root := range []string{"/bin/", "/sbin/"} {
+		if strings.HasPrefix(interp, root) && s.has("usr"+interp) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *lintPayloadSet) hasProgram(prog string, binDirs []string) bool {
