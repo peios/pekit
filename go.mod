@@ -8,7 +8,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/cloudflare/circl v1.6.2
 	github.com/klauspost/compress v1.18.6
-	github.com/peios/peipkg v0.1.2
+	github.com/peios/peipkg v0.1.6
 )
 
 require (
