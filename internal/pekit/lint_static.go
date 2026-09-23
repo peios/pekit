@@ -289,6 +289,9 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 	if l.on("source.signature.required") && s.URL.URL != "" && !s.URL.Signature.Configured() {
 		l.report("source.signature.required", "", path, "[source.url] verifies no upstream signature; add [source.url.signature] with the release key")
 	}
+	if l.on("source.signature.required") && s.Git.URL != "" && !s.Git.Signature.Configured() {
+		l.report("source.signature.required", "", path, "[source.git] verifies no upstream signature; add [source.git.signature] with the key that signs release tags")
+	}
 	// An input is an upstream download like any other, so it answers to the
 	// same rules; naming the block keeps the finding actionable. A delegated
 	// source's input is reported against, and resolves its keys beside, the
@@ -312,10 +315,12 @@ func lintSourceRules(l *linter, recipe RecipeConfig) {
 	if l.on("source.signature.fingerprint") {
 		lintSignatureFingerprints(l, path, "source.url.signature", s.URL.Signature)
 		lintSignatureFingerprints(l, path, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
+		lintSignatureFingerprints(l, path, "source.git.signature", s.Git.Signature.keyPolicy())
 	}
 	if l.on("source.signature.keys") {
 		lintSignatureKeys(l, recipe.Root, "source.url.signature", s.URL.Signature)
 		lintSignatureKeys(l, recipe.Root, "source.url.patch_series.signature", s.URL.PatchSeries.Signature)
+		lintSignatureKeys(l, recipe.Root, "source.git.signature", s.Git.Signature.keyPolicy())
 	}
 	if (l.on("source.patches.headers") || l.on("source.patches.status")) && s.Patches != "" {
 		lintPatchHeaders(l, recipe)

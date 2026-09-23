@@ -261,10 +261,19 @@ func resolveGitSource(ctx *Context, recipe RecipeConfig, outBase string, cfg Git
 			commit = strings.TrimSpace(out)
 		}
 	}
+	// The signature is checked before the lock is written or the tree is
+	// checked out; the mirror fetch above only stored objects.
+	signatureKey := ""
+	if !ctx.Inv.DryRun && cfg.Signature.Configured() {
+		signatureKey, err = verifyGitSignature(recipe.Root, cfg.Signature, rawRepo, ref, commit)
+		if err != nil {
+			return SourceState{}, err
+		}
+	}
 	// Git sources lock only under a selected version: a bare branch ref is a
 	// deliberately moving target, like --local.
 	if !ctx.Inv.DryRun && version.Raw != "" {
-		if err := applyGitLock(ctx, recipe, ref, commit, version); err != nil {
+		if err := applyGitLock(ctx, recipe, ref, commit, signatureKey, version); err != nil {
 			return SourceState{}, err
 		}
 	}

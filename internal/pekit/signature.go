@@ -54,16 +54,25 @@ func verifyURLSignature(ctx *Context, keyRoot string, sigCfg URLSignatureConfig,
 				"fetch signature %s: %v — upstream may have stopped publishing signatures; verify why before removing [source.url.signature]", sigURL, err)
 		}
 	}
-	keyring, err := loadPinnedKeys(keyRoot, sigCfg.KeyFiles)
-	if err != nil {
-		return "", err
-	}
 	sigBytes, err := os.ReadFile(sigPath)
 	if err != nil {
 		return "", wrapDiag("signature_invalid", sigPath, err)
 	}
+	open := func() (io.ReadCloser, error) { return openSignedData(artifact, sigCfg.Of) }
+	return verifyPinnedSignature(keyRoot, sigCfg, open, sigBytes, "signature "+sigURL, field)
+}
+
+// verifyPinnedSignature checks one detached OpenPGP signature over the bytes
+// open yields against a recipe's pinned trust policy, returning the hex
+// fingerprint of the signing key's primary key. what names the signature in
+// diagnostics; field names the configuration block that pinned the keys.
+func verifyPinnedSignature(keyRoot string, sigCfg URLSignatureConfig, open func() (io.ReadCloser, error), sigBytes []byte, what, field string) (string, error) {
+	keyring, err := loadPinnedKeys(keyRoot, sigCfg.KeyFiles)
+	if err != nil {
+		return "", err
+	}
 	verify := func(config *packet.Config) (*packet.Signature, *openpgp.Entity, error) {
-		signed, openErr := openSignedData(artifact, sigCfg.Of)
+		signed, openErr := open()
 		if openErr != nil {
 			return nil, nil, openErr
 		}
@@ -102,7 +111,7 @@ func verifyURLSignature(ctx *Context, keyRoot string, sigCfg URLSignatureConfig,
 	}
 	if err != nil {
 		return "", diag("signature_invalid",
-			"signature %s does not verify against the pinned keys: %v — possible tamper or upstream key rotation; do not build until resolved", sigURL, err)
+			"%s does not verify against the pinned keys: %v — possible tamper or upstream key rotation; do not build until resolved", what, err)
 	}
 	fpr := hex.EncodeToString(signer.PrimaryKey.Fingerprint)
 	if len(sigCfg.Fingerprints) > 0 && !fingerprintAllowed(fpr, sigCfg.Fingerprints) {
@@ -258,7 +267,7 @@ func loadPinnedKeys(recipeRoot string, keyFiles []string) (openpgp.EntityList, e
 		keyring = append(keyring, entities...)
 	}
 	if len(keyring) == 0 {
-		return nil, diag("signature_key_file", "no usable keys loaded from source.url.signature.key_files")
+		return nil, diag("signature_key_file", "no usable keys loaded from the signature block's key_files")
 	}
 	return keyring, nil
 }

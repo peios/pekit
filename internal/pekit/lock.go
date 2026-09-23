@@ -73,7 +73,7 @@ type LockSource struct {
 	BlobSHA256 string `toml:"blob_sha256,omitempty"`
 	// SignatureKey is the hex fingerprint of the pinned upstream key that
 	// verified this entry at lock time; empty when no [source.url.signature]
-	// block is configured.
+	// or [source.git.signature] block is configured.
 	SignatureKey string      `toml:"signature_key,omitempty"`
 	Patches      []LockPatch `toml:"patch,omitempty"`
 	LockedAt     string      `toml:"locked_at,omitempty"`
@@ -376,7 +376,9 @@ func lockPatchSetHash(patches []LockPatch) string {
 // applyGitLock enforces the lockfile against a resolved git commit. A moved
 // tag is a hard stop even though the locked commit is still fetchable —
 // surfacing that upstream's published state changed is the point.
-func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit string, version Version) error {
+// signatureKey is the verified signer's fingerprint, or "" when the recipe
+// configures no [source.git.signature].
+func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit, signatureKey string, version Version) error {
 	lock, err := LoadLockFile(recipe.Root)
 	if err != nil {
 		return err
@@ -394,6 +396,22 @@ func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit string,
 				"git ref %q resolves to %s but version %q is locked to %s — the upstream tag moved; if that change is legitimate, run `pekit lock --repin --version %s`",
 				renderedRef, commit, version.Raw, entry.Commit, version.Raw)
 		}
+		switch {
+		case signatureKey == "" || entry.SignatureKey == signatureKey:
+		case entry.SignatureKey == "":
+			// Upgrade path: a signature block added after the version was
+			// locked verifies on the next resolve and is recorded.
+			entry.SignatureKey = signatureKey
+			entry.LockedAt = lockTimestamp(ctx)
+			if err := SaveLockFile(recipe.Root, lock); err != nil {
+				return err
+			}
+			ctx.Renderer.Event(Event{Type: "lock", Version: version.Raw, Message: "recorded upstream signature by " + shortFingerprint(signatureKey)})
+		default:
+			return diag("lock_mismatch",
+				"git ref %q is now signed by %s but version %q is locked as signed by %s — upstream re-signed the release; if that change is legitimate, run `pekit lock --repin --version %s`",
+				renderedRef, signatureKey, version.Raw, entry.SignatureKey, version.Raw)
+		}
 		return nil
 	}
 	message := "pinned commit " + commit
@@ -406,11 +424,15 @@ func applyGitLock(ctx *Context, recipe RecipeConfig, renderedRef, commit string,
 			message = "REPINNED: url sha256:" + entry.SHA256 + " -> git commit " + commit
 		}
 	}
+	if signatureKey != "" {
+		message += ", signed by " + shortFingerprint(signatureKey)
+	}
 	lock.Put(LockSource{
-		Version:  version.Raw,
-		Ref:      renderedRef,
-		Commit:   commit,
-		LockedAt: lockTimestamp(ctx),
+		Version:      version.Raw,
+		Ref:          renderedRef,
+		Commit:       commit,
+		SignatureKey: signatureKey,
+		LockedAt:     lockTimestamp(ctx),
 	})
 	if err := SaveLockFile(recipe.Root, lock); err != nil {
 		return err
@@ -501,6 +523,9 @@ func runLockCmd(ctx *Context, recipe RecipeConfig, member string) error {
 					msg = "tracked git " + entry.Ref + ":" + entry.Path + " commit " + entry.Commit + " blob " + entry.Blob + " sha256:" + entry.BlobSHA256
 				} else {
 					msg = "git " + entry.Ref + " commit " + entry.Commit
+					if entry.SignatureKey != "" {
+						msg += " signed by " + shortFingerprint(entry.SignatureKey)
+					}
 				}
 			} else {
 				msg = "url sha256:" + entry.SHA256

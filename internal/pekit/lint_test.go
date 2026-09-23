@@ -336,12 +336,12 @@ command = "true"
 		t.Fatalf("want lint_failed, got %v", err)
 	}
 	got = lintRules(events["lint"])
-	for _, rule := range []string{"source.discovery", "source.ref", "source.url.scheme", "source.lock"} {
+	for _, rule := range []string{"source.discovery", "source.ref", "source.url.scheme", "source.lock", "source.signature.required"} {
 		if got[rule] == 0 {
 			t.Errorf("no finding for %s on the git recipe; got %v", rule, got)
 		}
 	}
-	if got["source.versions.floor"] != 0 || got["source.versions.ceiling"] != 0 || got["source.signature.required"] != 0 {
+	if got["source.versions.floor"] != 0 || got["source.versions.ceiling"] != 0 {
 		t.Errorf("url-only rules fired on a git source: %v", got)
 	}
 }

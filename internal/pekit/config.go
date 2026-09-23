@@ -155,6 +155,28 @@ type GitSourceConfig struct {
 	Versions    string
 	TagRegex    string
 	TrackedPath string
+	Signature   GitSignatureConfig
+}
+
+// GitSignatureConfig pins the OpenPGP identity that signs an upstream's Git
+// releases. Presence of the block makes verification required: the rendered
+// ref must be a signed annotated tag naming the resolved commit (Object
+// "tag", the default), or the resolved commit must itself carry a signature
+// (Object "commit"). KeyFiles, Fingerprints and IgnoreExpiry mean exactly
+// what they mean for a URL source's detached signature.
+type GitSignatureConfig struct {
+	Object       string // "tag" (default) or "commit"
+	KeyFiles     []string
+	Fingerprints []string
+	IgnoreExpiry bool
+}
+
+func (c GitSignatureConfig) Configured() bool { return len(c.KeyFiles) > 0 }
+
+// keyPolicy views the block through the trust-policy fields verification
+// and lint share with URL signatures.
+func (c GitSignatureConfig) keyPolicy() URLSignatureConfig {
+	return URLSignatureConfig{KeyFiles: c.KeyFiles, Fingerprints: c.Fingerprints, IgnoreExpiry: c.IgnoreExpiry}
 }
 
 type URLSourceConfig struct {
@@ -1669,7 +1691,7 @@ func parsePyPISource(path string, table map[string]any) (PyPISourceConfig, error
 }
 
 func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) {
-	known := map[string]bool{"url": true, "ref": true, "versions": true, "tag_regex": true, "tracked_path": true}
+	known := map[string]bool{"url": true, "ref": true, "versions": true, "tag_regex": true, "tracked_path": true, "signature": true}
 	for key := range table {
 		if !known[key] {
 			return GitSourceConfig{}, diagAt("unknown_key", path, "unknown source.git key %q", key)
@@ -1715,6 +1737,61 @@ func parseGitSource(path string, table map[string]any) (GitSourceConfig, error) 
 		}
 		if cfg.TagRegex != "" {
 			return GitSourceConfig{}, diagAt("invalid_value", path, "source.git.tag_regex cannot be combined with source.git.tracked_path")
+		}
+	}
+	if v, ok := table["signature"]; ok {
+		cfg.Signature, err = parseGitSignature(path, v)
+		if err != nil {
+			return GitSourceConfig{}, err
+		}
+		if cfg.TrackedPath != "" {
+			return GitSourceConfig{}, diagAt("invalid_value", path, "source.git.signature cannot be combined with source.git.tracked_path: a tracked snapshot follows a branch, not a signed release")
+		}
+	}
+	return cfg, nil
+}
+
+func parseGitSignature(path string, value any) (GitSignatureConfig, error) {
+	const field = "source.git.signature"
+	table, err := expectMap(path, field, value)
+	if err != nil {
+		return GitSignatureConfig{}, err
+	}
+	known := map[string]bool{"object": true, "key_files": true, "fingerprints": true, "ignore_expiry": true}
+	for key := range table {
+		if !known[key] {
+			return GitSignatureConfig{}, diagAt("unknown_key", path, "unknown %s key %q", field, key)
+		}
+	}
+	cfg := GitSignatureConfig{Object: "tag"}
+	if v, ok := table["object"]; ok {
+		cfg.Object, err = expectString(path, field+".object", v)
+		if err != nil {
+			return GitSignatureConfig{}, err
+		}
+		if cfg.Object != "tag" && cfg.Object != "commit" {
+			return GitSignatureConfig{}, diagAt("invalid_signature", path, "%s.object must be \"tag\" or \"commit\"", field)
+		}
+	}
+	if v, ok := table["key_files"]; ok {
+		cfg.KeyFiles, err = expectStringSlice(path, field+".key_files", v)
+		if err != nil {
+			return GitSignatureConfig{}, err
+		}
+	}
+	if len(cfg.KeyFiles) == 0 {
+		return GitSignatureConfig{}, diagAt("missing_key", path, "%s requires a non-empty key_files", field)
+	}
+	if v, ok := table["fingerprints"]; ok {
+		cfg.Fingerprints, err = expectStringSlice(path, field+".fingerprints", v)
+		if err != nil {
+			return GitSignatureConfig{}, err
+		}
+	}
+	if v, ok := table["ignore_expiry"]; ok {
+		cfg.IgnoreExpiry, err = expectBool(path, field+".ignore_expiry", v)
+		if err != nil {
+			return GitSignatureConfig{}, err
 		}
 	}
 	return cfg, nil
