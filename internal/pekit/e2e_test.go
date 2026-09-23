@@ -2759,6 +2759,10 @@ type peipkgManifestDoc struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"provides"`
+	Replaces []struct {
+		Name       string  `json:"name"`
+		Constraint *string `json:"constraint"`
+	} `json:"replaces"`
 	Build struct {
 		FarmID        string `json:"farm_id"`
 		SourceRef     string `json:"source_ref"`

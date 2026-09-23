@@ -126,6 +126,78 @@ signing_key = "keyring:signing.repository_key"
 	}
 }
 
+// A recipe's packages publish as one batch after every one of them has been
+// written and linted, so a failure part-way through leaves the repository
+// untouched rather than at mixed revisions: here the middle of three members
+// fails in pack itself (its manifest carries a malformed dependency
+// constraint) after the first has been written, and neither of its siblings
+// may reach the repository (PEI-570).
+func TestPublishPeipkgPartialFailurePublishesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		constraint := ">= 1.0"
+		if name == "beta" {
+			constraint = ">= not a version"
+		}
+		writeFile(t, filepath.Join(dir, name+".txt"), name)
+		writeFile(t, filepath.Join(dir, name+".package.pekit.toml"), `
+format = "peipkg"
+
+[package]
+name = "`+name+`"
+version = "1.0.0-1"
+architecture = "x86_64"
+description = "test package"
+license = "MIT"
+
+[dependencies]
+"org.example.base" = "`+constraint+`"
+
+[files]
+"@recipe:`+name+`.txt" = "usr/share/`+name+`/payload.txt"
+
+[publish.peipkg]
+path = "repo"
+name = "test-repository"
+signing_key = "keyring:signing.repository_key"
+`)
+	}
+	packageKeyDir := filepath.Join(dir, "package-key")
+	repositoryKeyDir := filepath.Join(dir, "repository-key")
+	for _, d := range []string{packageKeyDir, repositoryKeyDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packageKey, _ := writeSeedKey(t, packageKeyDir)
+	repositoryKey, _ := writeSeedKey(t, repositoryKeyDir)
+	chdir(t, dir)
+
+	var stdout, stderr bytes.Buffer
+	app := &App{Stdout: &stdout, Stderr: &stderr}
+	err := app.Run([]string{
+		"publish", "--all",
+		"--keyring.signing.package_key=" + packageKey,
+		"--keyring.signing.repository_key=" + repositoryKey,
+	})
+	if err == nil {
+		t.Fatalf("publish succeeded with beta's manifest malformed\nstdout=%s", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "not a version") {
+		t.Errorf("error = %v, want beta's pack failure", err)
+	}
+	if !strings.Contains(stdout.String(), "alpha") || !strings.Contains(stdout.String(), "wrote package") {
+		t.Errorf("alpha was not written before beta failed, so the failure was not part-way:\n%s", stdout.String())
+	}
+	if fileExists(filepath.Join(dir, "repo")) {
+		t.Errorf("repository was written although a member failed:\n%v", globAll(t, filepath.Join(dir, "repo", "p", "*", "*", "*")))
+	}
+	if strings.Contains(stdout.String(), "published package") {
+		t.Errorf("a package was reported published:\n%s", stdout.String())
+	}
+}
+
 func TestPublishPeipkgDirectKeyPathAndDefaultName(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pekit.toml"), `out_dir = "out"`)

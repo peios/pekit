@@ -1,50 +1,45 @@
 package pekit
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// A version pekit's own model does not describe — a peipkg version
-// carrying an epoch or a tilde, which its regex rejects outright —
-// reaches a template through mustParseVersion, which swallows the parse
-// error and returns a Version with only Raw set. Every derived token
-// then rendered as an empty string with no diagnostic anywhere: a
-// publish destination silently missing its major number (PEI-422).
-func TestRenderTemplateRefusesDerivedTokensOfAnUndecomposableVersion(t *testing.T) {
-	v := mustParseVersion("2:0.5.0-1") // epoch: pekit's regex rejects it
-	if v.Parsed {
-		t.Fatal("the fixture parsed after all; pick a version the model really rejects")
-	}
-
-	for _, token := range []string{"{{major}}", "{{minor}}", "{{patch}}",
-		"{{revision}}", "{{revision_suffix}}", "{{suffix}}", "{{prerelease}}", "{{buildmeta}}"} {
-		out, err := RenderTemplate("pkg-"+token, TemplateContext{Version: v})
-		if err == nil {
-			t.Errorf("RenderTemplate(%s) = %q, want a diagnostic rather than an empty render",
-				token, out)
-			continue
+// A package version is peipkg's epoch/upstream/revision grammar, not an
+// upstream source version. Read through pekit's source-version regex,
+// `1.26.2-3` decomposes with the Peios revision as {{prerelease}}, and
+// `2:0.5.0-1` does not decompose at all. A localdir destination is rendered
+// from the package version, so it offers {{version}} alone and refuses every
+// derived token with a diagnostic (PEI-422).
+func TestLocalDirDestinationOffersOnlyThePackageVersion(t *testing.T) {
+	recipe := RecipeConfig{Root: t.TempDir()}
+	for _, pkgVersion := range []string{"1.26.2-3", "2:0.5.0-1"} {
+		inst := PackageInstance{Version: pkgVersion, Artifact: "/stage/pkg.peipkg"}
+		for _, token := range []string{"{{major}}", "{{minor}}", "{{patch}}",
+			"{{revision}}", "{{revision_suffix}}", "{{suffix}}", "{{prerelease}}", "{{buildmeta}}"} {
+			dst, _, err := renderLocalDirDestination(nil, recipe, inst, LocalDirPublish{Path: "dist/" + token})
+			if err == nil {
+				t.Errorf("%s: path dist/%s = %q, want a diagnostic", pkgVersion, token, dst)
+				continue
+			}
+			if !strings.Contains(err.Error(), "does not decompose") {
+				t.Errorf("%s: path dist/%s error = %v, want it to say why", pkgVersion, token, err)
+			}
 		}
-		if !strings.Contains(err.Error(), "does not decompose") {
-			t.Errorf("RenderTemplate(%s) error = %v, want it to say why", token, err)
+		dst, _, err := renderLocalDirDestination(nil, recipe, inst, LocalDirPublish{Path: "dist/{{version}}"})
+		if err != nil {
+			t.Fatalf("%s: {{version}}: %v", pkgVersion, err)
 		}
-	}
-
-	// {{version}} is still available: Raw is the one field that survives,
-	// and a recipe using only it is not broken by the version being one
-	// pekit cannot take apart.
-	out, err := RenderTemplate("pkg-{{version}}.peipkg", TemplateContext{Version: v})
-	if err != nil {
-		t.Fatalf("RenderTemplate({{version}}): %v", err)
-	}
-	if out != "pkg-2:0.5.0-1.peipkg" {
-		t.Errorf("RenderTemplate({{version}}) = %q", out)
+		if want := filepath.Join(recipe.Root, "dist", pkgVersion, "pkg.peipkg"); dst != want {
+			t.Errorf("%s: {{version}} destination = %q, want %q", pkgVersion, dst, want)
+		}
 	}
 }
 
 // The ordinary case is untouched.
 func TestRenderTemplateStillRendersADecomposableVersion(t *testing.T) {
-	v := mustParseVersion("1.26.2")
+	v := testVersion(t, "1.26.2")
 	if !v.Parsed {
 		t.Fatal("1.26.2 should parse")
 	}
@@ -58,7 +53,7 @@ func TestRenderTemplateStillRendersADecomposableVersion(t *testing.T) {
 }
 
 func TestRenderTemplatePreservesArbitraryNumericCoreAndFirstThreeCompatibility(t *testing.T) {
-	v := mustParseVersion("0.5.13.10")
+	v := testVersion(t, "0.5.13.10")
 	out, err := RenderTemplate("dash-{{version}}/{{major}}.{{minor}}.{{patch}}", TemplateContext{Version: v})
 	if err != nil {
 		t.Fatalf("RenderTemplate: %v", err)
@@ -73,7 +68,7 @@ func TestRenderTemplatePreservesArbitraryNumericCoreAndFirstThreeCompatibility(t
 // meaningless outside a package manifest and must say so rather than render
 // empty.
 func TestRenderTemplateRelease(t *testing.T) {
-	v := mustParseVersion("1.13.2")
+	v := testVersion(t, "1.13.2")
 	out, err := RenderTemplate("= {{release}}", TemplateContext{Version: v, Release: "1.13.2-3"})
 	if err != nil || out != "= 1.13.2-3" {
 		t.Fatalf("RenderTemplate = %q, %v", out, err)
@@ -92,5 +87,41 @@ func TestRenderTemplateRelease(t *testing.T) {
 	}
 	if got := meta.Dependencies["org.example.thing"]; got != "= 1.13.2-3" {
 		t.Fatalf("rendered dependency = %q, want = 1.13.2-3", got)
+	}
+}
+
+func testVersion(t *testing.T, raw string) Version {
+	t.Helper()
+	v, err := ParseVersion(raw)
+	if err != nil {
+		t.Fatalf("ParseVersion(%q): %v", raw, err)
+	}
+	return v
+}
+
+// A peipkg package whose version template renders to something peipkg's
+// grammar rejects is refused where the instance is expanded, naming the
+// recipe field, instead of surfacing later as a manifest error at pack time
+// (PEI-422). tar packages carry no peipkg version and are not checked.
+func TestPackageInstanceRejectsAMalformedPeipkgVersion(t *testing.T) {
+	v := testVersion(t, "1.26.2")
+	source := SourceState{WorkBase: t.TempDir()}
+	cfg := func(format, version string) PackageConfig {
+		return PackageConfig{Format: format, Package: PackageMeta{
+			Name: "org.example.thing", Version: version, Architecture: "x86_64"}}
+	}
+	inst, err := makePackageInstance("org.example.thing", "", "", cfg("peipkg", "{{version}}-3"), source, v)
+	if err != nil || inst.Version != "1.26.2-3" {
+		t.Fatalf("well-formed version: %q, %v", inst.Version, err)
+	}
+	for _, template := range []string{"{{version}}", "{{version}}-", "{{version}}-r3"} {
+		_, err := makePackageInstance("org.example.thing", "", "", cfg("peipkg", template), source, v)
+		if err == nil || !strings.Contains(err.Error(), "invalid_package_version") ||
+			!strings.Contains(err.Error(), "package.version") {
+			t.Errorf("version template %q: err = %v, want invalid_package_version naming package.version", template, err)
+		}
+	}
+	if _, err := makePackageInstance("org.example.thing", "", "", cfg("tar", "{{version}}"), source, v); err != nil {
+		t.Errorf("tar package: %v", err)
 	}
 }

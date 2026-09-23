@@ -650,6 +650,15 @@ func makePackageInstance(selector, instanceSelector, multipack string, cfg Packa
 		}
 	}
 	versionText := cfg.Package.Version
+	// A peipkg version is peipkg's grammar, not an upstream version: check the
+	// rendered string with peipkg's own parser here, where the recipe is still
+	// in view, rather than letting the manifest writer reject it at pack time.
+	if format == "peipkg" {
+		if err := pack.ValidateVersion(versionText); err != nil {
+			return PackageInstance{}, diag("invalid_package_version",
+				"package %s: package.version renders to %q, which is not a peipkg version: %v", name, versionText, err)
+		}
+	}
 	arch := cfg.Package.Architecture
 	stageID := selector
 	if instanceSelector != "" {
@@ -1607,7 +1616,11 @@ func renderLocalDirDestination(workspace *WorkspaceConfig, recipe RecipeConfig, 
 	if workspace != nil {
 		base = workspace.Root
 	}
-	rendered, err := RenderTemplate(target.Path, TemplateContext{Multipack: inst.Multipack, Version: mustParseVersion(inst.Version)})
+	// inst.Version is the package version (peipkg's epoch/upstream/revision
+	// grammar), not an upstream source version, so it offers {{version}} only:
+	// an unparsed Version refuses every derived token rather than reading the
+	// Peios revision back as {{prerelease}} (PEI-422).
+	rendered, err := RenderTemplate(target.Path, TemplateContext{Multipack: inst.Multipack, Version: Version{Raw: inst.Version}})
 	if err != nil {
 		return "", false, err
 	}
@@ -1862,7 +1875,13 @@ func packReplaces(values map[string]string) []pack.Replaces {
 	keys := sortedKeys(values)
 	out := make([]pack.Replaces, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, pack.Replaces{Name: key, Constraint: values[key]})
+		// "*" means every version, as it does for dependencies; the manifest
+		// spells that as an entry with no constraint (PEI-722).
+		constraint := values[key]
+		if constraint == "*" {
+			constraint = ""
+		}
+		out = append(out, pack.Replaces{Name: key, Constraint: constraint})
 	}
 	return out
 }
@@ -1874,14 +1893,6 @@ func packSDOverrides(values map[string]string) []pack.SDOverride {
 		out = append(out, pack.SDOverride{Path: key, SDDL: values[key]})
 	}
 	return out
-}
-
-func mustParseVersion(raw string) Version {
-	v, err := ParseVersion(raw)
-	if err != nil {
-		return Version{Raw: raw}
-	}
-	return v
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
