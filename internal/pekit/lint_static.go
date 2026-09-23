@@ -506,16 +506,20 @@ func patchHeaderFields(path string) (desc, origin bool, err error) {
 // --- build -----------------------------------------------------------------
 
 func lintBuildRules(l *linter, recipe RecipeConfig, source SourceState) {
-	builds := recipe.Targets[CommandBuild]
 	delegatedUnresolved := recipe.Delegate.AllowsBuild() &&
 		(source.SourceRoot == "" || source.SourceRoot == recipe.Root)
-	if l.on("build.dependencies.providers") && len(builds) > 0 {
+	if l.on("build.dependencies.providers") {
+		// Test targets run in a composed root exactly as build targets do, so
+		// they declare their inputs for every provider too.
 		providers := l.cfg.Strings("build.dependencies.providers")
-		for _, name := range sortedKeys(builds) {
-			target := builds[name]
-			for _, provider := range providers {
-				if _, ok := target.Dependencies[provider]; !ok {
-					l.report("build.dependencies.providers", "", target.Path, "build target %q declares no [build.%s.dependencies.%s] table; an empty table says \"none\" explicitly", name, name, provider)
+		for _, kind := range []Command{CommandBuild, CommandTest} {
+			targets := recipe.Targets[kind]
+			for _, name := range sortedKeys(targets) {
+				target := targets[name]
+				for _, provider := range providers {
+					if _, ok := target.Dependencies[provider]; !ok {
+						l.report("build.dependencies.providers", "", target.Path, "%s target %q declares no [%s.%s.dependencies.%s] table; an empty table says \"none\" explicitly", kind, name, kind, name, provider)
+					}
 				}
 			}
 		}

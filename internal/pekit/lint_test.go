@@ -448,6 +448,8 @@ command = "true"
 
 [test.main]
 command = "true"
+
+[test.main.dependencies.apt]
 `)
 	writeFile(t, filepath.Join(dir, "patches", "series"), "0001-fix.patch\n")
 	writeFile(t, filepath.Join(dir, "patches", "0001-fix.patch"), "From: Someone <s@example.org>\nSubject: fix the thing\n\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")
