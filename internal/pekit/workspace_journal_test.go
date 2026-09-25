@@ -128,3 +128,35 @@ func TestJournalDryRunWritesNothing(t *testing.T) {
 		t.Fatal("a dry run created the journal")
 	}
 }
+
+// A member the journal records as finished still carries its packages'
+// runtime dependencies into the order: a-app installs test.lib, defined by the
+// finished z-lib, which needs test.tool, so a-app still waits for m-tool.
+func TestJournalFinishedMembersStillOrderTheirDependents(t *testing.T) {
+	dir, log := orderingWorkspace(t)
+	journal := filepath.Join(dir, "round.journal")
+	writeFile(t, journal, journalRunPrefix+`build env="peipkg"`+"\nz-lib\n")
+	out, err := runWorkspaceIn(t, dir, "workspace", "--jobs", "4", "--journal", journal, "build", "--env", "peipkg")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	at := func(line string) int {
+		for i, l := range lines {
+			if l == line {
+				return i
+			}
+		}
+		return -1
+	}
+	if at("start z-lib") != -1 {
+		t.Fatalf("the finished z-lib ran again:\n%s", data)
+	}
+	if at("start a-app") < at("end m-tool") {
+		t.Fatalf("a-app started before m-tool, which the finished z-lib's package needs:\n%s", data)
+	}
+}

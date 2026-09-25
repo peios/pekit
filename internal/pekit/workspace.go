@@ -65,9 +65,10 @@ func runWorkspace(ctx *Context) error {
 	}
 	defer journal.close()
 	if journal != nil {
+		selectorPlan.Finished = map[string]string{}
 		for _, member := range members {
 			if journal.done[member.ID] && selectorPlan.Skip[member.ID] == "" {
-				selectorPlan.Skip[member.ID] = "already finished in journal " + journal.path
+				selectorPlan.Finished[member.ID] = "already finished in journal " + journal.path
 			}
 		}
 	}
@@ -112,7 +113,7 @@ func runWorkspace(ctx *Context) error {
 
 func preflightWorkspacePublishDestinations(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember, selectorPlan workspaceSelectorPlan) error {
 	for _, member := range members {
-		if reason := selectorPlan.Skip[member.ID]; reason != "" {
+		if selectorPlan.Skip[member.ID] != "" || selectorPlan.Finished[member.ID] != "" {
 			continue
 		}
 		memberInv := ctx.Inv
@@ -196,6 +197,11 @@ func planKnownPublishOps(inv Invocation, recipe RecipeConfig, workspace *Workspa
 type workspaceSelectorPlan struct {
 	Selectors map[string][]string
 	Skip      map[string]string
+	// Finished holds members a journal records as already done. They do not
+	// run, but unlike Skip they stay in dependency ordering: the packages
+	// they define still carry their runtime dependencies to the members
+	// that install them.
+	Finished map[string]string
 }
 
 // runWorkspaceMembers runs up to --jobs members at once. A member starts once
@@ -299,9 +305,11 @@ func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMe
 }
 
 func runWorkspaceMember(ctx *Context, ws WorkspaceConfig, member WorkspaceMember, selectorPlan workspaceSelectorPlan) memberResult {
-	if reason := selectorPlan.Skip[member.ID]; reason != "" {
-		ctx.Renderer.Event(Event{Type: "member_skipped", Member: member.ID, Message: reason})
-		return memberResult{Member: member, Skipped: true}
+	for _, reason := range []string{selectorPlan.Skip[member.ID], selectorPlan.Finished[member.ID]} {
+		if reason != "" {
+			ctx.Renderer.Event(Event{Type: "member_skipped", Member: member.ID, Message: reason})
+			return memberResult{Member: member, Skipped: true}
+		}
 	}
 	memberCtx := *ctx
 	memberInv := ctx.Inv
