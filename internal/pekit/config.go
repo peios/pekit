@@ -336,13 +336,13 @@ type PackageConfig struct {
 	// through package layers like format; empty means undeclared.
 	DependencyProvider string
 	ClearOut           *bool
-	Builds    []string
-	Package   PackageMeta
-	Files     map[string]PackageFileEntry
-	Symlinks  map[string]PackageSymlinkEntry
-	Excludes  []string
-	Multipack MultipackConfig
-	Publish   PublishConfig
+	Builds             []string
+	Package            PackageMeta
+	Files              map[string]PackageFileEntry
+	Symlinks           map[string]PackageSymlinkEntry
+	Excludes           []string
+	Multipack          MultipackConfig
+	Publish            PublishConfig
 }
 
 // AlternateUpgradeMeta is the recipe's [package] alternate_upgrade

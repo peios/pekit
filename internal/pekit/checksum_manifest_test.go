@@ -228,4 +228,3 @@ key_files = ["keys/upstream.key"]
 		})
 	}
 }
-
