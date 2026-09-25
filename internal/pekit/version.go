@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -218,6 +219,9 @@ func enumerateSourceVersions(ctx *Context, source SourceConfig, recipes ...*Reci
 	if len(recipes) > 0 {
 		recipe = recipes[0]
 	}
+	if ctx != nil && ctx.Inv.Locked {
+		return enumerateLockedVersions(recipe)
+	}
 	switch {
 	case source.Git.URL != "":
 		if source.Git.TrackedPath != "" {
@@ -234,6 +238,28 @@ func enumerateSourceVersions(ctx *Context, source SourceConfig, recipes ...*Reci
 	default:
 		return nil, diag("version_enumeration_unavailable", "selected source cannot enumerate versions")
 	}
+}
+
+// enumerateLockedVersions offers the versions the recipe's lock already pins,
+// so a run selects without contacting upstream: every member of a long
+// multi-round build keeps the version it was locked at, even if upstream
+// releases in the meantime.
+func enumerateLockedVersions(recipe *RecipeConfig) ([]string, error) {
+	if recipe == nil {
+		return nil, diag("version_enumeration_unavailable", "--locked needs a recipe whose pekit.lock to read")
+	}
+	lock, err := LoadLockFile(recipe.Root)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(lock.Sources))
+	for _, entry := range lock.Sources {
+		seen[entry.Version] = true
+	}
+	if len(seen) == 0 {
+		return nil, diag("version_selection_empty", "--locked: %s has no locked source versions", filepath.Join(recipe.Root, lockFileName))
+	}
+	return sortedVersions(seen), nil
 }
 
 func enumerateGitVersions(cfg GitSourceConfig) ([]string, error) {

@@ -61,6 +61,7 @@ var flagGroupHelp = map[flagUse][][2]string{
 		{"--version <v>, -V <v>", "select exact versions (comma-separated) or a constraint such as \">= 1.2\""},
 		{"--latest", "select the newest version discovery finds"},
 		{"--all-versions", "select every version discovery finds"},
+		{"--locked", "select from the versions in pekit.lock instead of discovering upstream"},
 	},
 	flagLocal: {
 		{"--local[=<path>]", "use the local source instead of resolving one"},

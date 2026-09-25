@@ -222,6 +222,7 @@ func copyDelegated(inv *Invocation, sub Invocation) {
 	inv.Version = sub.Version
 	inv.Latest = sub.Latest
 	inv.AllVersions = sub.AllVersions
+	inv.Locked = sub.Locked
 	inv.SuppressUnsupportedVersion = sub.SuppressUnsupportedVersion
 	inv.Local = sub.Local
 	inv.PreferLocal = sub.PreferLocal
@@ -391,6 +392,12 @@ func parseGlobalOrCommandFlag(inv *Invocation, args []string, i int) (bool, int,
 		}
 		inv.AllVersions = true
 		return true, i + 1, flagVersion, nil
+	case "--locked":
+		if hasValue {
+			return false, i, -1, diag("unexpected_flag_value", "--locked does not take a value")
+		}
+		inv.Locked = true
+		return true, i + 1, flagVersion, nil
 	case "--local":
 		v := ""
 		if hasValue {
@@ -544,6 +551,14 @@ func validateInvocation(inv *Invocation, used []flagUse) error {
 	}
 	if (boolCount(inv.Version != "", inv.Latest, inv.AllVersions)) > 1 {
 		return diag("invalid_flags", "--version, --latest, and --all-versions are mutually exclusive")
+	}
+	if inv.Locked {
+		if cmd == CommandLock {
+			return diag("invalid_flags", "--locked selects from the lock; it cannot be used to write one")
+		}
+		if !inv.Latest && !inv.AllVersions && !looksLikeConstraint(inv.Version) {
+			return diag("invalid_flags", "--locked requires --latest, --all-versions, or a version constraint")
+		}
 	}
 	if inv.Local != nil && inv.PreferLocal != nil {
 		return diag("invalid_flags", "--local and --prefer-local are mutually exclusive")

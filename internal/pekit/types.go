@@ -74,9 +74,12 @@ type Invocation struct {
 	FailFast bool
 	Jobs     int
 
-	Version                    string
-	Latest                     bool
-	AllVersions                bool
+	Version     string
+	Latest      bool
+	AllVersions bool
+	// Locked draws --latest, --all-versions and constraint selection from the
+	// recipe's pekit.lock instead of upstream discovery.
+	Locked                     bool
 	SuppressUnsupportedVersion bool
 
 	Local       *string
