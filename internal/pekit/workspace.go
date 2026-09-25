@@ -59,6 +59,18 @@ func runWorkspace(ctx *Context) error {
 	if err != nil {
 		return err
 	}
+	journal, err := openWorkspaceJournal(ctx)
+	if err != nil {
+		return err
+	}
+	defer journal.close()
+	if journal != nil {
+		for _, member := range members {
+			if journal.done[member.ID] && selectorPlan.Skip[member.ID] == "" {
+				selectorPlan.Skip[member.ID] = "already finished in journal " + journal.path
+			}
+		}
+	}
 	if ctx.Inv.DelegateCommand == CommandPublish {
 		if err := preflightWorkspacePublishDestinations(ctx, ws, members, selectorPlan); err != nil {
 			return err
@@ -75,7 +87,7 @@ func runWorkspace(ctx *Context) error {
 			}
 		}
 	}
-	results := runWorkspaceMembers(ctx, ws, members, selectorPlan, waits)
+	results, stopped := runWorkspaceMembers(ctx, ws, members, selectorPlan, waits, journal)
 	failed := 0
 	succeeded := 0
 	skipped := 0
@@ -91,6 +103,9 @@ func runWorkspace(ctx *Context) error {
 	ctx.Renderer.Event(Event{Type: "workspace_summary", Message: fmt.Sprintf("%d succeeded, %d failed, %d skipped", succeeded, failed, skipped)})
 	if failed > 0 {
 		return diag("workspace_failed", "%d workspace member(s) failed", failed)
+	}
+	if stopped {
+		return diag("workspace_stopped", "stopped on request; repeat the command with --journal %s to resume", journal.path)
 	}
 	return nil
 }
@@ -190,12 +205,16 @@ type workspaceSelectorPlan struct {
 // breakCycle chooses one to start anyway. A member runs even if one it waited
 // for failed: it then resolves that dependency from what the provider already
 // has, as an unordered run would.
-func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember, selectorPlan workspaceSelectorPlan, waits map[string][]string) []memberResult {
+//
+// With a journal, each member that succeeds is recorded as it finishes, and a
+// stop request is honoured between members: running members finish, nothing
+// new starts, and stopped reports it.
+func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMember, selectorPlan workspaceSelectorPlan, waits map[string][]string, journal *workspaceJournal) (results []memberResult, stopped bool) {
 	jobs := ctx.Inv.Jobs
 	if jobs < 1 {
 		jobs = 1
 	}
-	results := make([]memberResult, len(members))
+	results = make([]memberResult, len(members))
 	started := make([]bool, len(members))
 	pos := map[string]int{}
 	for idx, member := range members {
@@ -252,6 +271,18 @@ func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMe
 		if results[idx].Err != nil && ctx.Inv.FailFast {
 			stop = true
 		}
+		if journal != nil {
+			if results[idx].Err == nil && !results[idx].Skipped {
+				if err := journal.record(members[idx].ID); err != nil {
+					ctx.Renderer.Error(Diagnostic{Code: "journal_write_failed", Member: members[idx].ID, Message: err.Error()})
+					stop = true
+				}
+			}
+			if !stop && journal.stopRequested() {
+				stop, stopped = true, true
+				ctx.Renderer.Event(Event{Type: "warning", Message: fmt.Sprintf("stop requested: waiting for %d running member(s), starting no more", running)})
+			}
+		}
 		for _, dep := range dependents[members[idx].ID] {
 			remaining[dep]--
 			if remaining[dep] == 0 && !started[pos[dep]] {
@@ -264,7 +295,7 @@ func runWorkspaceMembers(ctx *Context, ws WorkspaceConfig, members []WorkspaceMe
 			results[idx] = memberResult{Member: members[idx], Skipped: true}
 		}
 	}
-	return results
+	return results, stopped
 }
 
 func runWorkspaceMember(ctx *Context, ws WorkspaceConfig, member WorkspaceMember, selectorPlan workspaceSelectorPlan) memberResult {

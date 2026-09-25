@@ -176,6 +176,18 @@ func parseWorkspaceTail(inv *Invocation, args []string, used *[]flagUse) error {
 			}
 			inv.Jobs = n
 			i += 2
+		case arg == "--journal":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return diag("missing_flag_value", "--journal requires a file path")
+			}
+			inv.Journal = args[i+1]
+			i += 2
+		case strings.HasPrefix(arg, "--journal="):
+			inv.Journal = strings.TrimPrefix(arg, "--journal=")
+			if inv.Journal == "" {
+				return diag("missing_flag_value", "--journal requires a file path")
+			}
+			i++
 		case strings.HasPrefix(arg, "--jobs="):
 			n, err := strconv.Atoi(strings.TrimPrefix(arg, "--jobs="))
 			if err != nil || n <= 0 {

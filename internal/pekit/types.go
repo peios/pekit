@@ -73,6 +73,8 @@ type Invocation struct {
 
 	FailFast bool
 	Jobs     int
+	// Journal names a workspace journal file; see workspace_journal.go.
+	Journal string
 
 	Version     string
 	Latest      bool

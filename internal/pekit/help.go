@@ -96,6 +96,7 @@ var globalFlagHelp = [][2]string{
 var workspaceFlagHelp = [][2]string{
 	{"--jobs <n>", "run this many members at once (default 1)"},
 	{"--fail-fast", "stop scheduling members after the first failure"},
+	{"--journal <file>", "record finished members and skip them when the same run is repeated; create <file>.stop to stop cleanly"},
 }
 
 var workspaceTagHelp = [][2]string{
@@ -110,7 +111,7 @@ func usageText(topic string) string {
 		b.WriteString("pekit — build, test, package and publish from pekit.toml recipes\n\n")
 		b.WriteString("Usage:\n")
 		b.WriteString("  pekit [global flags] <command> [flags] [selectors]\n")
-		b.WriteString("  pekit [global flags] workspace [--jobs <n>] [--fail-fast] <command> [flags] [selectors]\n\n")
+		b.WriteString("  pekit [global flags] workspace [--jobs <n>] [--fail-fast] [--journal <file>] <command> [flags] [selectors]\n\n")
 		b.WriteString("Commands:\n")
 		writeRows(&b, commandRows())
 		b.WriteString("\nGlobal flags (accepted by every command):\n")
@@ -123,7 +124,7 @@ func usageText(topic string) string {
 	fmt.Fprintf(&b, "pekit %s — %s\n\n", cmd, commandSummary[cmd])
 	switch cmd {
 	case CommandWorkspace:
-		b.WriteString("Usage:\n  pekit [global flags] workspace [--jobs <n>] [--fail-fast] <command> [flags] [selectors]\n\n")
+		b.WriteString("Usage:\n  pekit [global flags] workspace [--jobs <n>] [--fail-fast] [--journal <file>] <command> [flags] [selectors]\n\n")
 		b.WriteString("Workspace flags (before the delegated command):\n")
 		writeRows(&b, workspaceFlagHelp)
 		b.WriteString("\nThe delegated command takes its own flags, after its name.\n")
