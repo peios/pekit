@@ -74,7 +74,7 @@ func newScopeWorkspace(t *testing.T, ignore string) (string, *App, *bytes.Buffer
 	runTestCmd(t, dir, "git", "config", "user.email", "test@example.invalid")
 	runTestCmd(t, dir, "git", "config", "user.name", "Test")
 	runTestCmd(t, dir, "git", "add", ".")
-	gitCommitFixed(t, dir, "workspace")
+	runTestCmd(t, dir, "git", "commit", "-m", "workspace")
 	var stdout, stderr bytes.Buffer
 	return dir, &App{Stdout: &stdout, Stderr: &stderr}, &stderr
 }
@@ -98,7 +98,7 @@ func packageAlphaRef(t *testing.T, dir string, app *App, stderr *bytes.Buffer, a
 func commitLock(t *testing.T, dir string) {
 	t.Helper()
 	runTestCmd(t, dir, "git", "add", "-A", "--", "alpha/pekit.lock")
-	gitCommitFixed(t, dir, "pin sources")
+	runTestCmd(t, dir, "git", "commit", "-m", "pin sources")
 }
 
 // TestDirtyIgnoresOtherWorkspaceMembers is the headline case: editing one
@@ -148,7 +148,7 @@ func TestDirtyIgnoresLinkedOutputDirectory(t *testing.T) {
 	// outside every member, so it is ignored the way a conduit is.
 	writeFile(t, filepath.Join(dir, ".gitignore"), "_shared_\n_pool_\n")
 	runTestCmd(t, dir, "git", "add", "-A", "--", ".gitignore")
-	gitCommitFixed(t, dir, "ignore shared staging")
+	runTestCmd(t, dir, "git", "commit", "-m", "ignore shared staging")
 
 	packageAlphaRef(t, dir, app, stderr)
 	commitLock(t, dir)
