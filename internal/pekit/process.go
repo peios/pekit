@@ -16,6 +16,15 @@ var execCommand = exec.Command
 
 func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, source SourceState, version Version, target TargetConfig, member string) error {
 	stage := targetStage(source, target.Kind, target.Name)
+	reuse := wantsReuseBuild(ctx.Inv, target)
+	clearStage := target.ClearOut
+	if !reuse && !ctx.Inv.DryRun {
+		// An interrupted target has no reusable output. Re-stage it from
+		// empty, including in an isolated job; unknown or completed legacy
+		// output must still pass the isolation provenance check below.
+		status, recorded := readStageStatus(source, target.Kind, target.Name)
+		clearStage = clearStage || (recorded && status == stageStatusRunning)
+	}
 	var job *buildJob
 	if workspace != nil && workspace.Isolation.Enabled && !ctx.Inv.DryRun {
 		var err error
@@ -23,12 +32,12 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 		if err != nil {
 			return err
 		}
-		if (wantsReuseBuild(ctx.Inv, target) || (!target.ClearOut && dirExists(stage))) && !job.Stages[stage] {
+		if (reuse || (!clearStage && dirExists(stage))) && !job.Stages[stage] {
 			return diag("isolation_legacy_stage", "%s was not produced by an isolated job; rebuild it before reuse", stage)
 		}
 	}
 
-	if wantsReuseBuild(ctx.Inv, target) {
+	if reuse {
 		if !dirExists(stage) {
 			return diag("missing_stage", "--no-build requested reuse of build target %q, but %s does not exist", target.Name, stage)
 		}
@@ -60,7 +69,7 @@ func runTarget(ctx *Context, recipe RecipeConfig, workspace *WorkspaceConfig, so
 	if err := markStageRunning(source, target.Kind, target.Name); err != nil {
 		return err
 	}
-	if target.ClearOut {
+	if clearStage {
 		if err := removeStage(stage); err != nil {
 			return wrapDiag("clean_stage", stage, err)
 		}
