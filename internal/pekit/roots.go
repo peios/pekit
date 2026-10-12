@@ -21,7 +21,7 @@ type RecipeLocation struct {
 func locateRecipe(inv Invocation) (RecipeLocation, Invocation, error) {
 	localInv := inv
 	locator := inv.RecipeFlag
-	if locator == "" && len(localInv.Positionals) > 0 && looksRemoteLocator(localInv.Positionals[0]) {
+	if locator == "" && len(localInv.Positionals) > 0 && looksRemoteLocator(inv.Cwd, localInv.Positionals[0]) {
 		locator = localInv.Positionals[0]
 		localInv.RemoteRecipe = locator
 		localInv.Positionals = append([]string(nil), localInv.Positionals[1:]...)
@@ -29,7 +29,7 @@ func locateRecipe(inv Invocation) (RecipeLocation, Invocation, error) {
 	var root, path string
 	remote := false
 	if locator != "" {
-		if looksRemoteLocator(locator) {
+		if looksRemoteLocator(inv.Cwd, locator) {
 			materialized, err := materializeRemoteLocator(locator, "recipe")
 			if err != nil {
 				return RecipeLocation{}, inv, err
@@ -81,7 +81,7 @@ func locateRecipe(inv Invocation) (RecipeLocation, Invocation, error) {
 func locateWorkspace(inv Invocation) (WorkspaceConfig, error) {
 	locator := inv.WorkspaceFlag
 	if locator != "" {
-		if looksRemoteLocator(locator) {
+		if looksRemoteLocator(inv.Cwd, locator) {
 			root, err := materializeRemoteLocator(locator, "workspace")
 			if err != nil {
 				return WorkspaceConfig{}, err
@@ -166,9 +166,16 @@ func discoverWorkspaceMembers(ws WorkspaceConfig) ([]WorkspaceMember, error) {
 	return members, nil
 }
 
-func looksRemoteLocator(value string) bool {
+func looksRemoteLocator(cwd, value string) bool {
 	if value == "" || strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") {
 		return false
+	}
+	// A local recipe/workspace wins over the spelling heuristic, including
+	// names ending in .git. Use the invocation directory, not process cwd.
+	if resolved, err := absPath(cwd, value); err == nil {
+		if _, err := os.Lstat(resolved); err == nil || !os.IsNotExist(err) {
+			return false
+		}
 	}
 	return strings.HasPrefix(value, "github.com/") || strings.Contains(value, "://") || strings.HasSuffix(value, ".git") || strings.Contains(value, "//")
 }
