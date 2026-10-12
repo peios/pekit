@@ -532,9 +532,11 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 			_ = os.RemoveAll(filepath.Join(outBase, scope))
 			return SourceState{}, err
 		}
-		if err := writeSourceManifest(manifestPath, expectedManifest); err != nil {
-			return SourceState{}, err
-		}
+	}
+	// Refresh metadata even when the materialized source is reused. The
+	// fallback recipe date can change without changing any source input.
+	if err := writeSourceManifest(manifestPath, expectedManifest); err != nil {
+		return SourceState{}, err
 	}
 	additionalArtifacts := make([]string, 0, len(remotePatches))
 	for _, patch := range remotePatches {
@@ -1091,6 +1093,8 @@ func ensureArchiveParentSafe(root, rel string) error {
 	return nil
 }
 
+// sourceManifestMatches compares materialization identity. Timestamp is
+// descriptive metadata (and a build environment value), not source identity.
 func sourceManifestMatches(path string, expected SourceManifest) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1107,7 +1111,6 @@ func sourceManifestMatches(path string, expected SourceManifest) bool {
 		actual.Extract == expected.Extract &&
 		actual.Root == expected.Root &&
 		actual.ProvenanceRef == expected.ProvenanceRef &&
-		actual.Timestamp == expected.Timestamp &&
 		actual.Patches == expected.Patches
 }
 
