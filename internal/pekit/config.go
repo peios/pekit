@@ -188,6 +188,7 @@ type URLSourceConfig struct {
 	URL               string
 	ListingURL        string
 	Extract           bool
+	Exclude           []string
 	Root              string
 	Versions          string
 	FileRegex         string
@@ -1803,7 +1804,7 @@ func parseGitSignature(path string, value any) (GitSignatureConfig, error) {
 }
 
 func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) {
-	known := map[string]bool{"url": true, "listing_url": true, "extract": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true, "patch_series": true}
+	known := map[string]bool{"url": true, "listing_url": true, "extract": true, "exclude": true, "root": true, "versions": true, "file_regex": true, "checksum": true, "signature": true, "patch_series": true}
 	for key := range table {
 		if !known[key] {
 			return URLSourceConfig{}, diagAt("unknown_key", path, "unknown source.url key %q", key)
@@ -1824,6 +1825,18 @@ func parseURLSource(path string, table map[string]any) (URLSourceConfig, error) 
 		cfg.Extract, err = expectBool(path, "source.url.extract", v)
 		if err != nil {
 			return URLSourceConfig{}, err
+		}
+	}
+	if v, ok := table["exclude"]; ok {
+		cfg.Exclude, err = expectStringSlice(path, "source.url.exclude", v)
+		if err != nil {
+			return URLSourceConfig{}, err
+		}
+		if len(cfg.Exclude) > 0 && !cfg.Extract {
+			return URLSourceConfig{}, diagAt("invalid_source", path, "source.url.exclude requires extract = true")
+		}
+		if err := validateArchiveExclusions(cfg.Exclude); err != nil {
+			return URLSourceConfig{}, wrapDiag("invalid_path", "source.url.exclude", err)
 		}
 	}
 	if v, ok := table["root"]; ok {

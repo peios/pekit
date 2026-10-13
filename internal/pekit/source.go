@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -65,16 +66,17 @@ type SourceState struct {
 }
 
 type SourceManifest struct {
-	Kind          string `json:"kind"`
-	Rendered      string `json:"rendered"`
-	Immutable     string `json:"immutable,omitempty"`
-	Checksum      string `json:"checksum,omitempty"`
-	Extract       bool   `json:"extract,omitempty"`
-	Root          string `json:"root,omitempty"`
-	SourceRoot    string `json:"source_root"`
-	ProvenanceRef string `json:"provenance_ref"`
-	Timestamp     int64  `json:"timestamp"`
-	Patches       string `json:"patches,omitempty"`
+	Kind          string   `json:"kind"`
+	Rendered      string   `json:"rendered"`
+	Immutable     string   `json:"immutable,omitempty"`
+	Checksum      string   `json:"checksum,omitempty"`
+	Extract       bool     `json:"extract,omitempty"`
+	Root          string   `json:"root,omitempty"`
+	Exclude       []string `json:"exclude,omitempty"`
+	SourceRoot    string   `json:"source_root"`
+	ProvenanceRef string   `json:"provenance_ref"`
+	Timestamp     int64    `json:"timestamp"`
+	Patches       string   `json:"patches,omitempty"`
 }
 
 func ResolveSource(ctx *Context, recipe RecipeConfig, version Version) (SourceState, error) {
@@ -372,6 +374,9 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 	// series hash joins the scope and an edited patch lands in a fresh
 	// extraction. Unpatched recipes keep their existing scopes.
 	scopeParts := []string{renderedURL, checksum, root}
+	if len(cfg.Exclude) > 0 {
+		scopeParts = append(scopeParts, "exclude", shortHash(cfg.Exclude...))
+	}
 	if cfg.PatchSeries.Configured() {
 		scopeParts = append(scopeParts, cfg.PatchSeries.URL, version.Raw, fmt.Sprintf("strip=%d", cfg.PatchSeries.Strip))
 	}
@@ -473,6 +478,7 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 		Rendered:      renderedURL,
 		Checksum:      checksum,
 		Extract:       cfg.Extract,
+		Exclude:       cfg.Exclude,
 		Root:          root,
 		SourceRoot:    sourceRoot,
 		ProvenanceRef: provenance,
@@ -504,7 +510,7 @@ func resolveURLSource(ctx *Context, recipe RecipeConfig, outBase string, cfg URL
 				return SourceState{}, wrapDiag("mkdir", filepath.Dir(sourceRoot), err)
 			}
 			defer os.RemoveAll(tmp)
-			if err := extractArchive(artifact, tmp); err != nil {
+			if err := extractArchiveExcluding(artifact, tmp, root, cfg.Exclude); err != nil {
 				return SourceState{}, err
 			}
 			selected := filepath.Join(tmp, filepath.FromSlash(root))
@@ -694,14 +700,25 @@ func verifyChecksum(path, spec string) error {
 }
 
 func extractArchive(artifact, dst string) error {
-	lower := strings.ToLower(filepath.Base(artifact))
-	if strings.HasSuffix(lower, ".zip") {
-		return extractZip(artifact, dst)
-	}
-	return extractTar(artifact, dst)
+	return extractArchiveExcluding(artifact, dst, ".", nil)
 }
 
-func extractZip(artifact, dst string) error {
+func extractArchiveExcluding(artifact, dst, root string, excludes []string) error {
+	if err := validateArchiveExclusions(excludes); err != nil {
+		return wrapDiag("invalid_path", "archive exclusions", err)
+	}
+	prefixes := make([]string, 0, len(excludes))
+	for _, exclude := range excludes {
+		prefixes = append(prefixes, path.Join(root, exclude))
+	}
+	lower := strings.ToLower(filepath.Base(artifact))
+	if strings.HasSuffix(lower, ".zip") {
+		return extractZip(artifact, dst, prefixes)
+	}
+	return extractTar(artifact, dst, prefixes)
+}
+
+func extractZip(artifact, dst string, excludes []string) error {
 	reader, err := zip.OpenReader(artifact)
 	if err != nil {
 		return wrapDiag("extract", artifact, err)
@@ -712,6 +729,9 @@ func extractZip(artifact, dst string) error {
 		rel, err := cleanArchiveEntryPath(file.Name)
 		if err != nil {
 			return wrapDiag("unsafe_archive", file.Name, err)
+		}
+		if archiveEntryExcluded(rel, excludes) {
+			continue
 		}
 		target := filepath.Join(dst, filepath.FromSlash(rel))
 		kind := archiveEntryKind(file.FileInfo().Mode(), file.FileInfo().IsDir())
@@ -796,7 +816,7 @@ func extractZip(artifact, dst string) error {
 	return nil
 }
 
-func extractTar(artifact, dst string) error {
+func extractTar(artifact, dst string, excludes []string) error {
 	stream, err := openTarStream(artifact)
 	if err != nil {
 		return err
@@ -822,6 +842,9 @@ func extractTar(artifact, dst string) error {
 		rel, err := cleanArchiveEntryPath(hdr.Name)
 		if err != nil {
 			return wrapDiag("unsafe_archive", hdr.Name, err)
+		}
+		if archiveEntryExcluded(rel, excludes) {
+			continue
 		}
 		kind, err := tarEntryKind(hdr)
 		if err != nil {
@@ -1109,6 +1132,7 @@ func sourceManifestMatches(path string, expected SourceManifest) bool {
 		actual.Immutable == expected.Immutable &&
 		actual.Checksum == expected.Checksum &&
 		actual.Extract == expected.Extract &&
+		slices.Equal(actual.Exclude, expected.Exclude) &&
 		actual.Root == expected.Root &&
 		actual.ProvenanceRef == expected.ProvenanceRef &&
 		actual.Patches == expected.Patches
