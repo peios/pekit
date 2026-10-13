@@ -122,7 +122,11 @@ func resolveInput(ctx *Context, recipe RecipeConfig, outBase string, cfg InputCo
 		return InputState{}, wrapDiag("invalid_path", "input."+cfg.Name+".root", err)
 	}
 
-	target := filepath.Join(inputBase(outBase), inputDirName(cfg))
+	materialisation := inputDirName(cfg)
+	if len(cfg.URL.Exclude) > 0 {
+		materialisation += "-exclude-" + shortHash(cfg.URL.Exclude...)
+	}
+	target := filepath.Join(inputBase(outBase), materialisation)
 	if ctx.Inv.DryRun {
 		// Nothing is fetched, but targets still need a stable path to render.
 		return InputState{Name: cfg.Name, Version: cfg.Version, Root: target}, nil
@@ -234,7 +238,7 @@ func materialiseInput(cfg InputConfig, artifact, root, target string) error {
 		return wrapDiag("mkdir", filepath.Dir(target), err)
 	}
 	defer os.RemoveAll(tmp)
-	if err := extractArchive(artifact, tmp); err != nil {
+	if err := extractArchiveExcluding(artifact, tmp, root, cfg.URL.Exclude); err != nil {
 		return err
 	}
 	selected := filepath.Join(tmp, filepath.FromSlash(root))
