@@ -263,6 +263,57 @@ fn package_refuses_a_source_whose_hash_differs() {
 }
 
 #[test]
+fn package_packs_into_the_artifact_dir_the_workspace_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
+    fs::write(
+        root.join("workspace.gcsl"),
+        "pekitconf: PekitConfig = { artifact_dir = \"_artifacts\" }\n",
+    )
+    .unwrap();
+    let refs = format!("refs/dev.peios.hello/1.0-2/{}", ppk::HOST_ARCH);
+
+    // Relative to the workspace's root, not the current directory.
+    let output = pekit(
+        &root.join("dev.peios.hello"),
+        dir.path(),
+        &["package", "dev.peios.hello"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let identity = stdout(&output);
+    assert_eq!(
+        fs::read_to_string(root.join("_artifacts").join(&refs)).unwrap(),
+        identity
+    );
+
+    // --artifact-dir wins.
+    let other = dir.path().join("other");
+    let args = ["package", "dev.peios.hello", "--artifact-dir", path(&other)];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(other.join(&refs)).unwrap(), identity);
+}
+
+#[test]
+fn package_refuses_a_workspace_setting_without_an_artifact_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
+    fs::write(
+        root.join("workspace.gcsl"),
+        "pekitconf.artifactdir = \"a\"\n",
+    )
+    .unwrap();
+    let output = pekit(&root, dir.path(), &["package", "dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "pekit: workspace.gcsl: pekitconf: {artifactdir = \"a\"} has no field artifact_dir\n"
+    );
+}
+
+#[test]
 fn package_refuses_an_artifact_dir_it_cannot_write_before_building() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());

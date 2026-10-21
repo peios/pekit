@@ -40,6 +40,18 @@ work in a workspace whose copy differs from its own, so change it only by
 running `pekit init`. `workspace.gcsl` is an ordinary GCSL file that
 belongs to you.
 
+`workspace.gcsl` can also give pekit's settings for the workspace, as a
+field named `pekitconf` of the type `PekitConfig`. Its one setting,
+`artifact_dir`, is the directory pekit packs packages into, relative to
+the workspace's root:
+
+```gcsl
+pekitconf: PekitConfig = { artifact_dir = "_artifacts" }
+```
+
+A field of `workspace.gcsl` belongs to the whole workspace, so no recipe
+file can define `pekitconf` too.
+
 ## What a recipe defines
 
 A recipe file starts with three fields:

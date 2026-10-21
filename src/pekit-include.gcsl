@@ -20,6 +20,11 @@ type Build = fn(source_path: String, out_path: String, arch: String) ->> String 
 # of a directory. dependencies are the packages it needs at runtime.
 type Package = {build: Build, files: {*: String}, dependencies: List<String> = []}
 
+# pekit's settings for a workspace, which workspace.gcsl gives as
+# `pekitconf: PekitConfig = {...}`. artifact_dir is where pekit packs
+# packages, relative to the workspace's root; --artifact-dir overrides it.
+type PekitConfig = {artifact_dir: String}
+
 #[def_type]
 def source(name: String, f: fn(): Source): Source { f() }
 

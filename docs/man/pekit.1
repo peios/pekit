@@ -30,6 +30,20 @@ Every directory below the root sees them without importing them, and so
 does a GCSL language server, which reads the file like any other.
 .I workspace.gcsl
 is an ordinary GCSL file that belongs to the workspace's author.
+It can give pekit's settings for the workspace as a field named
+.BR pekitconf ,
+of the type
+.BR PekitConfig :
+.RS
+.PP
+.EX
+pekitconf: PekitConfig = { artifact_dir = "_artifacts" }
+.EE
+.RE
+.PP
+.B artifact_dir
+is the directory pekit packs packages into, relative to the workspace's
+root.
 .PP
 A recipe defines three kinds of definition:
 .TP
@@ -143,8 +157,11 @@ rather than the workspace the current directory is in.
 .BI \-\-artifact\-dir " dir"
 Store packages in
 .IR dir ,
+rather than the directory the workspace's
+.B pekitconf
+gives, or
 .I /system/artifacts
-by default, as
+when it gives none, as
 .BR ppk (1)
 does.
 .TP
@@ -195,7 +212,8 @@ up to date.
 .TP
 .B pekit package net.busybox.busybox \-\-artifact\-dir artifacts
 Build busybox from its recipe and pack it into
-.IR artifacts .
+.IR artifacts ,
+whatever the workspace gives.
 .SH SEE ALSO
 .BR ppk (1),
 .BR gcsl (1)

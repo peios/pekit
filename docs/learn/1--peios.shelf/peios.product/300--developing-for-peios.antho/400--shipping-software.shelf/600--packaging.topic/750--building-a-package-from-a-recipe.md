@@ -18,8 +18,8 @@ from files you have staged yourself. For what a recipe contains, see
 - Install `pekit`, and the tools the recipe's build runs, such as a C
   compiler and `make`. pekit itself runs `curl` and `tar`.
 - Have write access to the artifact directory. The default is
-  `/system/artifacts`; to use a directory of your own, pass
-  `--artifact-dir`.
+  `/system/artifacts`; to use a directory of your own, set one for the
+  workspace or pass `--artifact-dir`.
 
 ## Set up a recipe workspace
 
@@ -34,6 +34,15 @@ from files you have staged yourself. For what a recipe contains, see
 2. Run `pekit init` again whenever you upgrade pekit. Other pekit commands
    refuse a workspace whose `pekit-include.gcsl` is not the installed
    pekit's.
+3. To pack into a directory of the workspace rather than
+   `/system/artifacts`, set it in `workspace.gcsl`:
+
+   ```gcsl
+   pekitconf: PekitConfig = { artifact_dir = "_artifacts" }
+   ```
+
+   The path is relative to the workspace's root. If the workspace is
+   under version control, have it ignore the directory.
 
 ## Build a package
 
@@ -41,8 +50,11 @@ Run `pekit package` with the package's name, from anywhere in the
 workspace:
 
 ```sh
-pekit package net.busybox.busybox --artifact-dir artifacts
+pekit package net.busybox.busybox
 ```
+
+To pack into another directory for one run, pass `--artifact-dir`,
+which overrides the workspace's setting.
 
 pekit fetches the build's source, unless its cache holds it already, and
 checks its SHA-256. It unpacks the source, runs the build, copies the
@@ -59,10 +71,10 @@ directory.
 ## Check the result
 
 The package's version is the recipe's `version` and `revision`, and its
-architecture is the host's. Read its ref:
+architecture is the host's. From the workspace's root, read its ref:
 
 ```sh
-cat artifacts/refs/net.busybox.busybox/1.37.0-1/x86_64
+cat _artifacts/refs/net.busybox.busybox/1.37.0-1/x86_64
 ```
 
 It holds the identity that `pekit package` printed. Running

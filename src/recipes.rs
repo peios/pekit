@@ -30,6 +30,10 @@ pub const WORKSPACE_FILE: &str = "workspace.gcsl";
 /// `pekit = 1`.
 const FORMAT: i64 = 1;
 
+/// The field of `workspace.gcsl` that holds pekit's settings. A root file's
+/// fields are the whole workspace's, so recipe files cannot use it.
+const CONFIG: &str = "pekitconf";
+
 /// A checked recipe workspace.
 pub struct Recipes {
     workspace: Workspace,
@@ -82,6 +86,33 @@ impl Recipes {
                 bail!("{}: the recipes have errors", root.display())
             }
         }
+    }
+
+    /// The artifact directory `workspace.gcsl` sets as
+    /// `pekitconf.artifact_dir`, as written, or `None` if it sets no
+    /// `pekitconf`.
+    pub fn artifact_dir(&mut self) -> Result<Option<String>> {
+        let file = self
+            .workspace
+            .file(WORKSPACE_FILE)
+            .ok_or_else(|| anyhow!("the workspace has no {WORKSPACE_FILE}"))?;
+        let value = self
+            .workspace
+            .run(file)
+            .map(|outcome| outcome.value)
+            .map_err(|diagnostics| {
+                self.failed(&diagnostics, &format!("{WORKSPACE_FILE} failed"))
+            })?;
+        let Ok(config) = field(&value, CONFIG) else {
+            return Ok(None);
+        };
+        let dir = field(config, "artifact_dir")
+            .and_then(string)
+            .with_context(|| format!("{WORKSPACE_FILE}: {CONFIG}"))?;
+        if dir.is_empty() {
+            bail!("{WORKSPACE_FILE}: {CONFIG}.artifact_dir is empty");
+        }
+        Ok(Some(dir.to_owned()))
     }
 
     /// The recipe of package `name`.

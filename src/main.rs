@@ -45,14 +45,10 @@ enum Command {
         /// Recipe workspace (default: the one the current directory is in)
         #[arg(long, value_name = "dir")]
         workspace: Option<PathBuf>,
-        /// Store packages in <dir> (default: /system/artifacts)
-        #[arg(
-            long,
-            value_name = "dir",
-            default_value = ppk::DEFAULT_ARTIFACT_DIR,
-            hide_default_value = true,
-        )]
-        artifact_dir: PathBuf,
+        /// Store packages in <dir> (default: the workspace's
+        /// pekitconf.artifact_dir, or /system/artifacts)
+        #[arg(long, value_name = "dir")]
+        artifact_dir: Option<PathBuf>,
     },
 }
 
@@ -86,7 +82,7 @@ fn run(cli: Cli) -> Result<()> {
             workspace,
             artifact_dir,
         } => {
-            let identity = package(&name, workspace, &artifact_dir)?;
+            let identity = package(&name, workspace, artifact_dir)?;
             println!("{identity}");
             Ok(())
         }
@@ -112,8 +108,12 @@ fn init(dir: &Path) -> Result<()> {
 
 /// Builds package `name` from the recipes of `workspace`, or of the
 /// workspace the current directory is in, and packs it into `artifact_dir`,
-/// returning its identity.
-fn package(name: &str, workspace: Option<PathBuf>, artifact_dir: &Path) -> Result<String> {
+/// or the workspace's, returning its identity.
+fn package(
+    name: &str,
+    workspace: Option<PathBuf>,
+    artifact_dir: Option<PathBuf>,
+) -> Result<String> {
     let root = match workspace {
         Some(root) => root,
         None => {
@@ -125,6 +125,14 @@ fn package(name: &str, workspace: Option<PathBuf>, artifact_dir: &Path) -> Resul
     };
     let root = fs::canonicalize(&root).with_context(|| root.display().to_string())?;
     let mut recipes = Recipes::open(&root)?;
+    let artifact_dir = match artifact_dir {
+        Some(dir) => dir,
+        None => recipes.artifact_dir()?.map_or_else(
+            || PathBuf::from(ppk::DEFAULT_ARTIFACT_DIR),
+            |dir| root.join(dir),
+        ),
+    };
+    let artifact_dir = artifact_dir.as_path();
     let package = recipes.package(name)?;
     // Checked before anything is built.
     let id = PackageId::new(name, &package.version, ppk::HOST_ARCH)?;
