@@ -3,7 +3,8 @@ title: Recipes
 type: concept
 description: What a pekit recipe is, covering recipe workspaces and the
   include file, sources, builds and packages, how a package's version is
-  made, and why a package builds the same way every time.
+  made, why a package builds the same way every time, and what a release
+  records.
 related:
   - peios/packaging/building-a-package-from-a-recipe
   - peios/packaging/packages
@@ -132,3 +133,23 @@ package's version is already packed, pekit does not build it again.
 
 pekit 0.1.0 runs builds on the host, with the host's tools, and refuses
 recipes that give build or runtime `dependencies`.
+
+## Releases
+
+A recipe workspace is kept in Git, and Git holds only the recipes. The
+packages themselves live in artifact directories and repositories, which
+are what systems install from.
+
+A release records which commit made each package. `pekit release` builds
+packages from a workspace with no uncommitted changes, packs them, and
+tags the commit with each package's name and version, such as
+`net.busybox.busybox@1.37.0-1`. One tag for each package means that the
+commit that made any package's version can be found from the package
+alone, whichever recipe defines it.
+
+A release builds every package, even one already packed, and packing
+accepts it only if it is identical to what is packed. Releasing a version
+again therefore proves that the current commit still makes it. If the
+recipe has changed in a way that changes a package, the release fails
+until its `revision` is raised. Tags are only added: when a later commit
+makes the same package, the tag stays at the first commit that made it.

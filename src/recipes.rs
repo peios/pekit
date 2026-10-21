@@ -115,6 +115,32 @@ impl Recipes {
         Ok(Some(dir.to_owned()))
     }
 
+    /// The packages the recipe in directory `dir`, relative to the
+    /// workspace's root, defines, in the order it defines them.
+    pub fn packages_in(&self, dir: &str) -> Result<Vec<String>> {
+        let def_types = self
+            .workspace
+            .def_types()
+            .map_err(|diagnostics| self.failed(&diagnostics, "the recipes are ambiguous"))?;
+        let files = &self.workspace.scan().files;
+        let in_dir = |file: u32| {
+            files
+                .get(file as usize)
+                .is_some_and(|file| Path::new(&file.path).parent() == Some(Path::new(dir)))
+        };
+        let packages: Vec<String> = def_types
+            .iter()
+            .filter(|found| found.path == "package")
+            .flat_map(|found| &found.definitions)
+            .filter(|definition| in_dir(definition.file))
+            .map(|definition| definition.path.clone())
+            .collect();
+        if packages.is_empty() {
+            bail!("no recipe in {dir} defines a package");
+        }
+        Ok(packages)
+    }
+
     /// The recipe of package `name`.
     pub fn package(&mut self, name: &str) -> Result<PackageRecipe> {
         let file = self.definition_file("package", name)?;

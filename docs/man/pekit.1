@@ -12,6 +12,15 @@ pekit \- build Peios packages from GCSL recipes
 .IR dir ]
 .I name
 .br
+.B pekit release
+.RB [ \-\-recipe
+.IR dir ]...\&
+.RB [ \-\-workspace
+.IR dir ]
+.RB [ \-\-artifact\-dir
+.IR dir ]
+.RI [ name ...]
+.br
 .B pekit
 .RB [ \-h | \-\-help | \-V | \-\-version ]
 .SH DESCRIPTION
@@ -147,7 +156,56 @@ The build runs on the host, with the host's tools, and only the
 calls of its steps reach outside GCSL.
 Build and runtime dependencies are not supported yet: a recipe that gives
 any is refused.
+.TP
+.BR release " [\fIname\fR...]"
+Build and pack each package
+.IR name ,
+and every package the recipe in each
+.B \-\-recipe
+directory defines, then tag the commit that made them.
+The workspace must be in a Git repository, with no uncommitted changes in
+the workspace, untracked files included; files Git ignores do not count.
+.IP
+Each package is tagged
+.IR name @ version ,
+such as
+.BR net.busybox.busybox@1.37.0\-1 ,
+at
+.BR HEAD .
+The tag does not include the architecture: the commit makes the version for
+every architecture, though
+.B pekit release
+builds only the host's.
+.IP
+Every package is built, even one already packed, and packed only if it
+matches what is packed already.
+A release therefore succeeds again for a version already released, and
+fails if the recipe now makes something different without a new
+.BR revision .
+Packages that share a build run it once.
+.IP
+Tags are only added.
+They are made only after every package is packed, all of them or none,
+and a tag that already exists is kept, even at an earlier commit, as the
+first commit that made its package.
+The tags are made in the local repository only; push them with
+.BR git (1).
+.IP
+On standard output,
+.B pekit release
+prints one line for each package: its tag and its identity.
 .SH OPTIONS
+.TP
+.BI \-\-recipe " dir"
+For
+.BR release :
+release every package the recipe in
+.I dir
+defines.
+.I dir
+is relative to the workspace's root, such as
+.BR net.busybox.busybox .
+It can be given more than once, and with package names.
 .TP
 .BI \-\-workspace " dir"
 Read recipes from the workspace at
@@ -177,7 +235,9 @@ Success, including printing help or the version.
 .TP
 .B 1
 Failure, such as a workspace whose include file is not this pekit's, a
-recipe with errors, an artifact directory pekit cannot write to, a source whose SHA-256 differs from the recipe's, a
+recipe with errors, an artifact directory pekit cannot write to, a
+release from a workspace with uncommitted changes, a version that cannot
+be a Git tag's name, a source whose SHA-256 differs from the recipe's, a
 build that fails, or a package version that is already packed with
 different contents.
 .TP
@@ -214,6 +274,11 @@ up to date.
 Build busybox from its recipe and pack it into
 .IR artifacts ,
 whatever the workspace gives.
+.TP
+.B pekit release \-\-recipe net.busybox.busybox
+Build and pack every package of the busybox recipe and tag each at
+.BR HEAD .
 .SH SEE ALSO
 .BR ppk (1),
-.BR gcsl (1)
+.BR gcsl (1),
+.BR git (1)
