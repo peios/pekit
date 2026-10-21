@@ -110,9 +110,9 @@ defmeta build busybox {
 }
 
 def build busybox(source_path, out_path, arch) {
-    let _ = sh("make -C {source_path} defconfig")
-    let _ = sh("make -C {source_path} -j$(nproc)")
-    let _ = sh("make -C {source_path} CONFIG_PREFIX={out_path} install")
+    sh("make -C {source_path} defconfig")
+    sh("make -C {source_path} -j$(nproc)")
+    sh("make -C {source_path} CONFIG_PREFIX={out_path} install")
     = out_path
 }
 ```

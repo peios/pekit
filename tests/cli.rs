@@ -106,9 +106,9 @@ defmeta build hello {{
 }}
 
 def build hello(source_path, out_path, arch) {{
-    let _ = sh("cp -a {{source_path}}/. {{out_path}}/")
-    let _ = sh("echo {{arch}} > {{out_path}}/arch")
-    let _ = sh("echo $SOURCE_DATE_EPOCH >> {log}")
+    sh("cp -a {{source_path}}/. {{out_path}}/")
+    sh("echo {{arch}} > {{out_path}}/arch")
+    sh("echo $SOURCE_DATE_EPOCH >> {log}")
     = out_path
 }}
 
