@@ -10,7 +10,7 @@ pekit \- build Peios packages from GCSL recipes
 .IR dir ]
 .RB [ \-\-artifact\-dir
 .IR dir ]
-.I name
+.IR name ...
 .br
 .B pekit release
 .RB [ \-\-recipe
@@ -114,14 +114,18 @@ An existing
 .I workspace.gcsl
 is left as it is.
 .TP
-.BI package " name"
-Build the package
+.BI package " name\fR..."
+Build each package
 .I name
-and pack it into the artifact directory, printing its identity on standard
-output.
-If that version is already packed for the host's architecture,
+and pack it into the artifact directory.
+On standard output,
 .B pekit package
-prints its identity and builds nothing.
+prints one line for each package, in the order given: its
+.IR name @ version
+and its identity.
+If a package's version is already packed for the host's architecture, it
+prints that identity and does not build the package again.
+Packages that share a build run it once.
 .IP
 Otherwise
 .B pekit package

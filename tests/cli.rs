@@ -19,6 +19,20 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
+/// The test recipe's package, as `pekit package` prints it.
+const HELLO: &str = "dev.peios.hello@1.0-2";
+
+/// The identity `pekit package` printed for its one package, `package`,
+/// followed by a newline, as a ref holds it.
+fn printed_identity(output: &Output, package: &str) -> String {
+    let printed = stdout(output);
+    let identity = printed
+        .strip_prefix(&format!("{package} "))
+        .unwrap_or_else(|| panic!("{printed}"));
+    assert_eq!(identity.lines().count(), 1, "{printed}");
+    identity.to_owned()
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
@@ -162,7 +176,7 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     ];
     let output = pekit(&root.join("dev.peios.hello"), dir.path(), &args);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let identity = stdout(&output);
+    let identity = printed_identity(&output, HELLO);
     let ref_path = artifacts
         .join("refs/dev.peios.hello/1.0-2")
         .join(ppk::HOST_ARCH);
@@ -207,7 +221,7 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     // Packed already, it is not built again.
     let again = pekit(&root, dir.path(), &args);
     assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
-    assert_eq!(stdout(&again), identity);
+    assert_eq!(printed_identity(&again, HELLO), identity);
     let id = format!("dev.peios.hello@1.0-2?arch={}", ppk::HOST_ARCH);
     assert_eq!(stderr(&again), format!("pekit: {id} is already packed\n"));
     assert_eq!(builds(dir.path()), "1700000100\n");
@@ -281,7 +295,7 @@ fn package_packs_into_the_artifact_dir_the_workspace_sets() {
         &["package", "dev.peios.hello"],
     );
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let identity = stdout(&output);
+    let identity = printed_identity(&output, HELLO);
     assert_eq!(
         fs::read_to_string(root.join("_artifacts").join(&refs)).unwrap(),
         identity
@@ -468,6 +482,45 @@ fn release_builds_a_recipe_once_and_tags_each_package_at_head() {
 }
 
 #[test]
+fn package_builds_several_packages_sharing_one_build_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path()) + DOC;
+    let root = workspace(dir.path(), &recipe);
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello-doc",
+        "dev.peios.hello",
+        "dev.peios.hello-doc",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed = stdout(&output);
+    let packages: Vec<&str> = printed
+        .lines()
+        .map(|line| line.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(packages, ["dev.peios.hello-doc@1.0-2", HELLO]);
+    assert_eq!(builds(dir.path()), "1700000100\n");
+
+    // One packed already: only the other is built, but both are printed.
+    fs::remove_dir_all(artifacts.join("refs/dev.peios.hello-doc")).unwrap();
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), printed);
+    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    let id = format!("{HELLO}?arch={}", ppk::HOST_ARCH);
+    assert!(
+        stderr(&output).contains(&format!("pekit: {id} is already packed\n")),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn release_keeps_a_tag_an_earlier_commit_made_the_same_package_at() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
@@ -619,7 +672,7 @@ fn package_builds_a_local_git_checkout_as_it_is_on_disk() {
     let output = pekit(&root, dir.path(), &args);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
-        manifest_files(&artifacts, &stdout(&output)),
+        manifest_files(&artifacts, &printed_identity(&output, HELLO)),
         [
             "bin/hello",
             "bin/hi",
@@ -650,7 +703,7 @@ fn package_copies_a_local_tree_outside_git_whole() {
     ];
     let output = pekit(&root, dir.path(), &args);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let files = manifest_files(&artifacts, &stdout(&output));
+    let files = manifest_files(&artifacts, &printed_identity(&output, HELLO));
     assert!(
         files.contains(&"share/doc/debug.log".to_owned()),
         "{files:?}"

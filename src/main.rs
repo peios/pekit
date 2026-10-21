@@ -41,9 +41,9 @@ enum Command {
     },
     /// Build a package from its recipe and pack it into the artifact directory
     Package {
-        /// Package to build, by name
-        #[arg(value_name = "name")]
-        name: String,
+        /// Packages to build, by name
+        #[arg(value_name = "name", required = true)]
+        names: Vec<String>,
         #[command(flatten)]
         dirs: Dirs,
     },
@@ -99,9 +99,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { dir } => init(&dir.unwrap_or_else(|| PathBuf::from("."))),
-        Command::Package { name, dirs } => {
-            let identity = package(&name, dirs)?;
-            println!("{identity}");
+        Command::Package { names, dirs } => {
+            for (package, identity) in package(names, dirs)? {
+                println!("{package} {identity}");
+            }
             Ok(())
         }
         Command::Release {
@@ -169,25 +170,44 @@ fn open(dirs: Dirs) -> Result<Opened> {
     })
 }
 
-/// Builds package `name` and packs it, returning its identity.
-fn package(name: &str, dirs: Dirs) -> Result<String> {
+/// Builds packages `names` and packs them, returning each one's
+/// `name@version` and identity. A package whose version is packed already
+/// is not built again, and packages that share a build run it once.
+fn package(names: Vec<String>, dirs: Dirs) -> Result<Vec<(String, String)>> {
     let mut opened = open(dirs)?;
-    let package = opened.recipes.package(name)?;
-    // Checked before anything is built.
-    let id = PackageId::new(name, &package.version, ppk::HOST_ARCH)?;
-    // A build is reproducible, so building a packed version again would
-    // make what is packed already.
-    if let Some(identity) = ppk::packed(&id, &opened.artifact_dir)? {
-        eprintln!("pekit: {id} is already packed");
-        return Ok(identity.to_string());
+    // Each package, with its identity if it is packed already.
+    let mut wanted: Vec<(PackageId, Option<String>)> = Vec::new();
+    let mut unpacked = Vec::new();
+    for name in names {
+        if wanted.iter().any(|(id, _)| id.name() == name) {
+            continue;
+        }
+        let package = opened.recipes.package(&name)?;
+        // Checked before anything is built.
+        let id = PackageId::new(&name, &package.version, ppk::HOST_ARCH)?;
+        // A build is reproducible, so building a packed version again would
+        // make what is packed already.
+        let packed = ppk::packed(&id, &opened.artifact_dir)?;
+        match packed {
+            Some(_) => eprintln!("pekit: {id} is already packed"),
+            None => unpacked.push((id.clone(), package)),
+        }
+        wanted.push((id, packed.map(|identity| identity.to_string())));
     }
-    let mut identities = build_and_pack(
+    let mut built = build_and_pack(
         &opened.root,
         &mut opened.recipes,
-        &[(id, package)],
+        &unpacked,
         &opened.artifact_dir,
-    )?;
-    Ok(identities.remove(0))
+    )?
+    .into_iter();
+    Ok(wanted
+        .into_iter()
+        .map(|(id, packed)| {
+            let identity = packed.unwrap_or_else(|| built.next().expect("one for each built"));
+            (format!("{}@{}", id.name(), id.version()), identity)
+        })
+        .collect())
 }
 
 /// Builds and packs packages `names`, and every package the recipes in
