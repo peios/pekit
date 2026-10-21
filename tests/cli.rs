@@ -367,6 +367,201 @@ fn files_takes_a_star_only_at_the_end_of_both_paths() {
     assert!(!artifacts.join("refs").exists());
 }
 
+/// Runs git in `dir`, asserting that it succeeds, and returns its output.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=pekit",
+            "-c",
+            "user.email=pekit@example.org",
+        ])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "git {args:?}: {message}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Commits everything in the repository `root`, returning the commit.
+fn commit(root: &Path) -> String {
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "recipes"]);
+    git(root, &["rev-parse", "HEAD"])
+}
+
+/// A recipe workspace in `dir`, as [`workspace`] makes one, in a Git
+/// repository with everything committed, and its commit.
+fn committed_workspace(dir: &Path, recipe: &str) -> (std::path::PathBuf, String) {
+    let root = workspace(dir, recipe);
+    git(&root, &["init", "-q"]);
+    let head = commit(&root);
+    (root, head)
+}
+
+/// The commit `tag` names in the repository `root`, or `None`.
+fn tagged(root: &Path, tag: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--quiet", "--verify"])
+        .arg(format!("refs/tags/{tag}^{{commit}}"))
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+}
+
+/// Runs `pekit release` with `args` in `root`, storing packages in
+/// `dir/artifacts`.
+fn release(root: &Path, dir: &Path, args: &[&str]) -> Output {
+    let artifacts = dir.join("artifacts");
+    let mut all = vec!["release"];
+    all.extend(args);
+    all.extend(["--artifact-dir", path(&artifacts)]);
+    pekit(root, dir, &all)
+}
+
+/// A second package from the hello build.
+const DOC: &str = r#"
+def package dev.peios.hello-doc() {
+    build = build hello
+    files = {
+        "share/doc" = "share/doc"
+    }
+}
+"#;
+
+#[test]
+fn release_builds_a_recipe_once_and_tags_each_package_at_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path()) + DOC;
+    let (root, head) = committed_workspace(dir.path(), &recipe);
+
+    let output = release(&root, dir.path(), &["--recipe", "dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let lines: Vec<String> = stdout(&output).lines().map(str::to_owned).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("dev.peios.hello@1.0-2 sha256:"));
+    assert!(lines[1].starts_with("dev.peios.hello-doc@1.0-2 sha256:"));
+    // The packages share one run of their build.
+    assert_eq!(builds(dir.path()), "1700000100\n");
+    for tag in ["dev.peios.hello@1.0-2", "dev.peios.hello-doc@1.0-2"] {
+        assert_eq!(tagged(&root, tag).as_deref(), Some(head.as_str()));
+        assert!(stderr(&output).contains(&format!("pekit: tagged {tag}\n")));
+    }
+
+    // Again, by name: built again, matching what is packed, and tagged
+    // already.
+    let again = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+    assert_eq!(stdout(&again), format!("{}\n", lines[0]));
+    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    assert!(!stderr(&again).contains("tagged"), "{}", stderr(&again));
+}
+
+#[test]
+fn release_keeps_a_tag_an_earlier_commit_made_the_same_package_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let (root, first) = committed_workspace(dir.path(), &recipe);
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let file = root.join("dev.peios.hello/pekit.gcsl");
+    fs::write(
+        &file,
+        recipe + "\n# A change that makes the same package.\n",
+    )
+    .unwrap();
+    commit(&root);
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "pekit: building hello\npekit: dev.peios.hello@1.0-2 is already tagged, at {first}\n"
+        )
+    );
+    assert_eq!(tagged(&root, "dev.peios.hello@1.0-2"), Some(first));
+}
+
+#[test]
+fn release_tags_nothing_when_a_package_differs_from_what_is_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let (root, first) = committed_workspace(dir.path(), &recipe);
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // The build's output changes, but its revision does not.
+    let changed = recipe.replace("echo {arch} >", "echo changed-{arch} >");
+    assert_ne!(changed, recipe);
+    fs::write(root.join("dev.peios.hello/pekit.gcsl"), changed + DOC).unwrap();
+    commit(&root);
+    let output = release(&root, dir.path(), &["--recipe", "dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("a packed version cannot be replaced"),
+        "{message}"
+    );
+    assert_eq!(tagged(&root, "dev.peios.hello@1.0-2"), Some(first));
+    assert_eq!(tagged(&root, "dev.peios.hello-doc@1.0-2"), None);
+}
+
+#[test]
+fn release_refuses_uncommitted_changes_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let root = workspace(dir.path(), &recipe);
+    git(&root, &["init", "-q"]);
+    fs::write(root.join(".gitignore"), "/ignored\n").unwrap();
+    commit(&root);
+    fs::write(root.join("ignored"), "").unwrap();
+    fs::write(root.join("dev.peios.hello/notes.gcsl"), "x = 1\n").unwrap();
+
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.ends_with("has changes that are not committed:\n?? dev.peios.hello/notes.gcsl\n"),
+        "{message}"
+    );
+    assert_eq!(builds(dir.path()), "");
+
+    // An ignored file is not a change.
+    fs::remove_file(root.join("dev.peios.hello/notes.gcsl")).unwrap();
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[test]
+fn release_refuses_a_version_git_cannot_tag_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let recipe = recipe.replace("version = \"1.0\"", "version = \"1.0~rc1\"");
+    let (root, _) = committed_workspace(dir.path(), &recipe);
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "pekit: dev.peios.hello@1.0~rc1-2 cannot be a Git tag's name\n"
+    );
+    assert_eq!(builds(dir.path()), "");
+}
+
 #[test]
 fn package_names_a_package_no_recipe_defines() {
     let dir = tempfile::tempdir().unwrap();

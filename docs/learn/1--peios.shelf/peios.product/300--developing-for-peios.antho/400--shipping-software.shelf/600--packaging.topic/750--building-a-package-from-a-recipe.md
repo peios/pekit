@@ -2,7 +2,8 @@
 title: Building a Package from a Recipe
 type: how-to
 description: Set up a recipe workspace with pekit init, build and pack a
-  package with pekit package, and fix a source whose hash does not match.
+  package with pekit package, release packages with pekit release, and fix
+  a source whose hash does not match.
 related:
   - peios/packaging/recipes
   - peios/packaging/creating-a-package
@@ -84,6 +85,37 @@ without building anything, and says so:
 ```text
 pekit: net.busybox.busybox@1.37.0-1?arch=x86_64 is already packed
 ```
+
+## Release packages
+
+When a recipe change is ready to ship, release its packages from a
+workspace kept in Git.
+
+1. Commit every change in the workspace. pekit refuses to release from a
+   workspace with uncommitted changes, untracked files included, because
+   the tags it makes must name exactly what was built. Files that Git
+   ignores, such as the artifact directory, do not count.
+2. Release every package the recipe defines, by the recipe's directory:
+
+   ```sh
+   pekit release --recipe net.busybox.busybox
+   ```
+
+   To release only some packages, name them instead. pekit builds and
+   packs each package, then tags the commit, and prints each package's
+   tag and identity:
+
+   ```text
+   net.busybox.busybox@1.37.0-1 sha256:5181c2230d80666129f50cb472da3f38be40b3566a3d4638fea915f9dea25d83
+   ```
+
+3. Push the tags with Git. pekit makes them only in your repository.
+
+If the release fails because a packed version cannot be replaced, the
+recipe now makes something different from what that version already
+holds. Raise the recipe's `revision`, commit, and release again. A
+failed release makes no tags, but packages it packed before failing stay
+packed; releasing them again matches them.
 
 ## Fixing a source hash
 
