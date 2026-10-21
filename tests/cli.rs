@@ -562,6 +562,117 @@ fn release_refuses_a_version_git_cannot_tag_before_building() {
     assert_eq!(builds(dir.path()), "");
 }
 
+/// [`recipe`], with its source the tree at `local_path` rather than a
+/// download.
+fn local_recipe(local_path: &str, dir: &Path) -> String {
+    let fetched = recipe("URL", "SHA", FILES, dir);
+    let local = fetched.replace(
+        "    url = \"URL\"\n    sha256 = \"SHA\"\n",
+        &format!("    local_path = \"{local_path}\"\n"),
+    );
+    assert_ne!(local, fetched);
+    local
+}
+
+/// The paths the manifest of `identity` in `artifacts` lists.
+fn manifest_files(artifacts: &Path, identity: &str) -> Vec<String> {
+    let hex = identity.trim().strip_prefix("sha256:").unwrap();
+    let manifest = fs::read_to_string(artifacts.join("manifests/sha256").join(hex)).unwrap();
+    manifest
+        .lines()
+        .skip_while(|line| *line != "[files]")
+        .skip(1)
+        .map(|line| {
+            line.split(" = ")
+                .next()
+                .unwrap()
+                .trim_matches('"')
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn package_builds_a_local_git_checkout_as_it_is_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    fs::write(tree.join(".gitignore"), "*.log\n").unwrap();
+    touch(&tree.join(".gitignore"), "@1700000000");
+    git(&tree, &["init", "-q"]);
+    commit(&tree);
+    // Untracked, ignored, and deleted but not committed.
+    fs::write(tree.join("share/doc/NEW"), "new\n").unwrap();
+    touch(&tree.join("share/doc/NEW"), "@1700000200");
+    fs::write(tree.join("share/doc/debug.log"), "log\n").unwrap();
+    touch(&tree.join("share/doc/debug.log"), "@1800000000");
+    fs::remove_file(tree.join("extra")).unwrap();
+
+    let root = workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        manifest_files(&artifacts, &stdout(&output)),
+        [
+            "bin/hello",
+            "bin/hi",
+            "lib/hello/arch",
+            "share/doc/NEW",
+            "share/doc/README",
+        ]
+    );
+    // The time of the newest file copied, which the ignored file is not.
+    assert_eq!(builds(dir.path()), "1700000200\n");
+}
+
+#[test]
+fn package_copies_a_local_tree_outside_git_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    fs::write(tree.join("share/doc/debug.log"), "log\n").unwrap();
+    touch(&tree.join("share/doc/debug.log"), "@1700000300");
+
+    let root = workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let files = manifest_files(&artifacts, &stdout(&output));
+    assert!(
+        files.contains(&"share/doc/debug.log".to_owned()),
+        "{files:?}"
+    );
+    assert_eq!(builds(dir.path()), "1700000300\n");
+}
+
+#[test]
+fn release_refuses_a_local_source_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let (root, _) = committed_workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "pekit: dev.peios.hello: its source, hello-tarball, is a local path, which a tag \
+         cannot pin; release it from a fetched source\n"
+    );
+    assert_eq!(builds(dir.path()), "");
+}
+
 #[test]
 fn package_names_a_package_no_recipe_defines() {
     let dir = tempfile::tempdir().unwrap();

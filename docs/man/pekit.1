@@ -61,7 +61,13 @@ An upstream source: a
 .B url
 and the
 .B sha256
-of what it serves.
+of what it serves, or a
+.B local_path
+to a source tree on this machine, relative to the workspace's root unless
+absolute.
+pekit copies a local tree for each build: in a Git work tree, the files Git
+would commit, as they are on disk, so that uncommitted changes are built
+and ignored files such as build output are not; anywhere else, all of it.
 .TP
 .B build
 The steps that make an install tree, laid out as
@@ -165,6 +171,9 @@ and every package the recipe in each
 directory defines, then tag the commit that made them.
 The workspace must be in a Git repository, with no uncommitted changes in
 the workspace, untracked files included; files Git ignores do not count.
+A package whose build has a
+.B local_path
+source cannot be released, because a tag cannot pin what the tree holds.
 .IP
 Each package is tagged
 .IR name @ version ,
