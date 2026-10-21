@@ -135,6 +135,14 @@ fn package(name: &str, workspace: Option<PathBuf>, artifact_dir: &Path) -> Resul
         return Ok(identity.to_string());
     }
     let build = recipes.build(&package.build)?;
+    // Checked before the build, which can take a long time, rather than
+    // only when packing what it makes.
+    ppk::prepare_artifact_dir(artifact_dir).with_context(|| {
+        format!(
+            "cannot use the artifact directory {} (choose another with --artifact-dir)",
+            artifact_dir.display()
+        )
+    })?;
 
     let cache = cache_dir()?;
     let archive = source::fetch(&build.source, &cache)?;

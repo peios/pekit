@@ -243,7 +243,14 @@ fn package_refuses_a_source_whose_hash_differs() {
     let (url, _) = tarball(dir.path());
     let wrong = "0".repeat(64);
     let root = workspace(dir.path(), &recipe(&url, &wrong, FILES, dir.path()));
-    let output = pekit(&root, dir.path(), &["package", "dev.peios.hello"]);
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
     assert!(
@@ -253,6 +260,37 @@ fn package_refuses_a_source_whose_hash_differs() {
     // Nothing unchecked is kept.
     let kept = fs::read_dir(dir.path().join("peios/pekit/sources/sha256")).unwrap();
     assert_eq!(kept.count(), 0);
+}
+
+#[test]
+fn package_refuses_an_artifact_dir_it_cannot_write_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let artifacts = locked.join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.starts_with(&format!(
+            "pekit: cannot use the artifact directory {} (choose another with --artifact-dir): ",
+            path(&artifacts)
+        )),
+        "{message}"
+    );
+    // Nothing was fetched or built.
+    assert_eq!(builds(dir.path()), "");
+    assert!(!dir.path().join("peios/pekit/sources").exists());
 }
 
 #[test]

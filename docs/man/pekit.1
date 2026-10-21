@@ -96,7 +96,8 @@ prints its identity and builds nothing.
 .IP
 Otherwise
 .B pekit package
-fetches the source of the package's build into its cache and checks its
+creates the artifact directory if it is missing and checks that it can
+write there, then fetches the source of the package's build into its cache and checks its
 SHA-256, unless the cache holds it already, then unpacks it into a work
 directory and runs the build with the unpacked source as
 .BR source_path ,
@@ -159,7 +160,7 @@ Success, including printing help or the version.
 .TP
 .B 1
 Failure, such as a workspace whose include file is not this pekit's, a
-recipe with errors, a source whose SHA-256 differs from the recipe's, a
+recipe with errors, an artifact directory pekit cannot write to, a source whose SHA-256 differs from the recipe's, a
 build that fails, or a package version that is already packed with
 different contents.
 .TP
