@@ -23,7 +23,7 @@ type Package = {build: Build, files: {*: String}, dependencies: List<String> = [
 #[def_type]
 def source(name: String, f: fn(): Source): Source { f() }
 
-# Memoised, so packages that share a build run it once.
+# Memoised: within one run, packages that share a build run it once.
 #[def_type]
 def build(name: String, f: Build, source_path: String, out_path: String, arch: String) ->> String {
     f(source_path, out_path, arch)

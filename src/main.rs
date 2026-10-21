@@ -128,6 +128,12 @@ fn package(name: &str, workspace: Option<PathBuf>, artifact_dir: &Path) -> Resul
     let package = recipes.package(name)?;
     // Checked before anything is built.
     let id = PackageId::new(name, &package.version, ppk::HOST_ARCH)?;
+    // A build is reproducible, so building a packed version again would
+    // make what is packed already.
+    if let Some(identity) = ppk::packed(&id, artifact_dir)? {
+        eprintln!("pekit: {id} is already packed");
+        return Ok(identity.to_string());
+    }
     let build = recipes.build(&package.build)?;
 
     let cache = cache_dir()?;
@@ -138,9 +144,18 @@ fn package(name: &str, workspace: Option<PathBuf>, artifact_dir: &Path) -> Resul
         .prefix("build-")
         .tempdir_in(&work_dir)
         .with_context(|| work_dir.display().to_string())?;
-    let source_path = source::unpack(&archive, &work.path().join("source"))?;
+    let unpacked = work.path().join("source");
+    let source_path = source::unpack(&archive, &unpacked)?;
     let out_path = work.path().join("out");
     fs::create_dir(&out_path).with_context(|| out_path.display().to_string())?;
+
+    // Tools that stamp a time into what they make use this one instead of
+    // the clock, so that building the same source gives the same package.
+    let epoch = source::newest_mtime(&unpacked)?;
+    // SAFETY: nothing reads the environment concurrently. The main thread
+    // is waiting for this one, and the threads GCSL starts to copy a
+    // command's output end before the command's call returns.
+    unsafe { std::env::set_var("SOURCE_DATE_EPOCH", epoch.to_string()) };
 
     eprintln!("pekit: building {}", package.build);
     let tree = recipes.run_build(&package.build, &source_path, &out_path, ppk::HOST_ARCH)?;

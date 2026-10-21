@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -80,6 +81,27 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
         return Ok(entry.path());
     }
     Ok(into.to_path_buf())
+}
+
+/// The newest modification time, in seconds since the epoch, of anything
+/// under the directory `dir`, whose own time does not count: for an unpacked
+/// source, the time of its newest file, which the archive gives it.
+pub fn newest_mtime(dir: &Path) -> Result<u64> {
+    let mut newest = 0;
+    for entry in fs::read_dir(dir).with_context(|| dir.display().to_string())? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path).with_context(|| path.display().to_string())?;
+        let modified = meta
+            .modified()
+            .with_context(|| path.display().to_string())?
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        newest = newest.max(modified);
+        if meta.is_dir() {
+            newest = newest.max(newest_mtime(&path)?);
+        }
+    }
+    Ok(newest)
 }
 
 /// The SHA-256 of the file at `path`, in lower-case hex.

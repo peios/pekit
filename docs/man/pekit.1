@@ -90,7 +90,11 @@ Build the package
 .I name
 and pack it into the artifact directory, printing its identity on standard
 output.
+If that version is already packed for the host's architecture,
+.B pekit package
+prints its identity and builds nothing.
 .IP
+Otherwise
 .B pekit package
 fetches the source of the package's build into its cache and checks its
 SHA-256, unless the cache holds it already, then unpacks it into a work
@@ -167,6 +171,13 @@ Usage error: an unknown option or a missing argument.
 The base of pekit's cache,
 .I ~/.cache
 when it is unset or empty.
+.TP
+.B SOURCE_DATE_EPOCH
+Set by
+.B pekit package
+for the build, replacing any value it is given, to the modification time
+of the newest file in the unpacked source, so that tools that stamp a time
+into what they make give the same result each time.
 .SH FILES
 .TP
 .IR $XDG_CACHE_HOME /peios/pekit/sources/sha256/ hash

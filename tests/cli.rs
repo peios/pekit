@@ -37,6 +37,9 @@ fn tarball(dir: &Path) -> (String, String) {
     symlink("hello", tree.join("bin/hi")).unwrap();
     fs::write(tree.join("share/doc/README"), "read me\n").unwrap();
     fs::write(tree.join("extra"), "left out\n").unwrap();
+    // Every time the same, but the newest's: README's.
+    touch(&tree, "@1700000000");
+    touch(&tree.join("share/doc/README"), "@1700000100");
     let archive = dir.join("hello-1.0.tar.gz");
     let status = Command::new("tar")
         .arg("-czf")
@@ -52,9 +55,27 @@ fn tarball(dir: &Path) -> (String, String) {
     (format!("file://{}", path(&archive)), hex)
 }
 
+/// Sets the modification time of `path`, and of everything under it, to
+/// `time`, as touch(1) reads it.
+fn touch(path: &Path, time: &str) {
+    let status = Command::new("find")
+        .arg(path)
+        .args(["-exec", "touch", "-h", "-d", time, "{}", "+"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// The `SOURCE_DATE_EPOCH` each build of [`recipe`] ran with, one line each,
+/// in the log in `dir`.
+fn builds(dir: &Path) -> String {
+    fs::read_to_string(dir.join("builds")).unwrap_or_default()
+}
+
 /// A recipe for `dev.peios.hello` from the source at `url`, whose files are
-/// `files`.
-fn recipe(url: &str, sha256: &str, files: &str) -> String {
+/// `files`, whose build logs to `dir`.
+fn recipe(url: &str, sha256: &str, files: &str, dir: &Path) -> String {
+    let log = path(&dir.join("builds")).to_owned();
     format!(
         r#"pekit = 1
 version = "1.0"
@@ -73,6 +94,7 @@ defmeta build hello {{
 def build hello(source_path, out_path, arch) {{
     let _ = sh("cp -a {{source_path}}/. {{out_path}}/")
     let _ = sh("echo {{arch}} > {{out_path}}/arch")
+    let _ = sh("echo $SOURCE_DATE_EPOCH >> {log}")
     = out_path
 }}
 
@@ -130,7 +152,7 @@ fn init_writes_the_include_and_keeps_an_existing_workspace_file() {
 fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
-    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES));
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
     let artifacts = dir.path().join("artifacts");
     let args = [
         "package",
@@ -179,13 +201,23 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     );
     let work = fs::read_dir(dir.path().join("peios/pekit/work")).unwrap();
     assert_eq!(work.count(), 0);
+    // The build ran once, with its time the source's newest.
+    assert_eq!(builds(dir.path()), "1700000100\n");
+
+    // Packed already, it is not built again.
+    let again = pekit(&root, dir.path(), &args);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+    assert_eq!(stdout(&again), identity);
+    let id = format!("dev.peios.hello@1.0-2?arch={}", ppk::HOST_ARCH);
+    assert_eq!(stderr(&again), format!("pekit: {id} is already packed\n"));
+    assert_eq!(builds(dir.path()), "1700000100\n");
 }
 
 #[test]
 fn package_refuses_an_include_that_is_not_pekits() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
-    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES));
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
     fs::write(root.join("pekit-include.gcsl"), "# mine\n").unwrap();
     let output = pekit(&root, dir.path(), &["package", "dev.peios.hello"]);
     assert_eq!(output.status.code(), Some(1));
@@ -210,7 +242,7 @@ fn package_refuses_a_source_whose_hash_differs() {
     let dir = tempfile::tempdir().unwrap();
     let (url, _) = tarball(dir.path());
     let wrong = "0".repeat(64);
-    let root = workspace(dir.path(), &recipe(&url, &wrong, FILES));
+    let root = workspace(dir.path(), &recipe(&url, &wrong, FILES, dir.path()));
     let output = pekit(&root, dir.path(), &["package", "dev.peios.hello"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
@@ -228,7 +260,7 @@ fn files_takes_a_star_only_at_the_end_of_both_paths() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
     let files = r#"        "bin/*" = "bin/hello""#;
-    let root = workspace(dir.path(), &recipe(&url, &sha256, files));
+    let root = workspace(dir.path(), &recipe(&url, &sha256, files, dir.path()));
     let artifacts = dir.path().join("artifacts");
     let args = [
         "package",
@@ -250,7 +282,7 @@ fn files_takes_a_star_only_at_the_end_of_both_paths() {
 fn package_names_a_package_no_recipe_defines() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
-    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES));
+    let root = workspace(dir.path(), &recipe(&url, &sha256, FILES, dir.path()));
     let output = pekit(&root, dir.path(), &["package", "dev.peios.nope"]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
