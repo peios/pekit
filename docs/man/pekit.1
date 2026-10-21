@@ -1,0 +1,189 @@
+.TH PEKIT 1 2026-10-21 "Peios pekit 0.1.0"
+.SH NAME
+pekit \- build Peios packages from GCSL recipes
+.SH SYNOPSIS
+.B pekit init
+.RI [ dir ]
+.br
+.B pekit package
+.RB [ \-\-workspace
+.IR dir ]
+.RB [ \-\-artifact\-dir
+.IR dir ]
+.I name
+.br
+.B pekit
+.RB [ \-h | \-\-help | \-V | \-\-version ]
+.SH DESCRIPTION
+.B pekit
+builds Peios packages from recipes written in GCSL and packs them with
+.BR ppk (1).
+.PP
+A recipe workspace is a GCSL workspace: a directory tree whose root holds
+.IR workspace.gcsl .
+Its root also holds
+.IR pekit\-include.gcsl ,
+pekit's declarations of the definition types recipes use, which
+.B pekit init
+writes.
+Every directory below the root sees them without importing them, and so
+does a GCSL language server, which reads the file like any other.
+.I workspace.gcsl
+is an ordinary GCSL file that belongs to the workspace's author.
+.PP
+A recipe defines three kinds of definition:
+.TP
+.B source
+An upstream source: a
+.B url
+and the
+.B sha256
+of what it serves.
+.TP
+.B build
+The steps that make an install tree, laid out as
+.IR /usr ,
+from the unpacked source.
+A
+.B defmeta
+gives the build's
+.B source
+and its
+.BR dependencies .
+.TP
+.B package
+A package: its
+.BR build ,
+the
+.B files
+it takes from the build's install tree, and its runtime
+.BR dependencies .
+.PP
+A recipe file also gives
+.BR "pekit = 1" ,
+the recipe format it is written for, and the
+.B version
+and
+.B revision
+of its packages, which make the package's version:
+.B version
+.BR "= \(dq1.37.0\(dq" ,
+.B revision
+.B "= \(dq1\(dq"
+makes 1.37.0\-1.
+.SH COMMANDS
+.TP
+.BR init " [\fIdir\fR]"
+Write
+.I pekit\-include.gcsl
+into the workspace at
+.IR dir ,
+the current directory by default, replacing any there, and an empty
+.I workspace.gcsl
+if there is none.
+An existing
+.I workspace.gcsl
+is left as it is.
+.TP
+.BI package " name"
+Build the package
+.I name
+and pack it into the artifact directory, printing its identity on standard
+output.
+.IP
+.B pekit package
+fetches the source of the package's build into its cache and checks its
+SHA-256, unless the cache holds it already, then unpacks it into a work
+directory and runs the build with the unpacked source as
+.BR source_path ,
+an empty directory as
+.BR out_path ,
+and the host's architecture as
+.BR arch .
+It then copies the files the package chooses from the install tree the
+build returns and packs them as
+.IR name @ version ,
+for the host's architecture.
+The work directory is removed afterwards.
+.IP
+Each entry of
+.B files
+maps a path in
+.I /usr
+to the path in the install tree it comes from.
+Both are relative,
+.BR / \-separated,
+and have no
+.B .\&
+or
+.B ..\&
+segments.
+A last segment of
+.B *
+on both sides takes every entry of a directory.
+A directory is taken whole, and a symbolic link as it is, never followed.
+.IP
+The build runs on the host, with the host's tools, and only the
+.B sh
+calls of its steps reach outside GCSL.
+Build and runtime dependencies are not supported yet: a recipe that gives
+any is refused.
+.SH OPTIONS
+.TP
+.BI \-\-workspace " dir"
+Read recipes from the workspace at
+.IR dir ,
+rather than the workspace the current directory is in.
+.TP
+.BI \-\-artifact\-dir " dir"
+Store packages in
+.IR dir ,
+.I /system/artifacts
+by default, as
+.BR ppk (1)
+does.
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success, including printing help or the version.
+.TP
+.B 1
+Failure, such as a workspace whose include file is not this pekit's, a
+recipe with errors, a source whose SHA-256 differs from the recipe's, a
+build that fails, or a package version that is already packed with
+different contents.
+.TP
+.B 2
+Usage error: an unknown option or a missing argument.
+.SH ENVIRONMENT
+.TP
+.B XDG_CACHE_HOME
+The base of pekit's cache,
+.I ~/.cache
+when it is unset or empty.
+.SH FILES
+.TP
+.IR $XDG_CACHE_HOME /peios/pekit/sources/sha256/ hash
+A fetched source, named by its SHA-256.
+.TP
+.IR $XDG_CACHE_HOME /peios/pekit/work/
+Work directories of builds in progress.
+.SH EXAMPLES
+.TP
+.B pekit init
+Make the current directory a recipe workspace, or bring its
+.I pekit\-include.gcsl
+up to date.
+.TP
+.B pekit package net.busybox.busybox \-\-artifact\-dir artifacts
+Build busybox from its recipe and pack it into
+.IR artifacts .
+.SH SEE ALSO
+.BR ppk (1),
+.BR gcsl (1)

@@ -1,0 +1,14 @@
+[package]
+name = "pekit"
+version = "0.1.0"
+edition = "2024"
+description = "Builds Peios packages from GCSL recipes"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
+gcsl = { path = "../gcsl/crates/gcsl" }
+gcsl-disk = { path = "../gcsl/crates/gcsl-disk" }
+ppk = { path = "../ppk" }
+sha2 = "0.10"
+tempfile = "3.23"

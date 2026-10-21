@@ -1,0 +1,33 @@
+# pekit's declarations for recipes: the types of sources, builds and
+# packages, and the def-types that make them. `pekit init` writes this file,
+# and pekit refuses to work in a workspace whose copy differs from its own,
+# so change it in pekit, not here.
+
+# An upstream source. pekit fetches the URL and checks the hash, so a build
+# needs no network.
+type Source = {url: String, sha256: String}
+
+# What pekit reads of a build before running it: the source it unpacks for
+# the build, and the packages the build needs.
+type BuildMeta = {source: fn(): Source, dependencies: List<String>}
+
+# A build. Given the unpacked source, an empty install tree laid out as
+# /usr, and the target arch, it fills the install tree and returns it.
+type Build = fn(source_path: String, out_path: String, arch: String) ->> String META: BuildMeta
+
+# A package. files maps each path in /usr to the path in the build's install
+# tree it comes from; a last segment of `*` on both sides takes every entry
+# of a directory. dependencies are the packages it needs at runtime.
+type Package = {build: Build, files: {*: String}, dependencies: List<String> = []}
+
+#[def_type]
+def source(name: String, f: fn(): Source): Source { f() }
+
+# Memoised, so packages that share a build run it once.
+#[def_type]
+def build(name: String, f: Build, source_path: String, out_path: String, arch: String) ->> String {
+    f(source_path, out_path, arch)
+}
+
+#[def_type]
+def package(name: String, f: fn(): Package): Package { f() }
