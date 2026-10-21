@@ -3,9 +3,17 @@
 # and pekit refuses to work in a workspace whose copy differs from its own,
 # so change it in pekit, not here.
 
-# An upstream source. pekit fetches the URL and checks the hash, so a build
+# An upstream source that pekit fetches. It checks the hash, so a build
 # needs no network.
-type Source = {url: String, sha256: String}
+type Fetched = {url: String, sha256: String}
+
+# A source tree on this machine, relative to the workspace's root unless
+# absolute. pekit copies it for each build: in a Git work tree, the files
+# Git would commit, uncommitted changes included. Nothing pins what it
+# holds, so packages built from it cannot be released.
+type Local = {local_path: String}
+
+type Source = Fetched | Local
 
 # What pekit reads of a build before running it: the source it unpacks for
 # the build, and the packages the build needs.

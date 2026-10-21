@@ -76,6 +76,23 @@ def source busybox-net-upstream-tarball() {
 }
 ```
 
+A source can instead be a source tree on your machine, such as a checkout
+of a project you are working on. Give its path, relative to the
+workspace's root unless absolute:
+
+```gcsl
+def source ppk-checkout() {
+    local_path = "../ppk"
+}
+```
+
+pekit copies the tree for each build, so a build never changes it. In a
+Git work tree, it copies the files Git would commit, as they are on disk:
+uncommitted changes are built, and files that Git ignores, such as
+earlier build output, are not. Anywhere else it copies everything. Nothing
+pins what a local tree holds, so packages built from one cannot be
+released.
+
 A **build** turns the unpacked source into an install tree laid out as
 `/usr`. A `defmeta` gives its metadata: the source it builds and the
 packages it needs. pekit calls it with three arguments:
@@ -93,9 +110,9 @@ defmeta build busybox {
 }
 
 def build busybox(source_path, out_path, arch) {
-    let _ = sh("make -C {source_path} defconfig")
-    let _ = sh("make -C {source_path} -j$(nproc)")
-    let _ = sh("make -C {source_path} CONFIG_PREFIX={out_path} install")
+    sh("make -C {source_path} defconfig")
+    sh("make -C {source_path} -j$(nproc)")
+    sh("make -C {source_path} CONFIG_PREFIX={out_path} install")
     = out_path
 }
 ```

@@ -21,7 +21,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ppk::PackageId;
 
-use crate::recipes::{INCLUDE, INCLUDE_FILE, PackageRecipe, Recipes, WORKSPACE_FILE};
+use crate::recipes::{INCLUDE, INCLUDE_FILE, PackageRecipe, Recipes, Source, WORKSPACE_FILE};
 
 /// Build Peios packages from GCSL recipes
 #[derive(Parser)]
@@ -41,9 +41,9 @@ enum Command {
     },
     /// Build a package from its recipe and pack it into the artifact directory
     Package {
-        /// Package to build, by name
-        #[arg(value_name = "name")]
-        name: String,
+        /// Packages to build, by name
+        #[arg(value_name = "name", required = true)]
+        names: Vec<String>,
         #[command(flatten)]
         dirs: Dirs,
     },
@@ -99,9 +99,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { dir } => init(&dir.unwrap_or_else(|| PathBuf::from("."))),
-        Command::Package { name, dirs } => {
-            let identity = package(&name, dirs)?;
-            println!("{identity}");
+        Command::Package { names, dirs } => {
+            for (package, identity) in package(names, dirs)? {
+                println!("{package} {identity}");
+            }
             Ok(())
         }
         Command::Release {
@@ -169,21 +170,44 @@ fn open(dirs: Dirs) -> Result<Opened> {
     })
 }
 
-/// Builds package `name` and packs it, returning its identity.
-fn package(name: &str, dirs: Dirs) -> Result<String> {
+/// Builds packages `names` and packs them, returning each one's
+/// `name@version` and identity. A package whose version is packed already
+/// is not built again, and packages that share a build run it once.
+fn package(names: Vec<String>, dirs: Dirs) -> Result<Vec<(String, String)>> {
     let mut opened = open(dirs)?;
-    let package = opened.recipes.package(name)?;
-    // Checked before anything is built.
-    let id = PackageId::new(name, &package.version, ppk::HOST_ARCH)?;
-    // A build is reproducible, so building a packed version again would
-    // make what is packed already.
-    if let Some(identity) = ppk::packed(&id, &opened.artifact_dir)? {
-        eprintln!("pekit: {id} is already packed");
-        return Ok(identity.to_string());
+    // Each package, with its identity if it is packed already.
+    let mut wanted: Vec<(PackageId, Option<String>)> = Vec::new();
+    let mut unpacked = Vec::new();
+    for name in names {
+        if wanted.iter().any(|(id, _)| id.name() == name) {
+            continue;
+        }
+        let package = opened.recipes.package(&name)?;
+        // Checked before anything is built.
+        let id = PackageId::new(&name, &package.version, ppk::HOST_ARCH)?;
+        // A build is reproducible, so building a packed version again would
+        // make what is packed already.
+        let packed = ppk::packed(&id, &opened.artifact_dir)?;
+        match packed {
+            Some(_) => eprintln!("pekit: {id} is already packed"),
+            None => unpacked.push((id.clone(), package)),
+        }
+        wanted.push((id, packed.map(|identity| identity.to_string())));
     }
-    let mut identities =
-        build_and_pack(&mut opened.recipes, &[(id, package)], &opened.artifact_dir)?;
-    Ok(identities.remove(0))
+    let mut built = build_and_pack(
+        &opened.root,
+        &mut opened.recipes,
+        &unpacked,
+        &opened.artifact_dir,
+    )?
+    .into_iter();
+    Ok(wanted
+        .into_iter()
+        .map(|(id, packed)| {
+            let identity = packed.unwrap_or_else(|| built.next().expect("one for each built"));
+            (format!("{}@{}", id.name(), id.version()), identity)
+        })
+        .collect())
 }
 
 /// Builds and packs packages `names`, and every package the recipes in
@@ -216,8 +240,23 @@ fn release(
         git::check_tag(&git::tag(&name, &package.version))?;
         packages.push((id, package));
     }
+    for (id, package) in &packages {
+        let build = opened.recipes.build(&package.build)?;
+        if let Source::Local { .. } = build.source {
+            bail!(
+                "{}: its source, {}, is a local path, which a tag cannot pin; release it from a fetched source",
+                id.name(),
+                build.source_name
+            );
+        }
+    }
 
-    let identities = build_and_pack(&mut opened.recipes, &packages, &opened.artifact_dir)?;
+    let identities = build_and_pack(
+        &opened.root,
+        &mut opened.recipes,
+        &packages,
+        &opened.artifact_dir,
+    )?;
 
     let mut released = Vec::new();
     let mut new = Vec::new();
@@ -237,9 +276,11 @@ fn release(
     Ok(released)
 }
 
-/// Builds `packages` and packs each into `artifact_dir`, returning their
-/// identities in the same order. Packages that share a build run it once.
+/// Builds `packages` from the workspace at `root` and packs each into
+/// `artifact_dir`, returning their identities in the same order. Packages
+/// that share a build run it once.
 fn build_and_pack(
+    root: &Path,
     recipes: &mut Recipes,
     packages: &[(PackageId, PackageRecipe)],
     artifact_dir: &Path,
@@ -267,7 +308,6 @@ fn build_and_pack(
     let cache = cache_dir()?;
     let mut identities = vec![None; packages.len()];
     for (build, recipe) in builds.iter().zip(&build_recipes) {
-        let archive = source::fetch(&recipe.source, &cache)?;
         let work_dir = cache.join("work");
         fs::create_dir_all(&work_dir).with_context(|| work_dir.display().to_string())?;
         let work = tempfile::Builder::new()
@@ -275,21 +315,31 @@ fn build_and_pack(
             .tempdir_in(&work_dir)
             .with_context(|| work_dir.display().to_string())?;
         let unpacked = work.path().join("source");
-        let source_path = source::unpack(&archive, &unpacked)?;
+        // Tools that stamp a time into what they make use the source's
+        // newest instead of the clock, so that building the same source
+        // gives the same package.
+        let (source_path, epoch) = match &recipe.source {
+            Source::Fetched { url, sha256 } => {
+                let archive = source::fetch(url, sha256, &cache)?;
+                let source_path = source::unpack(&archive, &unpacked)?;
+                (source_path, source::newest_mtime(&unpacked)?)
+            }
+            Source::Local { path } => {
+                let epoch = source::copy_local(&root.join(path), &unpacked)?;
+                (unpacked, epoch)
+            }
+        };
         let out_path = work.path().join("out");
         fs::create_dir(&out_path).with_context(|| out_path.display().to_string())?;
 
-        // Tools that stamp a time into what they make use this one instead
-        // of the clock, so that building the same source gives the same
-        // package.
-        let epoch = source::newest_mtime(&unpacked)?;
         // SAFETY: nothing reads the environment concurrently. The main
         // thread is waiting for this one, and the threads GCSL starts to
         // copy a command's output end before the command's call returns.
         unsafe { std::env::set_var("SOURCE_DATE_EPOCH", epoch.to_string()) };
 
         eprintln!("pekit: building {build}");
-        let tree = recipes.run_build(build, &source_path, &out_path, ppk::HOST_ARCH)?;        for (at, (id, package)) in packages.iter().enumerate() {
+        let tree = recipes.run_build(build, &source_path, &out_path, ppk::HOST_ARCH)?;
+        for (at, (id, package)) in packages.iter().enumerate() {
             if package.build != *build {
                 continue;
             }

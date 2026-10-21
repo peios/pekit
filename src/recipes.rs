@@ -56,15 +56,23 @@ pub struct PackageRecipe {
 
 /// What a build's recipe says before it runs.
 pub struct BuildRecipe {
-    /// The source pekit fetches and unpacks for it.
+    /// The name of its source.
+    pub source_name: String,
+    /// The source pekit gives it.
     pub source: Source,
 }
 
-/// An upstream source.
-pub struct Source {
-    pub url: String,
-    /// The SHA-256 of what the URL serves, in lower-case hex.
-    pub sha256: String,
+/// A build's source.
+pub enum Source {
+    /// An archive pekit downloads, checks and unpacks.
+    Fetched {
+        url: String,
+        /// The SHA-256 of what the URL serves, in lower-case hex.
+        sha256: String,
+    },
+    /// A source tree on this machine, as the recipe writes it: relative to
+    /// the workspace's root unless absolute.
+    Local { path: String },
 }
 
 impl Recipes {
@@ -185,9 +193,19 @@ impl Recipes {
                 bail!("build {name}: source is {def_type} {path}, not a source")
             }
         };
-        let fetched = self.invoke("source", &source, &[])?;
-        let url = string(field(&fetched, "url")?)?.to_owned();
-        let sha256 = string(field(&fetched, "sha256")?)?.to_owned();
+        let value = self.invoke("source", &source, &[])?;
+        if let Ok(path) = field(&value, "local_path") {
+            let path = string(path)?.to_owned();
+            if path.is_empty() {
+                bail!("source {source}: local_path is empty");
+            }
+            return Ok(BuildRecipe {
+                source_name: source,
+                source: Source::Local { path },
+            });
+        }
+        let url = string(field(&value, "url")?)?.to_owned();
+        let sha256 = string(field(&value, "sha256")?)?.to_owned();
         if sha256.len() != 64
             || !sha256
                 .bytes()
@@ -196,7 +214,8 @@ impl Recipes {
             bail!("source {source}: sha256 is not 64 lower-case hex digits: {sha256}");
         }
         Ok(BuildRecipe {
-            source: Source { url, sha256 },
+            source_name: source,
+            source: Source::Fetched { url, sha256 },
         })
     }
 

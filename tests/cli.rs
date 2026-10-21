@@ -19,6 +19,20 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
+/// The test recipe's package, as `pekit package` prints it.
+const HELLO: &str = "dev.peios.hello@1.0-2";
+
+/// The identity `pekit package` printed for its one package, `package`,
+/// followed by a newline, as a ref holds it.
+fn printed_identity(output: &Output, package: &str) -> String {
+    let printed = stdout(output);
+    let identity = printed
+        .strip_prefix(&format!("{package} "))
+        .unwrap_or_else(|| panic!("{printed}"));
+    assert_eq!(identity.lines().count(), 1, "{printed}");
+    identity.to_owned()
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
@@ -92,9 +106,9 @@ defmeta build hello {{
 }}
 
 def build hello(source_path, out_path, arch) {{
-    let _ = sh("cp -a {{source_path}}/. {{out_path}}/")
-    let _ = sh("echo {{arch}} > {{out_path}}/arch")
-    let _ = sh("echo $SOURCE_DATE_EPOCH >> {log}")
+    sh("cp -a {{source_path}}/. {{out_path}}/")
+    sh("echo {{arch}} > {{out_path}}/arch")
+    sh("echo $SOURCE_DATE_EPOCH >> {log}")
     = out_path
 }}
 
@@ -162,7 +176,7 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     ];
     let output = pekit(&root.join("dev.peios.hello"), dir.path(), &args);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let identity = stdout(&output);
+    let identity = printed_identity(&output, HELLO);
     let ref_path = artifacts
         .join("refs/dev.peios.hello/1.0-2")
         .join(ppk::HOST_ARCH);
@@ -207,7 +221,7 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     // Packed already, it is not built again.
     let again = pekit(&root, dir.path(), &args);
     assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
-    assert_eq!(stdout(&again), identity);
+    assert_eq!(printed_identity(&again, HELLO), identity);
     let id = format!("dev.peios.hello@1.0-2?arch={}", ppk::HOST_ARCH);
     assert_eq!(stderr(&again), format!("pekit: {id} is already packed\n"));
     assert_eq!(builds(dir.path()), "1700000100\n");
@@ -281,7 +295,7 @@ fn package_packs_into_the_artifact_dir_the_workspace_sets() {
         &["package", "dev.peios.hello"],
     );
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let identity = stdout(&output);
+    let identity = printed_identity(&output, HELLO);
     assert_eq!(
         fs::read_to_string(root.join("_artifacts").join(&refs)).unwrap(),
         identity
@@ -468,6 +482,45 @@ fn release_builds_a_recipe_once_and_tags_each_package_at_head() {
 }
 
 #[test]
+fn package_builds_several_packages_sharing_one_build_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path()) + DOC;
+    let root = workspace(dir.path(), &recipe);
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello-doc",
+        "dev.peios.hello",
+        "dev.peios.hello-doc",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed = stdout(&output);
+    let packages: Vec<&str> = printed
+        .lines()
+        .map(|line| line.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(packages, ["dev.peios.hello-doc@1.0-2", HELLO]);
+    assert_eq!(builds(dir.path()), "1700000100\n");
+
+    // One packed already: only the other is built, but both are printed.
+    fs::remove_dir_all(artifacts.join("refs/dev.peios.hello-doc")).unwrap();
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), printed);
+    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    let id = format!("{HELLO}?arch={}", ppk::HOST_ARCH);
+    assert!(
+        stderr(&output).contains(&format!("pekit: {id} is already packed\n")),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn release_keeps_a_tag_an_earlier_commit_made_the_same_package_at() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());
@@ -558,6 +611,117 @@ fn release_refuses_a_version_git_cannot_tag_before_building() {
     assert_eq!(
         stderr(&output),
         "pekit: dev.peios.hello@1.0~rc1-2 cannot be a Git tag's name\n"
+    );
+    assert_eq!(builds(dir.path()), "");
+}
+
+/// [`recipe`], with its source the tree at `local_path` rather than a
+/// download.
+fn local_recipe(local_path: &str, dir: &Path) -> String {
+    let fetched = recipe("URL", "SHA", FILES, dir);
+    let local = fetched.replace(
+        "    url = \"URL\"\n    sha256 = \"SHA\"\n",
+        &format!("    local_path = \"{local_path}\"\n"),
+    );
+    assert_ne!(local, fetched);
+    local
+}
+
+/// The paths the manifest of `identity` in `artifacts` lists.
+fn manifest_files(artifacts: &Path, identity: &str) -> Vec<String> {
+    let hex = identity.trim().strip_prefix("sha256:").unwrap();
+    let manifest = fs::read_to_string(artifacts.join("manifests/sha256").join(hex)).unwrap();
+    manifest
+        .lines()
+        .skip_while(|line| *line != "[files]")
+        .skip(1)
+        .map(|line| {
+            line.split(" = ")
+                .next()
+                .unwrap()
+                .trim_matches('"')
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn package_builds_a_local_git_checkout_as_it_is_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    fs::write(tree.join(".gitignore"), "*.log\n").unwrap();
+    touch(&tree.join(".gitignore"), "@1700000000");
+    git(&tree, &["init", "-q"]);
+    commit(&tree);
+    // Untracked, ignored, and deleted but not committed.
+    fs::write(tree.join("share/doc/NEW"), "new\n").unwrap();
+    touch(&tree.join("share/doc/NEW"), "@1700000200");
+    fs::write(tree.join("share/doc/debug.log"), "log\n").unwrap();
+    touch(&tree.join("share/doc/debug.log"), "@1800000000");
+    fs::remove_file(tree.join("extra")).unwrap();
+
+    let root = workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        manifest_files(&artifacts, &printed_identity(&output, HELLO)),
+        [
+            "bin/hello",
+            "bin/hi",
+            "lib/hello/arch",
+            "share/doc/NEW",
+            "share/doc/README",
+        ]
+    );
+    // The time of the newest file copied, which the ignored file is not.
+    assert_eq!(builds(dir.path()), "1700000200\n");
+}
+
+#[test]
+fn package_copies_a_local_tree_outside_git_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    fs::write(tree.join("share/doc/debug.log"), "log\n").unwrap();
+    touch(&tree.join("share/doc/debug.log"), "@1700000300");
+
+    let root = workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit(&root, dir.path(), &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let files = manifest_files(&artifacts, &printed_identity(&output, HELLO));
+    assert!(
+        files.contains(&"share/doc/debug.log".to_owned()),
+        "{files:?}"
+    );
+    assert_eq!(builds(dir.path()), "1700000300\n");
+}
+
+#[test]
+fn release_refuses_a_local_source_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let (root, _) = committed_workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "pekit: dev.peios.hello: its source, hello-tarball, is a local path, which a tag \
+         cannot pin; release it from a fetched source\n"
     );
     assert_eq!(builds(dir.path()), "");
 }
