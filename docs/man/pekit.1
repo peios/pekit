@@ -7,6 +7,7 @@ pekit \- build Peios packages from GCSL recipes
 .br
 .B pekit package
 .RB [ \-\-rebuild ]
+.RB [ \-\-overwrite ]
 .RB [ \-\-workspace
 .IR dir ]
 .RB [ \-\-artifact\-dir
@@ -125,7 +126,9 @@ prints one line for each package, in the order given: its
 .IR name @ version
 and its identity.
 If a package's version is already packed for the host's architecture, it
-prints that identity and does not build the package again.
+prints that identity and does not build the package again, unless
+.B \-\-overwrite
+is given.
 Packages that share a build run it once.
 .IP
 Otherwise
@@ -245,6 +248,19 @@ run each build afresh, ignoring any install tree the cache keeps for it,
 from an empty work directory, and keep the tree it returns in place of the
 old one.
 A package whose version is already packed is still not built again.
+.TP
+.B \-\-overwrite
+For
+.BR package :
+build each package even if its version is already packed, and pack it in
+place of what is packed, saying so if it differs.
+Only the version's ref changes: the manifest and blobs it named stay in
+the artifact directory.
+A packed version is meant never to change, so this is for development,
+such as packing a package built from a local source after a change, into
+an artifact directory nothing else relies on.
+It can be combined with
+.BR \-\-rebuild .
 .TP
 .BI \-\-recipe " dir"
 For

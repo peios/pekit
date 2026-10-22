@@ -777,6 +777,48 @@ fn package_into(root: &Path, dir: &Path, artifacts: &str, extra: &[&str]) -> Str
 const UNCHANGED: &str = "pekit: hello is unchanged since it was last built\n";
 
 #[test]
+fn package_overwrite_replaces_a_packed_version() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    let root = workspace(dir.path(), &local_recipe("../hello-1.0", dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let packed = || {
+        fs::read_to_string(
+            artifacts
+                .join("refs/dev.peios.hello/1.0-2")
+                .join(ppk::HOST_ARCH),
+        )
+        .unwrap()
+    };
+    package_into(&root, dir.path(), "artifacts", &[]);
+    let first = packed();
+
+    // Changed, but packed already: not built.
+    fs::write(tree.join("share/doc/README"), "read me again\n").unwrap();
+    let id = format!("{HELLO}?arch={}", ppk::HOST_ARCH);
+    let printed = package_into(&root, dir.path(), "artifacts", &[]);
+    assert_eq!(printed, format!("pekit: {id} is already packed\n"));
+    assert_eq!(packed(), first);
+
+    let printed = package_into(&root, dir.path(), "artifacts", &["--overwrite"]);
+    let second = packed();
+    assert_ne!(second, first);
+    assert_eq!(
+        printed,
+        format!(
+            "pekit: building hello\npekit: {id} was packed as {}; replaced it\n",
+            first.trim()
+        )
+    );
+
+    // Unchanged, it is packed from the cache, and the same.
+    let printed = package_into(&root, dir.path(), "artifacts", &["--overwrite"]);
+    assert_eq!(printed, UNCHANGED);
+    assert_eq!(packed(), second);
+}
+
+#[test]
 fn package_reuses_a_cached_build_until_its_recipe_changes() {
     let dir = tempfile::tempdir().unwrap();
     let (url, sha256) = tarball(dir.path());

@@ -54,6 +54,11 @@ enum Command {
         /// directory first. Packed versions are still not built again
         #[arg(long)]
         rebuild: bool,
+        /// Build packages whose versions are packed already too, and pack
+        /// each in place of what is packed. For development only: a
+        /// packed version is meant never to change
+        #[arg(long)]
+        overwrite: bool,
         #[command(flatten)]
         dirs: Dirs,
     },
@@ -112,9 +117,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Package {
             names,
             rebuild,
+            overwrite,
             dirs,
         } => {
-            for (package, identity) in package(names, rebuild, dirs)? {
+            for (package, identity) in package(names, rebuild, overwrite, dirs)? {
                 println!("{package} {identity}");
             }
             Ok(())
@@ -186,41 +192,59 @@ fn open(dirs: Dirs) -> Result<Opened> {
 
 /// Builds packages `names` and packs them, returning each one's
 /// `name@version` and identity. A package whose version is packed already
-/// is not built again, and packages that share a build run it once. Builds
-/// use the cache, afresh if `rebuild`.
-fn package(names: Vec<String>, rebuild: bool, dirs: Dirs) -> Result<Vec<(String, String)>> {
+/// is not built again, unless `overwrite`, which packs it again in place of
+/// what is packed. Packages that share a build run it once. Builds use the
+/// cache, afresh if `rebuild`.
+fn package(
+    names: Vec<String>,
+    rebuild: bool,
+    overwrite: bool,
+    dirs: Dirs,
+) -> Result<Vec<(String, String)>> {
     let mut opened = open(dirs)?;
-    // Each package, with its identity if it is packed already.
-    let mut wanted: Vec<(PackageId, Option<String>)> = Vec::new();
-    let mut unpacked = Vec::new();
+    // Each package, with its identity if it is packed already, and whether
+    // it is built.
+    let mut wanted: Vec<(PackageId, Option<String>, bool)> = Vec::new();
+    let mut to_build = Vec::new();
     for name in names {
-        if wanted.iter().any(|(id, _)| id.name() == name) {
+        if wanted.iter().any(|(id, _, _)| id.name() == name) {
             continue;
         }
         let package = opened.recipes.package(&name)?;
         // Checked before anything is built.
         let id = PackageId::new(&name, &package.version, ppk::HOST_ARCH)?;
         // A build is reproducible, so building a packed version again would
-        // make what is packed already.
-        let packed = ppk::packed(&id, &opened.artifact_dir)?;
-        match packed {
-            Some(_) => eprintln!("pekit: {id} is already packed"),
-            None => unpacked.push((id.clone(), package)),
+        // make what is packed already, unless its source has changed.
+        let packed = ppk::packed(&id, &opened.artifact_dir)?.map(|identity| identity.to_string());
+        let build = packed.is_none() || overwrite;
+        match build {
+            true => to_build.push((id.clone(), package)),
+            false => eprintln!("pekit: {id} is already packed"),
         }
-        wanted.push((id, packed.map(|identity| identity.to_string())));
+        wanted.push((id, packed, build));
     }
     let mut built = build_and_pack(
         &opened.root,
         &mut opened.recipes,
-        &unpacked,
+        &to_build,
         &opened.artifact_dir,
         Builds::Cached { rebuild },
+        overwrite,
     )?
     .into_iter();
     Ok(wanted
         .into_iter()
-        .map(|(id, packed)| {
-            let identity = packed.unwrap_or_else(|| built.next().expect("one for each built"));
+        .map(|(id, packed, build)| {
+            let identity = match (build, packed) {
+                (false, Some(packed)) => packed,
+                (_, packed) => {
+                    let identity = built.next().expect("one for each built");
+                    if let Some(packed) = packed.filter(|packed| *packed != identity) {
+                        eprintln!("pekit: {id} was packed as {packed}; replaced it");
+                    }
+                    identity
+                }
+            };
             (format!("{}@{}", id.name(), id.version()), identity)
         })
         .collect())
@@ -274,6 +298,7 @@ fn release(
         &packages,
         &opened.artifact_dir,
         Builds::Clean,
+        false,
     )?;
 
     let mut released = Vec::new();
@@ -308,13 +333,15 @@ enum Builds {
 
 /// Builds `packages` from the workspace at `root` and packs each into
 /// `artifact_dir`, returning their identities in the same order. Packages
-/// that share a build run it once.
+/// that share a build run it once. If `replace`, each replaces what is
+/// packed as its version already.
 fn build_and_pack(
     root: &Path,
     recipes: &mut Recipes,
     packages: &[(PackageId, PackageRecipe)],
     artifact_dir: &Path,
     builds_as: Builds,
+    replace: bool,
 ) -> Result<Vec<String>> {
     let mut builds: Vec<&str> = Vec::new();
     for (_, package) in packages {
@@ -356,7 +383,11 @@ fn build_and_pack(
                 .tempdir_in(&work_dir)
                 .with_context(|| work_dir.display().to_string())?;
             stage::stage(&package.files, &tree, staged.path())?;
-            identities[at] = Some(ppk::pack(id, staged.path(), artifact_dir)?.identity);
+            let packed = match replace {
+                true => ppk::pack_replacing(id, staged.path(), artifact_dir)?,
+                false => ppk::pack(id, staged.path(), artifact_dir)?,
+            };
+            identities[at] = Some(packed.identity);
         }
     }
     Ok(identities
