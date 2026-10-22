@@ -86,6 +86,27 @@ fn builds(dir: &Path) -> String {
     fs::read_to_string(dir.join("builds")).unwrap_or_default()
 }
 
+/// The builds whose work directories the cache in `dir` keeps, failing if
+/// anything else is left in its work directory or there is more than one
+/// workspace's.
+fn work_dirs(dir: &Path) -> Vec<String> {
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let work = dir.join("peios/pekit/work");
+    let workspaces = names(&work);
+    match workspaces.as_slice() {
+        [] => Vec::new(),
+        [workspace] => names(&work.join(workspace)),
+        _ => panic!("{workspaces:?}"),
+    }
+}
+
 /// A recipe for `dev.peios.hello` from the source at `url`, whose files are
 /// `files`, whose build logs to `dir`.
 fn recipe(url: &str, sha256: &str, files: &str, dir: &Path) -> String {
@@ -206,15 +227,15 @@ fn package_builds_the_recipe_and_packs_the_files_it_chooses() {
     );
     assert!(manifest.contains("exec = true"), "{manifest}");
 
-    // The source is kept by its hash; the build's work is not kept.
+    // The source is kept by its hash, and the build's work directory, under
+    // the workspace's, for its next run; nothing else is left in work.
     assert!(
         dir.path()
             .join("peios/pekit/sources/sha256")
             .join(&sha256)
             .is_file()
     );
-    let work = fs::read_dir(dir.path().join("peios/pekit/work")).unwrap();
-    assert_eq!(work.count(), 0);
+    assert_eq!(work_dirs(dir.path()), ["hello"]);
     // The build ran once, with its time the source's newest.
     assert_eq!(builds(dir.path()), "1700000100\n");
 
@@ -506,12 +527,13 @@ fn package_builds_several_packages_sharing_one_build_once() {
     assert_eq!(packages, ["dev.peios.hello-doc@1.0-2", HELLO]);
     assert_eq!(builds(dir.path()), "1700000100\n");
 
-    // One packed already: only the other is built, but both are printed.
+    // One packed already: only the other is packed, from the cached build,
+    // but both are printed.
     fs::remove_dir_all(artifacts.join("refs/dev.peios.hello-doc")).unwrap();
     let output = pekit(&root, dir.path(), &args);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), printed);
-    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    assert_eq!(builds(dir.path()), "1700000100\n");
     let id = format!("{HELLO}?arch={}", ppk::HOST_ARCH);
     assert!(
         stderr(&output).contains(&format!("pekit: {id} is already packed\n")),
@@ -737,4 +759,143 @@ fn package_names_a_package_no_recipe_defines() {
         stderr(&output),
         "pekit: no recipe defines package dev.peios.nope\n"
     );
+}
+
+/// Runs `pekit package dev.peios.hello`, with `extra` arguments, storing it
+/// in `dir/<artifacts>`, asserts that it succeeds, and returns what it
+/// printed on standard error.
+fn package_into(root: &Path, dir: &Path, artifacts: &str, extra: &[&str]) -> String {
+    let artifacts = dir.join(artifacts);
+    let mut args = vec!["package", "dev.peios.hello", "--artifact-dir"];
+    args.push(path(&artifacts));
+    args.extend(extra);
+    let output = pekit(root, dir, &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    stderr(&output)
+}
+
+const UNCHANGED: &str = "pekit: hello is unchanged since it was last built\n";
+
+#[test]
+fn package_reuses_a_cached_build_until_its_recipe_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let root = workspace(dir.path(), &recipe);
+    package_into(&root, dir.path(), "a", &[]);
+    assert_eq!(builds(dir.path()), "1700000100\n");
+
+    // Not packed there, but the build is kept.
+    let printed = package_into(&root, dir.path(), "b", &[]);
+    assert_eq!(printed, UNCHANGED);
+    assert_eq!(builds(dir.path()), "1700000100\n");
+    let manifests = |artifacts: &str| {
+        let dir = dir.path().join(artifacts).join("manifests/sha256");
+        fs::read_dir(dir).unwrap().count()
+    };
+    assert_eq!(manifests("b"), 1);
+
+    // --rebuild runs the build, making the same package.
+    package_into(&root, dir.path(), "c", &["--rebuild"]);
+    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    assert_eq!(
+        fs::read_dir(dir.path().join("c/manifests/sha256"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name(),
+        fs::read_dir(dir.path().join("a/manifests/sha256"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+    );
+
+    // Any change to the recipe's file can change what the build does.
+    let changed = recipe.clone() + "# A comment.\n";
+    fs::write(root.join("dev.peios.hello/pekit.gcsl"), changed).unwrap();
+    let printed = package_into(&root, dir.path(), "d", &[]);
+    assert_eq!(printed, "pekit: building hello\n");
+    assert_eq!(builds(dir.path()).lines().count(), 3);
+    assert_eq!(work_dirs(dir.path()), ["hello"]);
+}
+
+#[test]
+fn release_builds_afresh_whatever_the_cache_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, sha256) = tarball(dir.path());
+    let recipe = recipe(&url, &sha256, FILES, dir.path());
+    let (root, _) = committed_workspace(dir.path(), &recipe);
+    package_into(&root, dir.path(), "cached", &[]);
+    let output = release(&root, dir.path(), &["dev.peios.hello"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(builds(dir.path()), "1700000100\n1700000100\n");
+    // Its work directory is not kept.
+    assert_eq!(work_dirs(dir.path()), ["hello"]);
+}
+
+/// The copy of its source the work directory of the hello build keeps, in
+/// the cache in `dir`.
+fn kept_source(dir: &Path) -> std::path::PathBuf {
+    let work = dir.join("peios/pekit/work");
+    let workspace = fs::read_dir(&work).unwrap().next().unwrap().unwrap();
+    workspace
+        .path()
+        .join("hello")
+        .join(std::env::consts::ARCH)
+        .join("source")
+}
+
+#[test]
+fn package_syncs_a_local_source_into_the_kept_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    // The build adds a file to its copy of the source, and changes one.
+    let recipe = local_recipe("../hello-1.0", dir.path()).replace(
+        "    = out_path\n",
+        "    sh(\"echo made >> {source_path}/made\")\n    \
+         sh(\"echo changed >> {source_path}/share/doc/README\")\n    = out_path\n",
+    );
+    let root = workspace(dir.path(), &recipe);
+    package_into(&root, dir.path(), "a", &[]);
+    let copy = kept_source(dir.path());
+    let read = |path: &str| fs::read_to_string(copy.join(path)).unwrap();
+    let modified = |path: &str| fs::metadata(copy.join(path)).unwrap().modified().unwrap();
+    assert_eq!(read("made"), "made\n");
+    let hello = modified("bin/hello");
+
+    // A file deleted from the source is deleted from the copy, and one
+    // added is added. What the build made is kept, what it changed is put
+    // back before it runs, and what is unchanged is not rewritten.
+    fs::remove_file(tree.join("extra")).unwrap();
+    fs::write(tree.join("share/doc/NEW"), "new\n").unwrap();
+    touch(&tree.join("share/doc/NEW"), "@1700000200");
+    assert_eq!(
+        package_into(&root, dir.path(), "b", &[]),
+        "pekit: building hello\n"
+    );
+    assert!(!copy.join("extra").exists());
+    assert_eq!(read("share/doc/NEW"), "new\n");
+    assert_eq!(read("made"), "made\nmade\n");
+    assert_eq!(read("share/doc/README"), "read me\nchanged\n");
+    assert_eq!(modified("bin/hello"), hello);
+    assert_eq!(builds(dir.path()), "1700000100\n1700000200\n");
+
+    // A new time alone is a new SOURCE_DATE_EPOCH, so the build runs, but
+    // the copy, whose content is the same, is not rewritten.
+    touch(&tree.join("bin/hello"), "@1700000300");
+    assert_eq!(
+        package_into(&root, dir.path(), "c", &[]),
+        "pekit: building hello\n"
+    );
+    assert_eq!(modified("bin/hello"), hello);
+    assert_eq!(builds(dir.path()), "1700000100\n1700000200\n1700000300\n");
+
+    // Unchanged, it is cached. --rebuild starts the copy afresh.
+    assert_eq!(package_into(&root, dir.path(), "d", &[]), UNCHANGED);
+    package_into(&root, dir.path(), "e", &["--rebuild"]);
+    assert_eq!(read("made"), "made\n");
 }

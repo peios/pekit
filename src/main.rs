@@ -6,10 +6,12 @@
 //! tree and packs them with ppk. `pekit release` does the same from a
 //! committed workspace and tags the commit that made each package.
 
+mod cache;
 mod git;
 mod recipes;
 mod source;
 mod stage;
+mod sync;
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -21,7 +23,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ppk::PackageId;
 
-use crate::recipes::{INCLUDE, INCLUDE_FILE, PackageRecipe, Recipes, Source, WORKSPACE_FILE};
+use crate::cache::{KeyParts, WorkDir};
+use crate::recipes::{
+    BuildRecipe, INCLUDE, INCLUDE_FILE, PackageRecipe, Recipes, Source, WORKSPACE_FILE,
+};
+use crate::sync::Tree;
 
 /// Build Peios packages from GCSL recipes
 #[derive(Parser)]
@@ -44,6 +50,10 @@ enum Command {
         /// Packages to build, by name
         #[arg(value_name = "name", required = true)]
         names: Vec<String>,
+        /// Build afresh: ignore cached builds, and empty each build's work
+        /// directory first. Packed versions are still not built again
+        #[arg(long)]
+        rebuild: bool,
         #[command(flatten)]
         dirs: Dirs,
     },
@@ -99,8 +109,12 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { dir } => init(&dir.unwrap_or_else(|| PathBuf::from("."))),
-        Command::Package { names, dirs } => {
-            for (package, identity) in package(names, dirs)? {
+        Command::Package {
+            names,
+            rebuild,
+            dirs,
+        } => {
+            for (package, identity) in package(names, rebuild, dirs)? {
                 println!("{package} {identity}");
             }
             Ok(())
@@ -172,8 +186,9 @@ fn open(dirs: Dirs) -> Result<Opened> {
 
 /// Builds packages `names` and packs them, returning each one's
 /// `name@version` and identity. A package whose version is packed already
-/// is not built again, and packages that share a build run it once.
-fn package(names: Vec<String>, dirs: Dirs) -> Result<Vec<(String, String)>> {
+/// is not built again, and packages that share a build run it once. Builds
+/// use the cache, afresh if `rebuild`.
+fn package(names: Vec<String>, rebuild: bool, dirs: Dirs) -> Result<Vec<(String, String)>> {
     let mut opened = open(dirs)?;
     // Each package, with its identity if it is packed already.
     let mut wanted: Vec<(PackageId, Option<String>)> = Vec::new();
@@ -199,6 +214,7 @@ fn package(names: Vec<String>, dirs: Dirs) -> Result<Vec<(String, String)>> {
         &mut opened.recipes,
         &unpacked,
         &opened.artifact_dir,
+        Builds::Cached { rebuild },
     )?
     .into_iter();
     Ok(wanted
@@ -215,9 +231,10 @@ fn package(names: Vec<String>, dirs: Dirs) -> Result<Vec<(String, String)>> {
 /// tags `HEAD` for each package not tagged already. Returns each package's
 /// tag and identity.
 ///
-/// Every package is built, packed or not: ppk accepts a package only if it
-/// matches what is packed already, so a release proves that `HEAD` makes
-/// what was packed before. A tag is only ever added. One already made at an
+/// Every package is built, packed or not, and afresh, without the cache:
+/// ppk accepts a package only if it matches what is packed already, so a
+/// release proves that `HEAD` makes what was packed before, from its source
+/// alone. A tag is only ever added. One already made at an
 /// earlier commit is kept, as the first commit that made its package.
 fn release(
     names: Vec<String>,
@@ -256,6 +273,7 @@ fn release(
         &mut opened.recipes,
         &packages,
         &opened.artifact_dir,
+        Builds::Clean,
     )?;
 
     let mut released = Vec::new();
@@ -276,6 +294,18 @@ fn release(
     Ok(released)
 }
 
+/// How builds are run.
+#[derive(Clone, Copy)]
+enum Builds {
+    /// With the cache: a build whose key has a kept install tree does not
+    /// run, and one that runs uses its kept work directory. If `rebuild`,
+    /// the build runs, from an empty work directory, and its tree replaces
+    /// any kept.
+    Cached { rebuild: bool },
+    /// Afresh, in a new work directory, keeping nothing.
+    Clean,
+}
+
 /// Builds `packages` from the workspace at `root` and packs each into
 /// `artifact_dir`, returning their identities in the same order. Packages
 /// that share a build run it once.
@@ -284,6 +314,7 @@ fn build_and_pack(
     recipes: &mut Recipes,
     packages: &[(PackageId, PackageRecipe)],
     artifact_dir: &Path,
+    builds_as: Builds,
 ) -> Result<Vec<String>> {
     let mut builds: Vec<&str> = Vec::new();
     for (_, package) in packages {
@@ -308,51 +339,115 @@ fn build_and_pack(
     let cache = cache_dir()?;
     let mut identities = vec![None; packages.len()];
     for (build, recipe) in builds.iter().zip(&build_recipes) {
-        let work_dir = cache.join("work");
-        fs::create_dir_all(&work_dir).with_context(|| work_dir.display().to_string())?;
-        let work = tempfile::Builder::new()
-            .prefix("build-")
-            .tempdir_in(&work_dir)
-            .with_context(|| work_dir.display().to_string())?;
-        let unpacked = work.path().join("source");
-        // Tools that stamp a time into what they make use the source's
-        // newest instead of the clock, so that building the same source
-        // gives the same package.
-        let (source_path, epoch) = match &recipe.source {
-            Source::Fetched { url, sha256 } => {
-                let archive = source::fetch(url, sha256, &cache)?;
-                let source_path = source::unpack(&archive, &unpacked)?;
-                (source_path, source::newest_mtime(&unpacked)?)
+        let work = match builds_as {
+            Builds::Cached { rebuild } => {
+                WorkDir::kept(&cache, root, build, ppk::HOST_ARCH, rebuild)?
             }
-            Source::Local { path } => {
-                let epoch = source::copy_local(&root.join(path), &unpacked)?;
-                (unpacked, epoch)
-            }
+            Builds::Clean => WorkDir::new(&cache)?,
         };
-        let out_path = work.path().join("out");
-        fs::create_dir(&out_path).with_context(|| out_path.display().to_string())?;
-
-        // SAFETY: nothing reads the environment concurrently. The main
-        // thread is waiting for this one, and the threads GCSL starts to
-        // copy a command's output end before the command's call returns.
-        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", epoch.to_string()) };
-
-        eprintln!("pekit: building {build}");
-        let tree = recipes.run_build(build, &source_path, &out_path, ppk::HOST_ARCH)?;
+        let tree = build_tree(root, recipes, build, recipe, &work, &cache, builds_as)?;
         for (at, (id, package)) in packages.iter().enumerate() {
             if package.build != *build {
                 continue;
             }
-            let staged = work.path().join(format!("stage-{at}"));
-            fs::create_dir(&staged).with_context(|| staged.display().to_string())?;
-            stage::stage(&package.files, &tree, &staged)?;
-            identities[at] = Some(ppk::pack(id, &staged, artifact_dir)?.identity);
+            let work_dir = cache.join("work");
+            let staged = tempfile::Builder::new()
+                .prefix("stage-")
+                .tempdir_in(&work_dir)
+                .with_context(|| work_dir.display().to_string())?;
+            stage::stage(&package.files, &tree, staged.path())?;
+            identities[at] = Some(ppk::pack(id, staged.path(), artifact_dir)?.identity);
         }
     }
     Ok(identities
         .into_iter()
         .map(|identity| identity.expect("every package's build has run"))
         .collect())
+}
+
+/// The install tree build `build`, whose recipe is `recipe`, gives, running
+/// it in `work` unless the cache keeps its tree.
+fn build_tree(
+    root: &Path,
+    recipes: &mut Recipes,
+    build: &str,
+    recipe: &BuildRecipe,
+    work: &WorkDir,
+    cache: &Path,
+    builds_as: Builds,
+) -> Result<PathBuf> {
+    let previous = work.record()?;
+    // A local source is read before anything else, since its content is
+    // part of the key; a fetched one's SHA-256 says what it is already.
+    let local = match &recipe.source {
+        Source::Local { path } => {
+            let dir = root.join(path);
+            let files = source::local_files(&dir)?;
+            Some(Tree::scan(
+                &dir,
+                files,
+                &format!("local {path}"),
+                &previous,
+            )?)
+        }
+        Source::Fetched { .. } => None,
+    };
+    let key = match builds_as {
+        Builds::Cached { rebuild } => {
+            let source = match (&recipe.source, &local) {
+                (Source::Fetched { sha256, .. }, _) => format!("fetched {sha256}"),
+                (_, Some(tree)) => format!("local {} {}", tree.digest(), tree.newest()),
+                (Source::Local { .. }, None) => unreachable!("a local source is read"),
+            };
+            let key = cache::key(&KeyParts {
+                build,
+                arch: ppk::HOST_ARCH,
+                recipe: &recipes.build_files(build)?,
+                source: &source,
+            });
+            if !rebuild && let Some(tree) = cache::kept(cache, &key) {
+                eprintln!("pekit: {build} is unchanged since it was last built");
+                return Ok(tree);
+            }
+            Some(key)
+        }
+        Builds::Clean => None,
+    };
+
+    // Tools that stamp a time into what they make use the source's newest
+    // instead of the clock, so that building the same source gives the same
+    // package.
+    let (tree, epoch) = match (&recipe.source, local) {
+        (Source::Fetched { url, sha256 }, _) => {
+            let archive = source::fetch(url, sha256, cache)?;
+            let unpacked = work.unpacked()?;
+            let top = source::unpack(&archive, &unpacked)?;
+            let files = source::files(&top)?;
+            let tree = Tree::scan(&top, files, &format!("fetched {sha256}"), &previous)?;
+            (tree, source::newest_mtime(&unpacked)?)
+        }
+        (_, Some(tree)) => {
+            let epoch = tree.newest();
+            (tree, epoch)
+        }
+        (Source::Local { .. }, None) => unreachable!("a local source is read"),
+    };
+    let source_path = work.source();
+    let synced = tree.sync(&source_path, &previous)?;
+    work.write_record(&synced)?;
+    let out_path = work.out()?;
+
+    // SAFETY: nothing reads the environment concurrently. The main thread is
+    // waiting for this one, and the threads GCSL starts to copy a command's
+    // output end before the command's call returns.
+    unsafe { std::env::set_var("SOURCE_DATE_EPOCH", epoch.to_string()) };
+
+    eprintln!("pekit: building {build}");
+    let tree = recipes.run_build(build, &source_path, &out_path, ppk::HOST_ARCH)?;
+    match key {
+        Some(key) => cache::keep(cache, &key, &tree, work),
+        None => Ok(tree),
+    }
 }
 
 /// pekit's cache: `$XDG_CACHE_HOME/peios/pekit`, or `~/.cache/peios/pekit`.

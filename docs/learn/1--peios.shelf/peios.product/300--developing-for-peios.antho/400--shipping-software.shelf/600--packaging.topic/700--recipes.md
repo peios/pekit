@@ -86,10 +86,10 @@ def source ppk-checkout() {
 }
 ```
 
-pekit copies the tree for each build, so a build never changes it. In a
-Git work tree, it copies the files Git would commit, as they are on disk:
-uncommitted changes are built, and files that Git ignores, such as
-earlier build output, are not. Anywhere else it copies everything. Nothing
+A build works on a copy of the tree, so it never changes the tree itself.
+In a Git work tree, the copy holds the files Git would commit, as they are
+on disk: uncommitted changes are built, and files that Git ignores, such
+as earlier build output, are not. Anywhere else it holds everything. Nothing
 pins what a local tree holds, so packages built from one cannot be
 released.
 
@@ -97,7 +97,7 @@ A **build** turns the unpacked source into an install tree laid out as
 `/usr`. A `defmeta` gives its metadata: the source it builds and the
 packages it needs. pekit calls it with three arguments:
 
-- `source_path`: the unpacked source.
+- `source_path`: the build's copy of the source.
 - `out_path`: an empty directory to install into.
 - `arch`: the architecture it builds for.
 
@@ -151,6 +151,33 @@ package's version is already packed, pekit does not build it again.
 pekit 0.1.0 runs builds on the host, with the host's tools, and refuses
 recipes that give build or runtime `dependencies`.
 
+## Cached builds
+
+`pekit package` keeps what builds make, so that a build runs only when
+something it depends on has changed, and then redoes as little as it can.
+
+pekit keeps the install tree each build returns, under a key made of
+everything pekit gives the build: the recipe file the build is in and the
+files it imports, the source's content and `SOURCE_DATE_EPOCH`, the
+architecture, and pekit's version. When a package is built and its build's
+key has a tree kept, pekit packs the package from that tree without running
+the build. The key can't see what a build uses from the host, such as its
+compiler. If that changes, `pekit package --rebuild` runs the build again.
+
+Each build also has a work directory that pekit keeps between runs. It
+holds the build's copy of its source, which pekit syncs before each run.
+A file is rewritten only if its content or execute bit changed, or the
+build itself changed it, so every other file keeps its modification time.
+A file is deleted only if it was deleted from the source. Whatever a build
+makes in its copy of the source, or beside it, stays for the next run, so
+a build tool that redoes only what changed, such as `make`, does little
+work after a small change. `--rebuild` empties the work directory first.
+
+A local source's `SOURCE_DATE_EPOCH` is the time of its newest file, so
+touching a file, as switching Git branches does, changes the key even if
+the content is the same. The build then runs again, but in its kept work
+directory, where the content hasn't changed, so it has little to redo.
+
 ## Releases
 
 A recipe workspace is kept in Git, and Git holds only the recipes. The
@@ -165,8 +192,10 @@ commit that made any package's version can be found from the package
 alone, whichever recipe defines it.
 
 A release builds every package, even one already packed, and packing
-accepts it only if it is identical to what is packed. Releasing a version
-again therefore proves that the current commit still makes it. If the
+accepts it only if it is identical to what is packed. A release doesn't
+use cached builds: each build runs from nothing in a new work directory.
+Releasing a version again therefore proves that the current commit still
+makes it from its source alone. If the
 recipe has changed in a way that changes a package, the release fails
 until its `revision` is raised. Tags are only added: when a later commit
 makes the same package, the tag stays at the first commit that made it.

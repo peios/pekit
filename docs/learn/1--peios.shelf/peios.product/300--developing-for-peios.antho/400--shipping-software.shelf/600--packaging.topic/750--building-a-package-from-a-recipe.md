@@ -59,8 +59,10 @@ which overrides the workspace's setting.
 
 pekit fetches the build's source, unless its cache holds it already, and
 checks its SHA-256. It unpacks the source, runs the build, copies the
-files the package chooses, and packs them. It prints the package's name
-and version, then its identity:
+files the package chooses, and packs them. If the build ran before and
+nothing it depends on has changed, pekit uses the install tree it kept
+instead of running the build. It prints the package's name and version,
+then its identity:
 
 ```text
 net.busybox.busybox@1.37.0-1 sha256:5181c2230d80666129f50cb472da3f38be40b3566a3d4638fea915f9dea25d83
@@ -71,6 +73,10 @@ and packages that share a build run it once.
 
 To build from a workspace you are not in, pass `--workspace` with its
 directory.
+
+If the host's build tools have changed, pass `--rebuild` to run each build
+again from nothing. For how pekit decides when a build must run, see
+[Cached builds](~peios/packaging/recipes#cached-builds).
 
 ## Check the result
 
