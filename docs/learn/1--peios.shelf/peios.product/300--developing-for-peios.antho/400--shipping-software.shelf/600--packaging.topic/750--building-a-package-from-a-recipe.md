@@ -95,6 +95,19 @@ without building anything, and says so:
 pekit: net.busybox.busybox@1.37.0-1?arch=x86_64 is already packed
 ```
 
+A package built from a local source keeps its version when the source
+changes, so `pekit package` won't build it again. While you're developing
+it, pass `--overwrite` to build it anyway and pack it in place of the
+packed version:
+
+```sh
+pekit package dev.peios.ppk --overwrite
+```
+
+A packed version is meant never to change, so overwrite only in an
+artifact directory that nothing else relies on. To make a change that
+others will install, raise the recipe's `revision` instead.
+
 ## Release packages
 
 When a recipe change is ready to ship, release its packages from a
