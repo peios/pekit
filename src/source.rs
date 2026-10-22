@@ -1,5 +1,5 @@
-//! Fetching, checking and unpacking a build's source, or copying a local
-//! one.
+//! Fetching, checking and unpacking a build's source, and listing the files
+//! of a source tree.
 //!
 //! Downloads are kept by their SHA-256 in the cache, so a source is fetched
 //! once however many builds use it. curl, tar and git do the work for now;
@@ -9,13 +9,14 @@ use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+
+use crate::sync::hex;
 
 /// The path of the archive at `url` in the cache at `cache`, downloading it
 /// first unless it is there already. Either way its SHA-256 is `sha256`.
@@ -97,64 +98,51 @@ pub fn newest_mtime(dir: &Path) -> Result<u64> {
     Ok(newest)
 }
 
-/// Copies the source tree at `dir` into `into`, a directory it creates, and
-/// returns the newest modification time of what it copies, in seconds since
-/// the epoch, as [`newest_mtime`] gives an unpacked source's.
+/// The files and symlinks of the unpacked source at `dir`, relative to it.
+pub fn files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    walk(dir, Path::new(""), &mut files)?;
+    Ok(files)
+}
+
+/// The files and symlinks of the local source tree at `dir` that a build
+/// is given, relative to it.
 ///
-/// In a Git work tree, it copies the files Git would commit: those tracked
+/// In a Git work tree, they are the files Git would commit: those tracked
 /// and those untracked but not ignored, as they are on disk. Uncommitted
 /// changes are built, and what Git ignores, such as earlier build output,
-/// is left behind. Anywhere else it copies everything.
-pub fn copy_local(dir: &Path, into: &Path) -> Result<u64> {
+/// is left behind. A Git submodule, a work tree of its own, is read the
+/// same way. Anywhere else, they are every file.
+pub fn local_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let meta = fs::metadata(dir).with_context(|| dir.display().to_string())?;
     if !meta.is_dir() {
         bail!("{}: not a directory", dir.display());
     }
-    fs::create_dir(into).with_context(|| into.display().to_string())?;
-    let mut newest = 0;
-    for relative in local_files(dir)? {
-        let from = dir.join(&relative);
-        let meta = match fs::symlink_metadata(&from) {
-            Ok(meta) => meta,
-            // Tracked, but deleted and not yet committed.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error).with_context(|| from.display().to_string()),
-        };
-        let to = into.join(&relative);
-        if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent).with_context(|| parent.display().to_string())?;
+    let mut files = Vec::new();
+    for relative in git_files(dir)? {
+        let path = dir.join(&relative);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => files.extend(
+                local_files(&path)?
+                    .into_iter()
+                    .map(|inner| relative.join(inner)),
+            ),
+            _ => files.push(relative),
         }
-        let kind = meta.file_type();
-        if kind.is_symlink() {
-            let target = fs::read_link(&from).with_context(|| from.display().to_string())?;
-            symlink(&target, &to).with_context(|| to.display().to_string())?;
-        } else if kind.is_file() {
-            // Permissions are copied too, which keeps the execute bit.
-            fs::copy(&from, &to)
-                .with_context(|| format!("{} to {}", from.display(), to.display()))?;
-        } else if kind.is_dir() {
-            // A Git submodule, which is a work tree of its own.
-            newest = newest.max(copy_local(&from, &to)?);
-            continue;
-        } else {
-            bail!("{}: not a file, directory or symlink", from.display());
-        }
-        newest = newest.max(mtime(&meta, &from)?);
     }
-    Ok(newest)
+    Ok(files)
 }
 
-/// The paths, relative to `dir`, that [`copy_local`] copies.
-fn local_files(dir: &Path) -> Result<Vec<PathBuf>> {
+/// The paths, relative to `dir`, Git would commit, or every file and
+/// symlink outside a Git work tree.
+fn git_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let inside = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output();
     if !inside.is_ok_and(|output| output.status.success() && output.stdout == b"true\n") {
-        let mut files = Vec::new();
-        walk(dir, Path::new(""), &mut files)?;
-        return Ok(files);
+        return files(dir);
     }
     let output = Command::new("git")
         .arg("-C")
@@ -213,13 +201,9 @@ fn mtime(meta: &Metadata, path: &Path) -> Result<u64> {
 }
 
 /// The SHA-256 of the file at `path`, in lower-case hex.
-fn hash_file(path: &Path) -> Result<String> {
+pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| path.display().to_string())?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).with_context(|| path.display().to_string())?;
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(hex(&hasher.finalize()))
 }

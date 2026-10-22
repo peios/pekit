@@ -219,6 +219,31 @@ impl Recipes {
         })
     }
 
+    /// Each file build `name` needs to run, by its path in the workspace or
+    /// standard library, with its text: every file whose change could change
+    /// what the build does.
+    pub fn build_files(&self, name: &str) -> Result<Vec<(String, String)>> {
+        let file = self.definition_file("build", name)?;
+        let scan = self.workspace.scan();
+        scan.needed(file)
+            .into_iter()
+            .map(|needed| {
+                let path = scan
+                    .files
+                    .get(needed as usize)
+                    .map(|file| file.path.clone());
+                let text = self
+                    .sources
+                    .get(needed as usize)
+                    .map(|source| source.text());
+                match (path, text) {
+                    (Some(path), Some(text)) => Ok((path, text.to_owned())),
+                    _ => bail!("internal error: no file {needed} in the workspace"),
+                }
+            })
+            .collect()
+    }
+
     /// Runs build `name` with `source_path` unpacked and `out_path` empty,
     /// for `arch`, and returns the install tree it gives.
     pub fn run_build(

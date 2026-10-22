@@ -63,7 +63,7 @@ fn segments(path: &str) -> Result<Vec<&str>> {
 
 /// Copies the file, symlink or directory at `from` to `to`, which must not
 /// exist unless both are directories.
-fn copy(from: &Path, to: &Path) -> Result<()> {
+pub fn copy(from: &Path, to: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(from)
         .with_context(|| format!("{}: not in the install tree", from.display()))?;
     if let Some(parent) = to.parent() {

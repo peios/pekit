@@ -1,4 +1,4 @@
-.TH PEKIT 1 2026-10-21 "Peios pekit 0.1.0"
+.TH PEKIT 1 2026-10-22 "Peios pekit 0.1.0"
 .SH NAME
 pekit \- build Peios packages from GCSL recipes
 .SH SYNOPSIS
@@ -6,6 +6,7 @@ pekit \- build Peios packages from GCSL recipes
 .RI [ dir ]
 .br
 .B pekit package
+.RB [ \-\-rebuild ]
 .RB [ \-\-workspace
 .IR dir ]
 .RB [ \-\-artifact\-dir
@@ -65,9 +66,9 @@ of what it serves, or a
 .B local_path
 to a source tree on this machine, relative to the workspace's root unless
 absolute.
-pekit copies a local tree for each build: in a Git work tree, the files Git
-would commit, as they are on disk, so that uncommitted changes are built
-and ignored files such as build output are not; anywhere else, all of it.
+A build is given a copy of a local tree: in a Git work tree, of the files
+Git would commit, as they are on disk, so that uncommitted changes are built
+and ignored files such as build output are not; anywhere else, of all of it.
 .TP
 .B build
 The steps that make an install tree, laid out as
@@ -130,19 +131,44 @@ Packages that share a build run it once.
 Otherwise
 .B pekit package
 creates the artifact directory if it is missing and checks that it can
-write there, then fetches the source of the package's build into its cache and checks its
-SHA-256, unless the cache holds it already, then unpacks it into a work
-directory and runs the build with the unpacked source as
+write there, then gets the install tree of the package's build, from its
+cache or by running the build.
+It copies the files the package chooses from the install tree and packs
+them as
+.IR name @ version ,
+for the host's architecture.
+.IP
+The cache keeps each install tree a build returns under a key made of
+everything pekit gives the build: the files of the recipe the build is in
+and those it imports, the source's content, its
+.BR SOURCE_DATE_EPOCH ,
+the architecture, and pekit's version.
+A build whose key has a tree kept does not run.
+The key cannot see what the build uses from the host, such as its
+compiler; when that changes, use
+.BR \-\-rebuild .
+.IP
+To run a build,
+.B pekit package
+fetches the source into its cache and checks its SHA-256, unless the cache
+holds it already, and unpacks it; a local source is read where it is.
+Each build has a work directory that is kept between runs.
+It holds the build's copy of its source, which is synced from the source
+before each run: a file is rewritten only if its content or execute bit
+changed, or the build changed it, so every other file keeps its
+modification time, and a file is deleted only if the last sync placed it
+and the source no longer has it.
+What a build makes in its copy, or beside the copy, is kept, so that a
+build that redoes only what changed, such as one run by
+.BR make (1),
+is quick after a small change.
+The build runs with its copy of the source as
 .BR source_path ,
-an empty directory as
+an empty directory in its work directory as
 .BR out_path ,
 and the host's architecture as
 .BR arch .
-It then copies the files the package chooses from the install tree the
-build returns and packs them as
-.IR name @ version ,
-for the host's architecture.
-The work directory is removed afterwards.
+A run of the build is locked against another run of the same build.
 .IP
 Each entry of
 .B files
@@ -192,6 +218,9 @@ builds only the host's.
 .IP
 Every package is built, even one already packed, and packed only if it
 matches what is packed already.
+Builds do not use the cache: each runs in a new work directory, which is
+removed afterwards, so what is released comes from the source and recipe
+alone.
 A release therefore succeeds again for a version already released, and
 fails if the recipe now makes something different without a new
 .BR revision .
@@ -208,6 +237,14 @@ On standard output,
 .B pekit release
 prints one line for each package: its tag and its identity.
 .SH OPTIONS
+.TP
+.B \-\-rebuild
+For
+.BR package :
+run each build afresh, ignoring any install tree the cache keeps for it,
+from an empty work directory, and keep the tree it returns in place of the
+old one.
+A package whose version is already packed is still not built again.
 .TP
 .BI \-\-recipe " dir"
 For
@@ -267,15 +304,39 @@ when it is unset or empty.
 Set by
 .B pekit package
 for the build, replacing any value it is given, to the modification time
-of the newest file in the unpacked source, so that tools that stamp a time
-into what they make give the same result each time.
+of the newest file in the source, so that tools that stamp a time into
+what they make give the same result each time.
+A local source's time changes when a file is touched, even if its content
+does not, and the build then runs again.
 .SH FILES
 .TP
 .IR $XDG_CACHE_HOME /peios/pekit/sources/sha256/ hash
 A fetched source, named by its SHA-256.
 .TP
-.IR $XDG_CACHE_HOME /peios/pekit/work/
-Work directories of builds in progress.
+.IR $XDG_CACHE_HOME /peios/pekit/builds/ key
+An install tree a build returned, by its key.
+.TP
+.IR $XDG_CACHE_HOME /peios/pekit/work/ workspace / build / arch /
+The work directory of
+.I build
+of a workspace, named by a hash of the workspace's path, for
+.IR arch .
+.I source
+is the build's copy of its source and
+.I out
+its
+.BR out_path ;
+files named
+.IR pekit\-* ,
+the record of the last sync among them, are pekit's.
+.TP
+.IR $XDG_CACHE_HOME /peios/pekit/work/build\- *
+A release's work directory, removed when the build is done.
+.PP
+Nothing in the cache is removed automatically.
+Removing any of it is safe when pekit is not running: a build whose tree
+is gone runs again, and a build whose work directory is gone runs from
+nothing.
 .SH EXAMPLES
 .TP
 .B pekit init
