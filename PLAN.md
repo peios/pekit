@@ -2,7 +2,7 @@
 
 This is the plan for implementing pekit2 and the GCSL changes it needs. The
 design is in `core-model.md` and `examples/`, and the decisions behind it are
-on Acta task PEI-1594.
+on Acta task PEI-1594, and implementation is tracked on PEI-1595.
 
 ## Priorities (Jack, 2026-10-24)
 
@@ -29,8 +29,8 @@ on Acta task PEI-1594.
 
 - **Repositories:**
   - pekit2 is a new repository, worked on directly on `main` (Jack).
-  - GCSL changes go on a branch, `feat/1594-pekit2`, in a worktree of `gcsl`
-    at `local/worktrees/gcsl-1594/`. It is made from the current `main`
+  - GCSL changes go on a branch, `feat/1595-pekit2`, in a worktree of `gcsl`
+    at `local/worktrees/gcsl-1595/`. It is made from the current `main`
     (`72edfde`, six commits ahead of `origin`).
   - Never push, never rebase, and never merge GCSL's branch into its `main`.
     Jack reviews and merges.
