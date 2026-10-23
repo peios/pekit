@@ -1,0 +1,32 @@
+# Example 1: one C file to one binary
+
+# GCSL will handle a .lock file so this isn't pekit's concern though of course we will need to build it in GCSL.
+import "github.com/gcslib/gcc"
+
+def build hello(){
+    let gcc_toolchain: FileSet = gcc.toolchain_from_archive(
+      fetch("https://.../x86-64-gcc-14.tar.xz", sha256 = "...")
+    ) # somehow toolchain_from_archive should have a way of telling pekit "i already have the hash of this for you, you don't need to do hash it yourself"
+  
+    = gcc.compile(file("hello.c"), output="hello", compiler=gcc_toolchain)
+    
+    # Compiler must be passed because the default assumes a PATH, which pekit won't provide to maintain hermeticity
+}
+
+## in github.com/gcslib/gcc
+
+#[hermetic]
+def compile(src: File, output: FilePath = "a.out", compiler: FileSet = gcc.toolchain_from_PATH()) -> File {
+    
+    let cc = compiler.file("cc")
+    cc.exec("-o", output, src.path)
+    
+    # Some kind of error handling, to be discussed
+    
+    = file(output)
+}
+
+# I'm least sure about how this does toolchains. The slight oddity of saying pekit dosen't do PATH and then imediately has toolchain_from_PATH is because gcslib is a generic GCSL library set, and GCSL definetely does have PATH. It's just pekit zeroes it out when it executes GCSL.
+
+# From the CLI: pekit build hello (this works for when you've just got a few builds in a directory. If you were instead running it in peios then you'd need to do pekit build pekit2/examples/1/hello. If you ran pekit build hello in peios/ it would just say there are multiple instances of build hello, list them out and explain that you have to type the path. There's an argument to have a canconical style like pkgs does with rDNS but pekit dosen't actually care that'd just be a standard. 
+# Programmatically: build hello()

@@ -1,0 +1,361 @@
+# # Example 6: one program, two architectures, one build
+#
+# This is example 3's program again, with the `embed` tool that turns
+# `data/message.txt` into C during the build. This time `app` is built for two
+# architectures at once: `x86_64` and `aarch64` (64-bit ARM). The build machine
+# is `x86_64`.
+#
+# The sources are copied from example 3.
+#
+# ## What must happen
+#
+# By hand, with a cross-compiler for ARM installed as `aarch64-linux-gnu-gcc`:
+#
+# ```sh
+# cc -o embed gen/embed.c                              # 1. the tool, for THIS machine
+# ./embed data/message.txt message out/                # 2. run it, once
+#
+# cc -c -Iout -o x86_64/main.o main.c                  # 3. app for x86_64
+# cc -c -o x86_64/message.o out/message.c
+# cc -o x86_64/app x86_64/main.o x86_64/message.o
+#
+# aarch64-linux-gnu-gcc -c -Iout -o aarch64/main.o main.c    # 4. app for aarch64
+# aarch64-linux-gnu-gcc -c -o aarch64/message.o out/message.c
+# aarch64-linux-gnu-gcc -o aarch64/app aarch64/main.o aarch64/message.o
+# ```
+#
+# These commands haven't been run, because this machine has no ARM
+# cross-compiler. Examples 1 to 5 were run.
+#
+# Points to notice:
+#
+# - **`embed` is built once, for `x86_64`, even though half the output is for
+#   ARM.** It runs on the build machine. An ARM `embed` couldn't run here at
+#   all.
+# - **Step 2 runs once.** Its output, C source, is the same for both
+#   architectures, so both builds share it.
+# - **Steps 3 and 4 are the same build with a different compiler.** Nothing in
+#   `main.c` or the build logic differs, only which toolchain is used.
+# - If the build machine were itself ARM, `embed` would be built with the ARM
+#   compiler, and nothing in the build file should need to change.
+#
+# ## The two problems this example is about
+#
+# **1. Choosing a toolchain without threading it everywhere.** Since example 1,
+# every compile has said `compiler = ...`. With two architectures, every target
+# would need to know which compiler to pass, and whoever calls it would have to
+# tell it. Example 2 already showed how easy one of those is to miss. Bazel's
+# answer is *toolchain resolution*: a target says "I need a C compiler", and the
+# current *configuration* decides which one it gets.
+#
+# **2. "For the build machine" versus "for the target".** `embed` must be
+# compiled for whatever machine runs the build. `app` must be compiled for
+# whatever it's being built for. Bazel calls these the *exec* and *target*
+# configurations, and calls switching between them a *transition*.
+#
+# Together these mean a target can be built more than once in one build, in
+# different configurations. Each one is a separate node with its own cache
+# entries, so the `x86_64` and `aarch64` objects never collide.
+#
+# ## What to write
+#
+# We'll work through this one together. The first question is the shape: how
+# does the current configuration reach `gcc.compile`?
+
+import "github.com/gcslib/gcc"
+
+def build toolchain() {
+    = gcc.toolchain_from_archive(fetch("...", sha256 = "..."))
+}
+
+let compiler = build toolchain()
+
+# The generator. It runs on the build machine, during the build. In example 6,
+# this is where its compiles would be marked as "for the build machine".
+def build embed() {
+    let obj = gcc.compile(file("gen/embed.c"), output = "embed.o", compiler)
+    = gcc.link([obj], output = "embed", compiler)
+}
+
+# Runs embed on one file. It is hermetic, so its sandbox holds only the tool
+# and the input, and both of its outputs are captured.
+#[hermetic]
+fn run_embed(tool: File, input: File, name: String) -> {header: File, source: File} {
+    tool.exec(input.path, name, ".")
+    header = file("{name}.h")
+    source = file("{name}.c")
+}
+
+def build main() {
+    let message = run_embed(build embed(), file("data/message.txt"), "message")
+    let objs = [
+        gcc.compile(file("main.c"), headers = [message.header], output = "main.o", compiler),
+        gcc.compile(message.source, output = "message.o", compiler),
+    ]
+    = gcc.link(objs, output = "app", compiler)
+}
+
+
+## Idea
+
+
+# stdlib/prelude.gcsl
+# This is set by the prelude in GCSL, all GCSL scripts have it set to the hosts information.
+
+context host_platform = { arch = "x86_64"; os = "linux" } 
+context platform = { ...^host_platform }
+
+
+# stdlib/toolchain.gcsl
+# Toolchain is a libary in GCSL used for getting access to toolchain executables in a manner that is compatbile with GCSL-based build tools like pekit. 
+
+enum Toolchain extensible<{
+    *: File | Dir
+}>
+
+enum Toolchain::C<{
+    cc: File,
+    ar: File,
+    ld: File,
+    sysroot: Dir
+}>
+
+enum Toolchain::Rust<{
+    ...
+}>
+
+type ToolchainDef = {
+    name: String,
+    class: Toolchain<T>,
+    host_arch: List<String>,
+    arch: List<String>,
+    files: FileSet,
+}
+
+#[def_type]
+def Toolchain<T>(fn() : T) : T {
+    = fn()
+}
+
+def Toolchain::C my_c_compiler() {
+    name = "my_c_compiler";
+    files = files("...")
+    class = Toolchain::C({
+        cc = files.file("cc")
+        ...
+    })
+    host_arch = "x86_64"
+    arch = "x86_64"
+}
+
+
+
+
+# Pekit injects toolchains in, which means like packaging plugins, toolchains can come from outside of the build scripts.
+context toolchains: List<ToolchainDef> = [system]
+
+
+def get(class: Empty<Toolchain<T>>, ^host_platform.arch, ^platform.arch) : T {
+}
+
+
+# cchain in the params means efficient caching
+def compile(src: File, output: String = "a.out", cchain = toolchain.get(Toolchain::C)) -> File {
+    cchain.cc.exec("-c", src.path, "-o", output)
+    = file(output)
+}
+
+
+# pekit/helpers.gcsl
+# We shouldn't do this yet but i like this syntax
+macro(func: FnCall, "target", arch: String) {
+    func with { platform.arch = arch }
+}
+
+
+## Consolidated (Claude's draft of the idea above, for Jack to adjust)
+##
+## Changes from the idea above:
+## - One generic def-type covers every Toolchain variant, so declaring a kind
+##   is still one line, and `def Toolchain::C name()` checks its body against
+##   the C layout.
+## - The layout sits under `provides`, apart from the fields every toolchain
+##   has (host_platform, platform), so a kind can never clash with them.
+## - Toolchains match on partial platform records, not lists of arches.
+## - get() takes the variant itself as its typed key.
+## - get() returns just the layout, T (Jack). The compiler needs its whole
+##   install in the sandbox (cc runs cc1, as and ld from it), so the C layout
+##   has a `root: Dir`: a Dir argument brings its whole tree with it.
+
+
+# stdlib/prelude.gcsl
+
+# Where build steps run. Plain GCSL sets it to this machine; pekit sets it to
+# the execution platform, which may be a remote worker.
+context host_platform: Platform = <this machine>
+
+# What is being built for. By default, the machine the steps run on.
+context platform: Platform = { ...^host_platform }
+
+
+# stdlib/toolchain.gcsl
+
+type Platform = { arch: String, os: String }
+
+# Every toolchain kind is a variant of Toolchain. Its layout may hold only
+# files and directories, so any toolchain is plain data that can cross the
+# hermetic boundary and travel to a remote worker.
+enum Toolchain extensible<{ *: File | Dir }>
+
+# A kind is one line. Declaring it also makes `def Toolchain::C name()`
+# available, through the generic def-type below. root is the whole install,
+# which the tools need beside them in the sandbox.
+enum Toolchain::C<{ root: Dir, cc: File, ar: File, ld: File, sysroot: Dir }>
+
+# What every toolchain definition gives, whatever its kind. host_platform and
+# platform are partial: a toolchain matches if every field it states equals
+# the current context's. { arch = "x86_64" } suits any OS. They are only for
+# choosing a toolchain; get() returns just `provides`.
+type ToolchainDef<T> = {
+    host_platform: Partial<Platform>,
+    platform: Partial<Platform>,
+    provides: T,
+}
+
+# What the registry holds: the same, with the layout wrapped in its variant,
+# so toolchains of different kinds fit in one list.
+type Registered = {
+    host_platform: Partial<Platform>,
+    platform: Partial<Platform>,
+    provides: Toolchain,
+}
+
+# The generic def-type. `kind` is the variant named in the header, such as
+# Toolchain::C, so the body is checked as ToolchainDef<C's layout>.
+#[def_type]
+def Toolchain<T>(name: String, kind: fn(T): Toolchain, f: fn(): ToolchainDef<T>): Registered {
+    let d = f()
+    host_platform = d.host_platform
+    platform = d.platform
+    provides = kind(d.provides)
+}
+
+# The registered toolchains, in order; the first match wins. Plain GCSL gets
+# the host's own tools. Pekit replaces the list with the workspace's.
+context toolchains: List<Registered> = [Toolchain::C system_c]
+
+def Toolchain::C system_c() {
+    host_platform = ^host_platform
+    platform = ^host_platform
+    provides = { root = dir("/"), cc = which("cc"), ar = which("ar"), ld = which("ld"), sysroot = dir("/") }
+}
+
+# Pure: it only searches the list. Fails, naming the kind and both platforms,
+# if nothing matches.
+def get<T>(kind: fn(T): Toolchain, ^toolchains, ^host_platform, ^platform): T {
+    # first t where t.provides is the variant `kind`,
+    # matches(t.host_platform, host_platform) and matches(t.platform, platform);
+    # returns t.provides unwrapped from the variant, as T
+}
+
+
+# github.com/gcslib/gcc
+
+# The toolchain is resolved in a parameter default, so at the call site,
+# before the hermetic boundary. It arrives as an ordinary argument: pekit
+# moves its files into the sandbox and puts them on the step's receipt, and
+# the step reads no context at all.
+#[hermetic]
+def compile(src: File, headers: FileSet = [], output: String = "a.out",
+            cchain = toolchain.get(Toolchain::C)) -> File {
+    cchain.cc.exec("-c", src.path, "-o", output, ...include_flags(headers))
+    = file(output)
+}
+
+#[hermetic]
+def archive(objs: FileSet, output: String, cchain = toolchain.get(Toolchain::C)) -> File {
+    cchain.ar.exec("rcs", output, ...paths(objs))
+    = file(output)
+}
+
+#[hermetic]
+def link(objs: FileSet, libraries: FileSet = [], output: String = "a.out",
+         cchain = toolchain.get(Toolchain::C)) -> File {
+    cchain.cc.exec("-o", output, ...paths(objs), ...paths(libraries))
+    = file(output)
+}
+
+
+# workspace.gcsl: the toolchains this workspace registers. Pekit sets
+# `context toolchains` from this list, as it selects packagers.
+
+def Toolchain::C gcc_x86_64() {
+    let files = archive.unpack(fetch("https://.../x86_64-gcc-14.tar.xz", sha256 = "..."))
+    host_platform = { arch = "x86_64" }
+    platform = { arch = "x86_64" }
+    provides = {
+        root = files
+        cc = files.file("bin/gcc")
+        ar = files.file("bin/ar")
+        ld = files.file("bin/ld")
+        sysroot = files.dir("sysroot")
+    }
+}
+
+# Runs on x86_64, makes aarch64 code.
+def Toolchain::C gcc_x86_64_to_aarch64() {
+    let files = archive.unpack(fetch("https://.../x86_64-to-aarch64-gcc-14.tar.xz", sha256 = "..."))
+    host_platform = { arch = "x86_64" }
+    platform = { arch = "aarch64" }
+    provides = {
+        root = files
+        cc = files.file("bin/aarch64-linux-gcc")
+        ar = files.file("bin/aarch64-linux-ar")
+        ld = files.file("bin/aarch64-linux-ld")
+        sysroot = files.dir("sysroot")
+    }
+}
+
+pekitconf: PekitConfig = {
+    toolchains = [Toolchain::C gcc_x86_64, Toolchain::C gcc_x86_64_to_aarch64]
+}
+
+
+# examples/6/build.gcsl: the build itself. No compiler appears anywhere.
+
+def build embed() {
+    let obj = gcc.compile(file("gen/embed.c"), output = "embed.o")
+    = gcc.link([obj], output = "embed")
+}
+
+#[hermetic]
+fn run_embed(tool: File, input: File, name: String) -> {header: File, source: File} {
+    tool.exec(input.path, name, ".")
+    header = file("{name}.h")
+    source = file("{name}.c")
+}
+
+def build main() {
+    # embed runs during the build, so it is built for wherever steps run.
+    let tool = build embed() with { platform = ^host_platform }
+    let message = run_embed(tool, file("data/message.txt"), "message")
+    let objs = [
+        gcc.compile(file("main.c"), headers = [message.header], output = "main.o"),
+        gcc.compile(message.source, output = "message.o"),
+    ]
+    = gcc.link(objs, output = "app")
+}
+
+# Both architectures in one build. `build embed()` is the same call with the
+# same context in both, so embed is built once. run_embed reads no context and
+# gets the same arguments in both, so it runs once. Only the compiles and the
+# links differ, because their toolchain arguments differ.
+def build all() {
+    x86_64 = build main() with { platform.arch = "x86_64" }
+    aarch64 = build main() with { platform.arch = "aarch64" }
+}
+
+# From the command line, the root context comes from pekit:
+#   pekit build main                          for the execution platform
+#   pekit build main --platform arch=aarch64  for ARM
+#   pekit build all                           both

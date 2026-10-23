@@ -1,0 +1,157 @@
+# Example 5: shipping the outputs as ppk packages
+#
+# This takes example 2's outputs and ships them as two ppk packages:
+#
+# - dev.example.greet, the program, installed as /usr/bin/greet;
+# - dev.example.greet-dev, for developers who want to use the library:
+#   /usr/include/greet.h and /usr/lib/libgreet.a.
+#
+# One build makes two packages. These are split packages, as in the kernel
+# recipe in pkgs/. This example contains a copy of example 2's sources and
+# build.gcsl. The packages are in this file, package.gcsl, beside it.
+#
+# WHAT MUST HAPPEN
+#
+# By hand, after building example 2:
+#
+#   mkdir -p greet/bin greet-dev/include greet-dev/lib       # 1. stage each package's
+#   cp app greet/bin/greet                                   #    files, laid out as
+#   cp lib/greet.h greet-dev/include/                        #    they will be under
+#   cp libgreet.a greet-dev/lib/                             #    /usr
+#
+#   ppk pack 'dev.example.greet@1.0-1?arch=x86_64' greet \
+#       --artifact-dir artifacts                             # 2. pack each one
+#   ppk pack 'dev.example.greet-dev@1.0-1?arch=x86_64' greet-dev \
+#       --artifact-dir artifacts
+#
+# This was run by hand. Packing is deterministic: the same files packed into a
+# fresh artifact directory give the same identity (sha256:7b27eb46...). So a
+# pack can be cached like any other step.
+#
+#   You change                  Must rerun                  Must NOT rerun
+#   main.c                      app's compile and link,     the greet-dev pack,
+#                               then the greet pack         because its files
+#                                                           didn't change
+#   lib/greet.c                 everything, then both packs
+#   only the package version    both packs                  every compile and link
+#   a comment in main.c,        app's compile               everything after it,
+#     giving an identical app                               through early cutoff
+#
+# WHAT'S NEW
+#
+# 1. Packing is a step; publishing isn't. ppk pack writes into an artifact
+#    directory, a store shared with everything else that writes there. A
+#    hermetic step can't write into a store outside its sandbox. So:
+#
+#    - The pack step packs into a fresh, empty artifact directory in its own
+#      sandbox and returns it as its output. That output is cached and
+#      deterministic.
+#    - Copying it into a real store, such as yours, the system's or
+#      pkgs.peios.org, is a separate action that changes the world outside the
+#      build.
+#
+#    The copy itself is easy, because blobs and manifests are
+#    content-addressed. The exception is refs: ppk refuses a version whose
+#    content has changed.
+#
+#    The open question is what command does that copy, and how it's written.
+#    Bazel separates "bazel build", which never touches the outside world, from
+#    "bazel run", which does something with the result. Here it might be a
+#    different def-type, such as "def publish", run with something like
+#    "pekit publish".
+#
+# 2. Staging is a map from /usr paths to files. That's the same shape as
+#    fs.compose_dir from example 4, so it may be the same function.
+#
+# 3. Versions. ppk never lets a version change its content, but pekit rebuilds
+#    whenever an input changes. If you edit main.c and rebuild without changing
+#    the version, the pack step produces a different package with the same
+#    version. That's fine in pekit-out/, but publishing it would be refused.
+#    Today's pekit handles this by distinguishing release from development
+#    builds and marking the latter +dirty. Where should the version of a
+#    development build come from?
+#
+# 4. ppk is a library, not part of pekit. Something like gcslib/ppk wraps
+#    ppk pack in a hermetic function. The ppk tool is an input FileSet, like the
+#    compiler. This example tests that nothing here needs pekit to know what
+#    ppk is.
+#
+# 5. Using the build's targets. The canonical layout (Jack) is a build.gcsl and
+#    a package.gcsl in the same directory. Files in one directory see each
+#    other's definitions, so this file can write build main() with no import.
+#
+# 6. On pekit's side: the executable bit. ppk records which files are
+#    executable. You can see it in the artifact directory, where blob names end
+#    in .exec. So a File's fingerprint must include whether it's executable,
+#    not just its bytes. Bazel's remote cache protocol does the same. No syntax
+#    is needed.
+#
+# The architecture is fixed as x86_64 for now. Example 6 is about that.
+#
+# WHAT TO WRITE
+#
+# Things to decide:
+#
+# - How a package is written: its name, version and files.
+# - The pack step, if you want to write the library side.
+# - How publishing is written and triggered, or leave it out and just say how
+#   you'd want it.
+
+# CLAUDE'S DRAFT, after Jack's proposal: a package is format-neutral metadata,
+# and a packager library, selected in workspace configuration, turns it into a
+# format and publishes it. Nothing below mentions ppk except the library and
+# the configuration.
+#
+# Canonical layout (Jack): a directory holds build.gcsl and package.gcsl, and
+# files in one directory see each other's definitions, so build main() needs
+# no import.
+
+let version = "1.0-1"
+
+def package dev.example.greet() {
+    version = version
+    files = {
+        "bin/greet" = build main()
+    }
+}
+
+def package dev.example.greet-dev() {
+    let g = build greet()
+    version = version
+    files = {
+        "include" = g.headers.rebase("lib") # lib/greet.h becomes include/greet.h
+        "lib/libgreet.a" = g.archive
+    }
+}
+
+## in workspace.gcsl: which packagers this workspace uses. The command line
+## can override it, and several can be listed to build every format at once.
+
+pekitconf: PekitConfig = {
+    packagers = [ppk.packager(tool = build ppk_tool())]
+}
+
+## in github.com/gcslib/ppk
+
+import fs
+
+# What pekit calls for each package when ppk is a selected packager. It is
+# hermetic, so the package is cached like any step, and it packs into a fresh
+# artifact directory inside its own sandbox.
+#[hermetic]
+def pack(name: String, pkg: Package, tool: FileSet, arch: String) -> FileSet {
+    let sys = fs.compose_dir({
+        "/" = tool
+        "/work/in" = fs.compose_dir(pkg.files)
+    }).sandbox(cwd = "/work")
+    sys.exec("ppk", "pack", "{name}@{pkg.version}?arch={arch}", "in", "--artifact-dir", "out")
+    = sys.dir("/work/out")
+}
+
+# What `pekit publish` calls. It is not hermetic: it copies a packed package
+# into a real artifact store, outside the build. ppk's own rule applies there:
+# a version whose content has changed is refused.
+def publish(packed: FileSet, store: String) -> {} {
+    # ...
+}
+

@@ -1,0 +1,26 @@
+# Example 2's build, unchanged. package.gcsl, beside it, packages its outputs.
+
+import "github.com/gcslib/gcc"
+
+def build toolchain() {
+    = gcc.toolchain_from_archive(fetch("...", sha256 = "..."))
+}
+
+let compiler = build toolchain()
+
+def build greet() {
+    let obj = gcc.compile(
+        file("lib/greet.c"),
+        headers = files("lib/greet.h", "lib/internal.h"),
+        output = "greet.o",
+        compiler,
+    )
+    archive = gcc.archive([obj], output = "libgreet.a", compiler)
+    headers = files("lib/greet.h")
+}
+
+def build main() {
+    let g = build greet()
+    let obj = gcc.compile(file("main.c"), headers = g.headers, compiler)
+    = gcc.link([obj], libraries = [g.archive], output = "app", compiler)
+}

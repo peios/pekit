@@ -1,0 +1,105 @@
+# # Example 9: dependencies nobody knows in advance
+#
+# `msggen` turns `data/messages.txt` into C, **one source file per message**.
+# How many files it writes, and what they're called, depends on the input. So
+# nobody knows them until `msggen` has run. Each generated file is then compiled
+# as a step of its own and everything is linked into `app`.
+#
+# ```
+# gen/msggen.c        the generator: messages.txt in, msg_NAME.c per line out,
+#                     plus messages.h and table.c
+# data/messages.txt   one message per line: NAME TEXT
+# main.c              prints every message, without knowing how many there are
+# ```
+#
+# ## What must happen
+#
+# By hand:
+#
+# ```sh
+# cc -o msggen gen/msggen.c                      # 1. build the generator
+# ./msggen data/messages.txt out/                # 2. run it: out/msg_hello.c,
+#                                                #    out/msg_built.c, out/msg_bye.c,
+#                                                #    out/table.c, out/messages.h
+# for f in out/*.c; do                           # 3. compile each generated file
+#     cc -c -o obj/$(basename $f .c).o $f        #    (how many? depends on step 2)
+# done
+# cc -c -Iout -o obj/main.o main.c               # 4. compile the program
+# cc -o app obj/*.o                              # 5. link
+# ```
+#
+# This was run by hand, and prints the three messages.
+#
+# | You change | Must rerun | Must *not* rerun |
+# |---|---|---|
+# | add a line to `messages.txt` | `msggen`, the new message's compile, `table.c`'s compile, the link | the existing messages' compiles, whose files come out identical; `main.c`'s compile, because `messages.h` doesn't change |
+# | one message's text | `msggen`, that message's compile, the link | every other compile |
+# | `main.c` | its compile, the link | `msggen` and every message compile |
+# | nothing | nothing | `msggen` included: its cached result already says which files it made |
+#
+# ## What's new
+#
+# **1. The graph grows during the build.** The loop "compile every `.c` file
+# `msggen` made" can't be evaluated until `msggen` has run. In our engine,
+# GCSL pauses that code, pekit runs `msggen`, and GCSL resumes and adds one
+# compile step per file. Bazel can't do this, because it must know every action
+# before running any. It would have to treat the whole generated directory as
+# one opaque output compiled by one step, and lose the per-file caching in the
+# table above.
+#
+# **2. Only the listing is needed, not the bytes.** To carry on, GCSL needs the
+# *names* of `msggen`'s outputs, not their contents. A cached result can carry
+# its listing (names plus fingerprints). So a build from a remote cache still
+# never downloads the generated files themselves, which keeps "build without
+# the bytes" intact.
+#
+# **3. Caching per generated file.** Compile keys use file contents, so a
+# regenerated `msg_hello.c` that's identical to last time is a cache hit, even
+# though `msggen` reran.
+#
+# **4. Queries can't see past it.** Asked "what does `app` depend on?" before
+# any build, pekit knows everything up to `msggen`. Past that point the answer
+# is "unknown until `msggen` runs". This is the trade-off from the performance
+# review: pekit should say so plainly, and a strict mode might restrict it.
+#
+# **5. Waiting is per use.** Only code that uses `msggen`'s outputs waits.
+# Building the generator, and anything else independent, carries on. Here
+# `main.c` waits too, because it includes the generated `messages.h`.
+#
+# ## What to write
+#
+# Probably nothing new syntactically. The loop is an ordinary `for` over a step's
+# output. The question is whether anything should *mark* a dynamic point, for
+# example so that strict mode or the query tool can find them, or whether it
+# stays implicit.
+
+import "github.com/gcslib/gcc"
+
+# CLAUDE'S DRAFT
+
+def build msggen() {
+    let obj = gcc.compile(file("gen/msggen.c"), output = "msggen.o")
+    = gcc.link([obj], output = "msggen")
+}
+
+# Runs the generator. Its output is a directory whose contents nobody knows
+# until it has run.
+#[hermetic]
+fn generate(tool: File, input: File) -> Dir {
+    tool.exec(input.path, "out")
+    = dir("out")
+}
+
+def build app() {
+    let out = generate(build msggen() with { platform = ^host_platform }, file("data/messages.txt"))
+
+    # The dynamic point. Listing `out` needs generate's result, so this code
+    # waits until it has run; then it makes one compile step per file. Only
+    # the listing is needed, not the files' bytes.
+    let generated = for f in out.files() if f.path.ends_with(".c") {
+        gcc.compile(f, output = "{f.path.basename()}.o")
+    }
+
+    let main = gcc.compile(file("main.c"), headers = [out.file("messages.h")], output = "main.o")
+    = gcc.link([main, ...generated], output = "app")
+}
