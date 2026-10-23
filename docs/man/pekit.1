@@ -1,4 +1,4 @@
-.TH PEKIT 1 2026-10-22 "Peios pekit 0.1.0"
+.TH PEKIT 1 2026-10-23 "Peios pekit 0.1.0"
 .SH NAME
 pekit \- build Peios packages from GCSL recipes
 .SH SYNOPSIS
@@ -87,8 +87,10 @@ A package: its
 .BR build ,
 the
 .B files
-it takes from the build's install tree, and its runtime
-.BR dependencies .
+it takes from the build's install tree, its runtime
+.BR dependencies ,
+and, if it holds kernel modules,
+.BR "sign_modules = true" .
 .PP
 A recipe file also gives
 .BR "pekit = 1" ,
@@ -189,6 +191,23 @@ A last segment of
 .B *
 on both sides takes every entry of a directory.
 A directory is taken whole, and a symbolic link as it is, never followed.
+.IP
+If the package gives
+.BR "sign_modules = true" ,
+pekit signs every kernel module among the files it takes before packing
+them, with the module-signing key (see
+.BR FILES ).
+Each module must be compressed with zstd and named
+.IR .ko.zst ;
+an uncompressed
+.I .ko
+is refused.
+pekit decompresses each module, appends a signature, and compresses it
+again.
+The signature is ML-DSA-65, deterministic and without signed attributes,
+so the same module and key always give the same bytes.
+What the cache keeps is not signed, and the key is read before any build
+runs.
 .IP
 The build runs on the host, with the host's tools, and only the
 .B sh
@@ -304,8 +323,9 @@ Failure, such as a workspace whose include file is not this pekit's, a
 recipe with errors, an artifact directory pekit cannot write to, a
 release from a workspace with uncommitted changes, a version that cannot
 be a Git tag's name, a source whose SHA-256 differs from the recipe's, a
-build that fails, or a package version that is already packed with
-different contents.
+build that fails, a module-signing key pekit cannot read, a module it
+cannot sign, or a package version that is already packed with different
+contents.
 .TP
 .B 2
 Usage error: an unknown option or a missing argument.
@@ -316,6 +336,14 @@ The base of pekit's cache,
 .I ~/.cache
 when it is unset or empty.
 .TP
+.B XDG_CONFIG_HOME
+The base of the default module-signing key's path,
+.I ~/.config
+when it is unset or empty.
+.TP
+.B PEKIT_MODSIG_KEY
+The module-signing key, in place of the default.
+.TP
 .B SOURCE_DATE_EPOCH
 Set by
 .B pekit package
@@ -325,6 +353,11 @@ what they make give the same result each time.
 A local source's time changes when a file is touched, even if its content
 does not, and the build then runs again.
 .SH FILES
+.TP
+.IR $XDG_CONFIG_HOME /peios/keys/modsig.pem
+The module-signing key, read only for a package that signs modules: an
+ML-DSA-65 private key in PKCS#8, which must hold its seed, followed by its
+certificate, both in PEM.
 .TP
 .IR $XDG_CACHE_HOME /peios/pekit/sources/sha256/ hash
 A fetched source, named by its SHA-256.

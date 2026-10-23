@@ -941,3 +941,178 @@ fn package_syncs_a_local_source_into_the_kept_copy() {
     package_into(&root, dir.path(), "e", &["--rebuild"]);
     assert_eq!(read("made"), "made\n");
 }
+
+/// The test module-signing key, an ML-DSA-65 key and its certificate.
+const MODSIG_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/modsig-test.pem"
+);
+
+/// Runs pekit as [`pekit`] does, with the module-signing key `key`.
+fn pekit_signing(dir: &Path, cache: &Path, key: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CACHE_HOME", cache)
+        .env("PEKIT_MODSIG_KEY", key)
+        .output()
+        .unwrap()
+}
+
+/// Two modules, each an ELF header and some bytes, as the build gives them
+/// in `lib/modules` of the tree at `dir`, compressed. Returns them
+/// uncompressed, by path.
+fn modules(tree: &Path) -> Vec<(String, Vec<u8>)> {
+    let made = [
+        (
+            "lib/modules/1.0/kernel/a.ko.zst",
+            b"\x7fELF module a".to_vec(),
+        ),
+        (
+            "lib/modules/1.0/kernel/sub/b.ko.zst",
+            b"\x7fELF module b".repeat(1000),
+        ),
+    ];
+    for (path, module) in &made {
+        let at = tree.join(path);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(&at, zstd::encode_all(module.as_slice(), 3).unwrap()).unwrap();
+    }
+    fs::write(
+        tree.join("lib/modules/1.0/modules.dep"),
+        "kernel/a.ko.zst:\n",
+    )
+    .unwrap();
+    touch(tree, "@1700000000");
+    made.into_iter()
+        .map(|(path, module)| (path.to_owned(), module))
+        .collect()
+}
+
+/// [`local_recipe`] with the modules in its `lib/modules` and
+/// `sign_modules`.
+fn signing_recipe(dir: &Path) -> String {
+    let recipe = local_recipe("../hello-1.0", dir);
+    let signing = recipe.replace(
+        "\"lib/hello/arch\" = \"arch\"\n    }\n",
+        "\"lib/hello/arch\" = \"arch\"\n        \"lib/modules\" = \"lib/modules\"\n    }\n    \
+         sign_modules = true\n",
+    );
+    assert_ne!(signing, recipe);
+    signing
+}
+
+/// The content of the file `file` of the package `identity` in `artifacts`.
+fn packed_file(artifacts: &Path, identity: &str, file: &str) -> Vec<u8> {
+    let hex = identity.trim().strip_prefix("sha256:").unwrap();
+    let manifest = fs::read_to_string(artifacts.join("manifests/sha256").join(hex)).unwrap();
+    let entry = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("\"{file}\" = ")))
+        .unwrap_or_else(|| panic!("{file} is not in {manifest}"));
+    let blob = entry
+        .split('"')
+        .nth(1)
+        .and_then(|blob| blob.strip_prefix("sha256:"))
+        .unwrap();
+    fs::read(artifacts.join("blobs/sha256").join(blob)).unwrap()
+}
+
+const SIGNED: &[u8] = b"~Module signature appended~\n";
+
+#[test]
+fn package_signs_each_module_the_same_way_every_time() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let made = modules(&dir.path().join("hello-1.0"));
+    let root = workspace(dir.path(), &signing_recipe(dir.path()));
+    let pack = |artifacts: &str| {
+        let artifacts = dir.path().join(artifacts);
+        let args = [
+            "package",
+            "dev.peios.hello",
+            "--artifact-dir",
+            path(&artifacts),
+        ];
+        let output = pekit_signing(&root, dir.path(), MODSIG_KEY, &args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        printed_identity(&output, HELLO)
+    };
+    let identity = pack("a");
+    let artifacts = dir.path().join("a");
+    for (file, module) in &made {
+        let signed = zstd::decode_all(packed_file(&artifacts, &identity, file).as_slice()).unwrap();
+        // The module, a PKCS#7 message, its information block and the magic.
+        let rest = signed.strip_prefix(module.as_slice()).unwrap();
+        let info = rest.strip_suffix(SIGNED).unwrap();
+        let (message, info) = info.split_at(info.len() - 12);
+        assert_eq!(info[..8], [0, 0, 2, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            u32::from_be_bytes(info[8..].try_into().unwrap()) as usize,
+            message.len()
+        );
+        assert_eq!(message[0], 0x30);
+    }
+    // Other files are left as they are.
+    assert_eq!(
+        packed_file(&artifacts, &identity, "lib/modules/1.0/modules.dep"),
+        b"kernel/a.ko.zst:\n"
+    );
+    // Packed again from the cached build, the modules are signed the same
+    // way: what the cache keeps is not signed.
+    assert_eq!(pack("b"), identity);
+}
+
+#[test]
+fn package_refuses_an_uncompressed_module() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    let tree = dir.path().join("hello-1.0");
+    modules(&tree);
+    fs::write(tree.join("lib/modules/1.0/kernel/c.ko"), "\x7fELF module c").unwrap();
+    let root = workspace(dir.path(), &signing_recipe(dir.path()));
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit_signing(&root, dir.path(), MODSIG_KEY, &args);
+    assert_eq!(output.status.code(), Some(1));
+    let printed = stderr(&output);
+    assert!(
+        printed.contains(
+            "c.ko: an uncompressed module; sign_modules signs modules compressed as .ko.zst"
+        ),
+        "{printed}"
+    );
+    assert!(!artifacts.join("refs").exists());
+}
+
+#[test]
+fn package_refuses_a_missing_signing_key_before_building() {
+    let dir = tempfile::tempdir().unwrap();
+    tarball(dir.path());
+    modules(&dir.path().join("hello-1.0"));
+    let root = workspace(dir.path(), &signing_recipe(dir.path()));
+    let key = dir.path().join("no-key.pem");
+    let artifacts = dir.path().join("artifacts");
+    let args = [
+        "package",
+        "dev.peios.hello",
+        "--artifact-dir",
+        path(&artifacts),
+    ];
+    let output = pekit_signing(&root, dir.path(), path(&key), &args);
+    assert_eq!(output.status.code(), Some(1));
+    let printed = stderr(&output);
+    assert!(
+        printed.starts_with(&format!(
+            "pekit: cannot read the module-signing key {}",
+            path(&key)
+        )),
+        "{printed}"
+    );
+    assert_eq!(builds(dir.path()), "");
+}

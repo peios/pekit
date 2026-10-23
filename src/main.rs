@@ -8,6 +8,7 @@
 
 mod cache;
 mod git;
+mod modsig;
 mod recipes;
 mod source;
 mod stage;
@@ -24,6 +25,7 @@ use clap::{Parser, Subcommand};
 use ppk::PackageId;
 
 use crate::cache::{KeyParts, WorkDir};
+use crate::modsig::Key;
 use crate::recipes::{
     BuildRecipe, INCLUDE, INCLUDE_FILE, PackageRecipe, Recipes, Source, WORKSPACE_FILE,
 };
@@ -362,6 +364,10 @@ fn build_and_pack(
             artifact_dir.display()
         )
     })?;
+    let key = match packages.iter().any(|(_, package)| package.sign_modules) {
+        true => Some(Key::load(&modsig::key_path()?)?),
+        false => None,
+    };
 
     let cache = cache_dir()?;
     let mut identities = vec![None; packages.len()];
@@ -383,6 +389,11 @@ fn build_and_pack(
                 .tempdir_in(&work_dir)
                 .with_context(|| work_dir.display().to_string())?;
             stage::stage(&package.files, &tree, staged.path())?;
+            // The staged copies are signed, never the install tree the
+            // cache keeps.
+            if let Some(key) = key.as_ref().filter(|_| package.sign_modules) {
+                modsig::sign_tree(staged.path(), key).with_context(|| id.to_string())?;
+            }
             let packed = match replace {
                 true => ppk::pack_replacing(id, staged.path(), artifact_dir)?,
                 false => ppk::pack(id, staged.path(), artifact_dir)?,

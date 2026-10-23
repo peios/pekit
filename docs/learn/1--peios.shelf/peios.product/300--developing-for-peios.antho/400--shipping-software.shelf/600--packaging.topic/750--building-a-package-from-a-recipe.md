@@ -21,6 +21,11 @@ from files you have staged yourself. For what a recipe contains, see
 - Have write access to the artifact directory. The default is
   `/system/artifacts`; to use a directory of your own, set one for the
   workspace or pass `--artifact-dir`.
+- To build a package that holds kernel modules, have the module-signing
+  key at `peios/keys/modsig.pem` in your configuration directory,
+  `$XDG_CONFIG_HOME` or `~/.config`, readable only by you, or set
+  `PEKIT_MODSIG_KEY` to its path. See
+  [Signed kernel modules](~peios/packaging/recipes#signed-kernel-modules).
 
 ## Set up a recipe workspace
 

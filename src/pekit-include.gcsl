@@ -25,8 +25,10 @@ type Build = fn(source_path: String, out_path: String, arch: String) ->> String 
 
 # A package. files maps each path in /usr to the path in the build's install
 # tree it comes from; a last segment of `*` on both sides takes every entry
-# of a directory. dependencies are the packages it needs at runtime.
-type Package = {build: Build, files: {*: String}, dependencies: List<String> = []}
+# of a directory. dependencies are the packages it needs at runtime. If
+# sign_modules, pekit signs every kernel module the package holds, each
+# compressed as .ko.zst, with the module-signing key.
+type Package = {build: Build, files: {*: String}, dependencies: List<String> = [], sign_modules: Bool = false}
 
 # pekit's settings for a workspace, which workspace.gcsl gives as
 # `pekitconf: PekitConfig = {...}`. artifact_dir is where pekit packs

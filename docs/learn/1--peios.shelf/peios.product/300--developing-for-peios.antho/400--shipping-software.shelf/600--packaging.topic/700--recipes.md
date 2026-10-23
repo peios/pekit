@@ -2,9 +2,9 @@
 title: Recipes
 type: concept
 description: What a pekit recipe is, covering recipe workspaces and the
-  include file, sources, builds and packages, how a package's version is
-  made, why a package builds the same way every time, and what a release
-  records.
+  include file, sources, builds and packages, signed kernel modules, how a
+  package's version is made, why a package builds the same way every time,
+  and what a release records.
 related:
   - peios/packaging/building-a-package-from-a-recipe
   - peios/packaging/packages
@@ -138,6 +138,40 @@ Recipes and packages have separate names. A package's name is the reverse
 domain name of its upstream project, such as `net.busybox.busybox`. A
 source's or a build's name only has to be unique among the workspace's
 sources or builds.
+
+## Signed kernel modules
+
+The Peios kernel loads a module only if it carries a signature by the
+module-signing key the kernel was built to trust. A package that holds
+kernel modules gives `sign_modules = true`, and pekit signs every module
+in it before packing:
+
+```gcsl
+def package dev.peios.kernel-modules() {
+    build = build kernel
+    files = {
+        "lib/*" = "modules/lib/*"
+    }
+    dependencies = []
+    sign_modules = true
+}
+```
+
+pekit signs after the build, so the private key never reaches a build's
+commands, and the install tree a build returns, which pekit caches, stays
+unsigned. Each module must be compressed with zstd and named `.ko.zst`,
+because the signature has to be inside the compression. pekit decompresses
+each module, appends its signature, and compresses it again. pekit refuses
+a package that holds an uncompressed `.ko` file.
+
+A signature depends only on the module and the key. So signing the same
+module with the same key always gives the same bytes, and a signed package
+can be built again identically, as a release requires.
+
+pekit reads the key from `peios/keys/modsig.pem` in your configuration
+directory, `$XDG_CONFIG_HOME` or `~/.config`, or from the path in
+`PEKIT_MODSIG_KEY`. The file holds the ML-DSA-65 private key,
+including its seed, followed by its certificate, both in PEM.
 
 ## Builds that repeat
 

@@ -52,6 +52,8 @@ pub struct PackageRecipe {
     /// Each path in /usr with the path in the install tree it comes from, in
     /// the order the recipe gives them.
     pub files: Vec<(String, String)>,
+    /// Whether pekit signs the kernel modules it holds.
+    pub sign_modules: bool,
 }
 
 /// What a build's recipe says before it runs.
@@ -173,10 +175,15 @@ impl Recipes {
         if !list(field(&package, "dependencies")?)?.is_empty() {
             bail!("package {name}: runtime dependencies are not supported yet");
         }
+        let sign_modules = match field(&package, "sign_modules")? {
+            Value::Bool(sign) => *sign,
+            other => bail!("package {name}: sign_modules is {other}, not a Bool"),
+        };
         Ok(PackageRecipe {
             version,
             build,
             files,
+            sign_modules,
         })
     }
 

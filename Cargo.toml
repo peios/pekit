@@ -6,9 +6,12 @@ description = "Builds Peios packages from GCSL recipes"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
 gcsl = { path = "../gcsl/crates/gcsl" }
 gcsl-disk = { path = "../gcsl/crates/gcsl-disk" }
+ml-dsa = { version = "0.1", default-features = false }
 ppk = { path = "../ppk" }
 sha2 = "0.10"
 tempfile = "3.23"
+zstd = "0.14"
