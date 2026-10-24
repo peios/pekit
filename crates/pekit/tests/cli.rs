@@ -110,3 +110,30 @@ fn what_cannot_be_built_says_why_and_fails() {
     assert_eq!(nowhere.status.code(), Some(1));
     assert!(err.starts_with("error: no workspace here"), "{err}");
 }
+
+#[test]
+fn a_build_s_trace_is_written_where_asked() {
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trace.json");
+    let built = pekit(
+        dir.path(),
+        cache.path(),
+        &["build", "hello", "--trace", path.to_str().unwrap()],
+    );
+    assert!(built.status.success(), "{}", printed(&built).1);
+    let trace: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let events = trace["traceEvents"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["ph"] == "b" && event["name"] == "shout")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["ph"] == "X" && event["name"] == "exec sh")
+    );
+    // Not a terminal: no progress line.
+    assert!(!printed(&built).1.contains('\r'));
+}

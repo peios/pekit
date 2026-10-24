@@ -4,7 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pekit::engine::{BuildError, Built, Settings, build};
+use pekit::engine::{BuildError, Built, Settings, build_observed};
+use pekit::events::{Event, EventKind};
 use pekit::load::load;
 use pekit::sandbox::HostTools;
 use pekit::target::resolve;
@@ -53,15 +54,26 @@ fn workspace(text: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
 /// Builds `build <name>` of the workspace at `root`, its store and scratch
 /// beside it in `state`: what it came to, or its error as shown.
 fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
+    observed_in(root, state, name).0
+}
+
+/// [`build_in`], with the events the build told.
+fn observed_in(root: &Path, state: &Path, name: &str) -> (Result<Built, String>, Vec<Event>) {
     let root = root.to_path_buf();
     let state = state.to_path_buf();
     let name = name.to_owned();
     std::thread::Builder::new()
         .stack_size(gcsl::STACK_SIZE)
         .spawn(move || {
-            let mut loaded = load(&root).map_err(|error| error.render())?;
-            let target = resolve(&loaded.workspace, ("build", &name), "")
-                .map_err(|error| error.message())?;
+            let mut events = Vec::new();
+            let mut loaded = match load(&root) {
+                Ok(loaded) => loaded,
+                Err(error) => return (Err(error.render()), events),
+            };
+            let target = match resolve(&loaded.workspace, ("build", &name), "") {
+                Ok(target) => target,
+                Err(error) => return (Err(error.message()), events),
+            };
             let settings = Settings {
                 store: state.join("store"),
                 outputs: root.join("pekit-out"),
@@ -71,8 +83,13 @@ fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
                 host_tools: host_tools(),
                 reuse: true,
             };
-            build(&mut loaded, &target, &settings)
-                .map_err(|error: BuildError| error.render(&loaded))
+            let built = build_observed(&mut loaded, &target, &settings, &mut |event| {
+                events.push(event.clone());
+            });
+            (
+                built.map_err(|error: BuildError| error.render(&loaded)),
+                events,
+            )
         })
         .unwrap()
         .join()
@@ -215,4 +232,70 @@ fn a_step_whose_result_holds_a_secret_runs_each_time_and_keeps_its_files() {
     let again = build_in(dir.path(), state.path(), "hello").unwrap();
     assert_eq!((again.ran, again.cached), (1, 1));
     assert_eq!(fs::read_to_string(&out).unwrap(), "HIDDEN\n");
+}
+
+/// The events `events` told, but their times, and effects but their nodes,
+/// threads and times.
+fn kinds(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| match &event.kind {
+            EventKind::EffectQueued { step, effect, .. } => {
+                format!("queued {effect} of {step:?}")
+            }
+            EventKind::EffectRan {
+                step, effect, ok, ..
+            } => format!("ran {effect} of {step:?}, ok {ok}"),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
+    let text = format!(
+        "{SHOUT}#[hermetic] fn copy(src: File) -> File {{\n\
+         \x20   let r = exec([\"cp\", src.path, \"out.txt\"])\n\
+         \x20   file(\"out.txt\")\n\
+         }}\n\
+         def build hello() {{ out = copy(shout(file(\"name.txt\"))) }}\n"
+    );
+    let dir = workspace(&text, &[("name.txt", "hi\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let (built, events) = observed_in(dir.path(), state.path(), "hello");
+    built.unwrap();
+    assert_eq!(
+        kinds(&events),
+        [
+            "Discovered { step: \"shout\" }",
+            "Discovered { step: \"copy\" }",
+            "Started { step: \"shout\", attempt: 0 }",
+            "queued exec sh of Some(\"shout\")",
+            "ran exec sh of Some(\"shout\"), ok true",
+            "Finished { step: \"shout\" }",
+            "Started { step: \"copy\", attempt: 0 }",
+            "queued exec cp of Some(\"copy\")",
+            "ran exec cp of Some(\"copy\"), ok true",
+            "Finished { step: \"copy\" }",
+        ]
+    );
+    // Times only grow, and a program ran within its own span.
+    assert!(events.windows(2).all(|pair| pair[0].at <= pair[1].at));
+    for event in &events {
+        if let EventKind::EffectRan { began, .. } = event.kind {
+            assert!(began <= event.at);
+        }
+    }
+    // Again: each found in the store.
+    let (again, events) = observed_in(dir.path(), state.path(), "hello");
+    again.unwrap();
+    assert_eq!(
+        kinds(&events),
+        [
+            "Discovered { step: \"shout\" }",
+            "Discovered { step: \"copy\" }",
+            "Cached { step: \"shout\" }",
+            "Cached { step: \"copy\" }",
+        ]
+    );
 }

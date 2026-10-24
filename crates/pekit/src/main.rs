@@ -1,5 +1,6 @@
 //! The `pekit` command (see [`pekit::cli`]).
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -13,12 +14,13 @@ fn main() -> ExitCode {
     let run = std::thread::Builder::new()
         .stack_size(gcsl::STACK_SIZE)
         .spawn(move || {
-            pekit::cli::run(
-                std::env::args_os(),
-                &cwd,
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
-            )
+            let live = std::io::stderr().is_terminal();
+            let mut terminal = pekit::cli::Terminal {
+                out: &mut std::io::stdout(),
+                err: &mut std::io::stderr(),
+                live,
+            };
+            pekit::cli::run(std::env::args_os(), &cwd, &mut terminal)
         });
     if let Ok(Ok(code)) = run.map(std::thread::JoinHandle::join) {
         code

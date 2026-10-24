@@ -27,7 +27,7 @@
 //! the target's value has no holes, the files under `/pekit-out` it names are
 //! copied out to the output directory, each a copy of its own.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -41,6 +41,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
 
+use crate::events::{Event, EventKind, effect_label};
 use crate::load::Loaded;
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
@@ -126,6 +127,21 @@ pub fn build(
     target: &Target,
     settings: &Settings,
 ) -> Result<Built, BuildError> {
+    build_observed(loaded, target, settings, &mut |_| {})
+}
+
+/// [`build`], telling `events` each [event](crate::events#events) as it
+/// happens.
+///
+/// # Errors
+///
+/// Those of [`build`].
+pub fn build_observed(
+    loaded: &mut Loaded,
+    target: &Target,
+    settings: &Settings,
+    events: &mut dyn FnMut(&Event),
+) -> Result<Built, BuildError> {
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
     let host = Arc::new(HostView::new(
@@ -150,7 +166,9 @@ pub fn build(
         names_used: HashMap::new(),
         named: 0,
         pool: Pool::new(settings.jobs.max(1)),
-        in_flight: HashSet::new(),
+        in_flight: HashMap::new(),
+        events,
+        began: Instant::now(),
         target_dir: target.qualified().trim_start_matches('/').to_owned(),
         ran: 0,
         cached: 0,
@@ -241,7 +259,11 @@ struct Run<'a> {
     /// The pool effects run on.
     pool: Pool,
     /// The effects running, by node.
-    in_flight: HashSet<NodeId>,
+    in_flight: HashMap<NodeId, InFlight>,
+    /// What is told each event.
+    events: &'a mut dyn FnMut(&Event),
+    /// When the build began.
+    began: Instant,
     /// The target's directory under `/pekit-out`, its qualified name.
     target_dir: String,
     /// How many steps ran.
@@ -260,6 +282,14 @@ impl Drop for Run<'_> {
             let _ = std::fs::remove_dir_all(self.stage_dir(id, step.attempt));
         }
     }
+}
+
+/// An effect running, as events name it.
+struct InFlight {
+    /// The step it is of, or none for the target's own.
+    step: Option<String>,
+    /// What it runs ([`effect_label`]).
+    effect: String,
 }
 
 /// Where the target's unit is.
@@ -312,13 +342,12 @@ impl Run<'_> {
             let mut progressed = self.start_needed(&demands)?;
             progressed |= self.advance_steps()?;
             if !self.in_flight.is_empty() {
-                let Some((node, outcome)) = self.pool.next() else {
+                let Some(ran) = self.pool.next() else {
                     return Err(BuildError::Engine(
                         "the threads effects run on stopped".to_owned(),
                     ));
                 };
-                self.in_flight.remove(&node);
-                self.finished_effect(node, outcome);
+                self.finished_effect(ran);
                 progressed = true;
             }
             if let Main::Paused(node) = main
@@ -349,7 +378,7 @@ impl Run<'_> {
         let mut started = false;
         let needed = self.graph.needed(demands);
         for id in self.graph.ready(&needed) {
-            if self.steps.contains_key(&id) || self.in_flight.contains(&id) {
+            if self.steps.contains_key(&id) || self.in_flight.contains_key(&id) {
                 continue;
             }
             let Some(node) = self.graph.node(id) else {
@@ -359,7 +388,7 @@ impl Run<'_> {
                 NodeKind::Deferred => self.start_step(id)?,
                 NodeKind::Effect(_) if node.unit() < STEP_UNITS => {
                     let host: Arc<dyn Effects + Send + Sync> = self.host.clone();
-                    self.dispatch(id, host, None)?;
+                    self.dispatch(id, host, None, None)?;
                 }
                 NodeKind::Effect(_) => continue,
             }
@@ -368,22 +397,38 @@ impl Run<'_> {
         Ok(started)
     }
 
-    /// Sends the effect `id` to the pool, to run under `effects` until
-    /// `deadline`.
+    /// Sends the effect `id`, of the step `step` or of the target's own
+    /// unit, to the pool, to run under `effects` until `deadline`.
     fn dispatch(
         &mut self,
         id: NodeId,
         effects: Arc<dyn Effects + Send + Sync>,
         deadline: Option<Instant>,
+        step: Option<NodeId>,
     ) -> Result<(), BuildError> {
         let job = self
             .loaded
             .workspace
             .effect_job(&self.graph, id)
             .map_err(BuildError::Engine)?;
+        let running = InFlight {
+            step: step.map(|step| self.step_name(step)),
+            effect: effect_label(&job),
+        };
+        self.emit(EventKind::EffectQueued {
+            node: id.number(),
+            step: running.step.clone(),
+            effect: running.effect.clone(),
+        });
         self.pool.send(id, job, effects, deadline);
-        self.in_flight.insert(id);
+        self.in_flight.insert(id, running);
         Ok(())
+    }
+
+    /// Tells the event `kind`, now.
+    fn emit(&mut self, kind: EventKind) {
+        let at = self.began.elapsed();
+        (self.events)(&Event { at, kind });
     }
 
     /// Names every step the graph has that is not named, in the order the
@@ -413,7 +458,8 @@ impl Run<'_> {
             } else {
                 format!("{function}.{count}")
             };
-            self.step_names.insert(id, name);
+            self.step_names.insert(id, name.clone());
+            self.emit(EventKind::Discovered { step: name });
         }
     }
 
@@ -479,6 +525,7 @@ impl Run<'_> {
             let value = self.loaded.workspace.from_plain(&record.result.plain());
             self.graph.resolve(id, Ok(value));
             self.cached += 1;
+            self.emit(EventKind::Cached { step: name });
             return Ok(());
         }
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
@@ -498,6 +545,10 @@ impl Run<'_> {
                 waiting: None,
             },
         );
+        self.emit(EventKind::Started {
+            step: name,
+            attempt: 0,
+        });
         Ok(())
     }
 
@@ -622,7 +673,7 @@ impl Run<'_> {
                     step.waiting = Some(effect);
                 }
                 let effects: Arc<dyn Effects + Send + Sync> = sandbox;
-                self.dispatch(effect, effects, deadline)
+                self.dispatch(effect, effects, deadline, Some(id))
             }
             Ok(Progress::Done(value)) => self.succeeded(id, &value),
             Err(failure) => self.failed(id, failure),
@@ -656,6 +707,11 @@ impl Run<'_> {
                     format!("the step's result names `{path}`, which it did not make: {error}");
                 self.graph
                     .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
+                let step = self.step_name(id);
+                self.emit(EventKind::Failed {
+                    step,
+                    retrying: false,
+                });
                 return Ok(());
             }
             Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
@@ -685,6 +741,8 @@ impl Run<'_> {
         }
         self.ran += 1;
         self.graph.resolve(id, Ok(value.clone()));
+        let step = self.step_name(id);
+        self.emit(EventKind::Finished { step });
         Ok(())
     }
 
@@ -697,6 +755,11 @@ impl Run<'_> {
                     .deadline
                     .is_none_or(|deadline| Instant::now() < deadline)
         });
+        let name = self.step_name(id);
+        self.emit(EventKind::Failed {
+            step: name.clone(),
+            retrying: retry,
+        });
         if !retry {
             if let Some(step) = self.steps.remove(&id) {
                 self.unstage(id, &step)?;
@@ -708,7 +771,7 @@ impl Run<'_> {
             return Ok(());
         };
         self.unstage(id, &step)?;
-        let own = format!("{}/{}", self.target_dir, self.step_name(id));
+        let own = format!("{}/{name}", self.target_dir);
         let attempt = step.attempt + 1;
         let sandbox = self.fresh_sandbox(id, &own, attempt, &step.given)?;
         self.graph.forget_unit(STEP_UNITS + id.number());
@@ -723,13 +786,34 @@ impl Run<'_> {
                 ..step
             },
         );
+        self.emit(EventKind::Started {
+            step: name,
+            attempt,
+        });
         Ok(())
     }
 
-    /// The effect `node` finished, with `outcome`: gives it to the graph, the
-    /// step that waits on it able to run again.
-    fn finished_effect(&mut self, node: NodeId, outcome: Result<Plain, Diagnostic>) {
-        let value = outcome.map(|plain| self.loaded.workspace.from_plain(&plain));
+    /// The effect `ran` finished: gives it to the graph, the step that waits
+    /// on it able to run again.
+    fn finished_effect(&mut self, ran: Ran) {
+        let node = ran.node;
+        if let Some(running) = self.in_flight.remove(&node) {
+            let at = ran.ended.saturating_duration_since(self.began);
+            (self.events)(&Event {
+                at,
+                kind: EventKind::EffectRan {
+                    node: node.number(),
+                    step: running.step,
+                    effect: running.effect,
+                    worker: ran.worker,
+                    began: ran.began.saturating_duration_since(self.began),
+                    ok: ran.outcome.is_ok(),
+                },
+            });
+        }
+        let value = ran
+            .outcome
+            .map(|plain| self.loaded.workspace.from_plain(&plain));
         self.graph.resolve(node, value);
         for step in self.steps.values_mut() {
             if step.waiting == Some(node) {
@@ -775,12 +859,26 @@ type PoolJob = (
     Option<Instant>,
 );
 
+/// An effect a pool's thread ran.
+struct Ran {
+    /// Its node.
+    node: NodeId,
+    /// The thread that ran it, from 0.
+    worker: usize,
+    /// When it began.
+    began: Instant,
+    /// When it ended.
+    ended: Instant,
+    /// What it came to.
+    outcome: Result<Plain, Diagnostic>,
+}
+
 /// The threads effects run on (see [Building](#building)).
 struct Pool {
     /// Where jobs go.
     jobs: Sender<PoolJob>,
-    /// Where their outcomes come back.
-    done: Receiver<(NodeId, Result<Plain, Diagnostic>)>,
+    /// Where what they came to comes back.
+    done: Receiver<Ran>,
 }
 
 impl Pool {
@@ -789,7 +887,7 @@ impl Pool {
         let (jobs, queue) = channel::<PoolJob>();
         let (report, done) = channel();
         let queue = Arc::new(std::sync::Mutex::new(queue));
-        for _ in 0..size {
+        for worker in 0..size {
             let queue = Arc::clone(&queue);
             let report = report.clone();
             thread::spawn(move || {
@@ -798,8 +896,16 @@ impl Pool {
                     let Some((node, job, effects, deadline)) = next else {
                         return;
                     };
+                    let began = Instant::now();
                     let outcome = job.run(&*effects, deadline);
-                    if report.send((node, outcome)).is_err() {
+                    let ran = Ran {
+                        node,
+                        worker,
+                        began,
+                        ended: Instant::now(),
+                        outcome,
+                    };
+                    if report.send(ran).is_err() {
                         return;
                     }
                 }
@@ -822,7 +928,7 @@ impl Pool {
 
     /// The next job's outcome, waiting for one: none if every thread of the
     /// pool has stopped.
-    fn next(&self) -> Option<(NodeId, Result<Plain, Diagnostic>)> {
+    fn next(&self) -> Option<Ran> {
         self.done.recv().ok()
     }
 }

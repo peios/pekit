@@ -29,7 +29,22 @@ so the paths in a build never depend on where your checkout is.
 
 Steps that don't depend on each other run at the same time. `--jobs 4`
 runs at most four programs at once. By default pekit runs as many as the
-machine has processors.
+machine has processors. In a terminal, a line shows the steps running and
+how many have finished while the build goes.
+
+## Seeing where the time went
+
+`--trace` writes a timeline of the build that `chrome://tracing` and
+[Perfetto](https://ui.perfetto.dev) can open:
+
+```sh
+pekit build hello --trace build-trace.json
+```
+
+Each attempt of a step is a span on the *steps* row, and each program a
+step runs is a span on the row of the worker that ran it. A step found in
+the store is a mark. The trace names programs but never shows their
+arguments, so it holds no secrets.
 
 ## Reusing what is unchanged
 
