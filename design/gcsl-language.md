@@ -920,6 +920,35 @@ evaluation, so memoised calls record them by value.
   value or the default). Running memoised calls record their context
   chain at the start.
 
+### As built (10a)
+
+GCSL `c2545ce` and `e827138`. Differences from the plan above:
+
+- **Bindings have their own arena** (`WithBinding`), not a record block,
+  so that a dotted key is checked against the context's type: in a
+  record block, a typo would have added a field silently.
+- **Dotted keys** go through present records only. Several keys of one
+  context in one `with` merge in order. A plain binding after a dotted
+  key of the same context, or two plain bindings of it, is an error.
+- **Every context has a key**, `<context NAME@ORIGIN>`. Runtime frames
+  and memo dependencies use it, so a later REPL input's redeclaration is
+  a different context. Earlier closures keep reading the declaration
+  they were checked against, as they keep a shadowed variable.
+- **Default and file order.** Within a file, a read is scheduled after
+  what the default reads, because mentions treat a read as a use of the
+  default's binding. That fixed a bug where a read came before the cell
+  the default needs.
+- **The current context is shared by every frame of a run**, so calls
+  pay nothing for it.
+- **Memoisation.** Each read records a dependency on every running
+  memoised call that shares the read's binding. A cache hit passes its
+  context dependencies on. A future made in a memoised call keys that
+  call on its whole flattened context. Tested with nested calls, cache
+  hits made under another context, and futures.
+- **Defaults' purity.** An impure default is "the default of a context
+  must be pure", not the generic purity error, whose advice to use `->`
+  doesn't apply to a context.
+
 ### Decisions to confirm with Jack
 
 - One global namespace of context names for the whole workspace, with
