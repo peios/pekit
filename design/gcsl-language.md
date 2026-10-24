@@ -1056,6 +1056,14 @@ identities for hosts' receipts.
   a secret record, `cfg.token`, and an element of a secret list at a
   plain position, are secrets. A record or list holding a secret is not
   itself one: its type says which field or element is.
+- **Comparing what holds a secret.** `==`, `!=` and the orderings of any
+  operands whose types hold a secret anywhere, a record's field or a
+  list's element at any depth, are a `Secret<Bool>`: otherwise
+  `{k = s} == {k = "guess"}` would test guesses against a secret and copy
+  it out bit by bit. `===` and `!==` compare identity, and stay plain.
+- **Layers.** `Secret<T>` takes a present `T`: a future of a secret is
+  `Future<Secret<T>>`, never `Secret<Future<T>>`, so awaiting and
+  unwrapping never compete for one layer.
 - **No branching.** A secret cannot decide what runs: an `if`'s
   condition, a `for`'s iterable or guard, `&&` and `||`, a list's index,
   `is`, and `as` refuse one, "a secret cannot decide what runs". That
@@ -1063,8 +1071,15 @@ identities for hosts' receipts.
   secret into a plain value.
 - **Redaction.** A secret shows as `***`, by `show`, by a value's display
   in the REPL and in `gcsl run`'s output, and in a runtime error's
-  message. An error raised inside a secret's operation, an overflow say,
-  names no secret value.
+  message: one choke point, a value's display and its source text, so
+  every path is covered. An error raised inside a secret's operation, an
+  overflow or a division by zero say, names no operand's value and no
+  position: while such an operation runs, a flag in the run's shared
+  state makes the evaluator's error labels redacted. So `recover { s // 0
+  } else (e) { e.message }` holds no secret.
+- **Built-in functions** refuse a secret, but `show`, which returns
+  `***`, a plain `String`. Spreading a secret record and a dotted update
+  through one are refused too, for now.
 - **`unsafe_value()`**, a method of the prelude on `Secret<T>`, is the
   value, a `T`. It is the escape the design names, for a linter or a
   strict mode to flag.
@@ -1104,8 +1119,11 @@ identities for hosts' receipts.
 ### Decisions to confirm with Jack
 
 - No branching on a secret: `if`, `for`, `&&`, `||`, indexes, `is`,
-  `as`.
-- A record or list holding a secret is not itself a secret.
+  `as`, `assert`'s condition.
+- A record or list holding a secret is not itself a secret, but comparing
+  values that hold one is a `Secret<Bool>`. (The agreed design said such
+  a record is itself a secret; this keeps field types precise and closes
+  the same leak.)
 - `secret(value, identity)` is available to plain code.
 - `exec`'s `argv` accepts `Revealed<String>` elements.
 
