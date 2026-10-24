@@ -746,6 +746,44 @@ GCSL `c8012a7` and `0b68623`. Differences from the plan above:
 - `Partial<T>` field reads are "field `arch` of `Partial<Platform>` may
   be absent", noting `.matches(...)`.
 
+### As built (9c)
+
+Differences from Rule 9c above, and decisions taken while building it:
+
+- **Shape.** The variant parameter is the second, after the name, and the
+  definition is the third; invocation parameters follow it. One shape
+  description (`DefTypeShape`) is shared by the checker, the lowering and
+  the workspace.
+- **The enum comes from the def-type.** `::C` is looked up in the enum
+  of the def-type's `Variant<E, T>` parameter, not by name lookup. So the
+  enum need not be in scope under the def-type's name, and `E` must be a
+  concrete enum, not a type parameter.
+- **A namespace per variant.** The key is `<Toolchain::C#n.i>`, so
+  `Toolchain::C gcc` and `Toolchain::Rust gcc` are separate definitions,
+  and messages show `Toolchain::C gcc`.
+- **Generic def-types.** Every type parameter must appear in the variant
+  parameter's type, which is checked at the declaration. A generic
+  def-type without a variant parameter is an error. A non-generic
+  def-type may also take a variant; the variant must then fit the
+  parameter's type exactly.
+- **Errors at the use:**
+  - a variant on a def-type that takes none: "`package` takes no
+    variant";
+  - none where one is needed: "def-type `Toolchain` needs a variant";
+  - a variant that is not visible: "no variant `Nope` of `Toolchain`".
+- **Not invoked by name.** Variant def-types are left out of
+  `Workspace::def_types`: their definitions are reached only by
+  references, for example from a list of registered toolchains. Invoking
+  them by name can be added if a host needs it.
+- **Related fix.** Hovers on generic functions now show their type
+  parameters, `def Tool<T>(...)`.
+- **For Jack:** example 6's `toolchains = [Toolchain::C gcc_x86_64]`
+  holds references, which are functions; a `List<Registered>` needs the
+  calls, `Toolchain::C gcc_x86_64()`.
+- **REPL.** As with plain def-types, a later input's definitions replace
+  an earlier input's namespace, as its fields of one root do. That is
+  existing behaviour, not new.
+
 ### Decisions to confirm with Jack
 
 - A variant is a value of `Variant<E, T>`, a callable subtype of
