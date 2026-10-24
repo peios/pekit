@@ -43,6 +43,7 @@ use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
 use crate::load::Loaded;
+use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
@@ -60,7 +61,11 @@ pub struct Settings {
     pub scratch: PathBuf,
     /// How many effects may run at once.
     pub jobs: usize,
-    /// The platform steps run on, as receipts name it.
+    /// The platform steps run on, set as `^host_platform` where the
+    /// workspace declares it (see [Platforms](crate::platform#platforms)).
+    pub execution: ExecutionPlatform,
+    /// The platform as receipts name it: the execution platform, and the
+    /// tools steps run with.
     pub platform: String,
     /// The host tools every step's sandbox borrows, which make its steps
     /// not hermetic: a host snapshot's, or a test's. None for a hermetic
@@ -150,9 +155,14 @@ pub fn build_observed(
         &target.definition.dir,
         &settings.scratch,
     ));
+    let mut contexts = Vec::new();
+    if loaded.workspace.declares_context(HOST_PLATFORM) {
+        let platform = loaded.workspace.from_plain(&settings.execution.plain());
+        contexts.push((HOST_PLATFORM.to_owned(), platform));
+    }
     let call = loaded
         .workspace
-        .prepare_call((&target.def_type, &target.qualified()), &[], &[])
+        .prepare_call((&target.def_type, &target.qualified()), &[], &contexts)
         .map_err(BuildError::Invoke)?;
     let mut run = Run {
         loaded,

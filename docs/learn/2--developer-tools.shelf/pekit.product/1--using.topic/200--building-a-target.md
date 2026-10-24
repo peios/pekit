@@ -85,6 +85,15 @@ time from the start in a fresh sandbox. A step that passes only on a
 retry is flaky, and pekit warns about it. `#[timeout(5m)]` limits how
 long all of a step's attempts can take together.
 
+## Platforms
+
+Steps run on the machine pekit runs on, their *execution platform*. If
+your workspace declares a `host_platform` context, as the build libraries
+do, pekit sets it to that machine for every target it builds, as a record
+such as `{arch = "x86_64"; os = "linux"}`. Toolchains read it to choose
+what runs where. Every step is keyed by its platform too, so results from
+one kind of machine are never reused on another.
+
 ## The host's tools
 
 Until the build libraries provide a pinned build environment, steps run

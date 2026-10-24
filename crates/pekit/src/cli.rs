@@ -29,7 +29,8 @@ use clap::{Parser, Subcommand};
 
 use crate::engine::{Settings, build_observed};
 use crate::events::{Event, EventKind};
-use crate::host::{HostSnapshot, machine};
+use crate::host::HostSnapshot;
+use crate::platform::ExecutionPlatform;
 use crate::load::load;
 use crate::target::resolve;
 use crate::trace::Trace;
@@ -119,6 +120,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     };
     let cache = cache_dir();
     let host = HostSnapshot::of_host();
+    let execution = ExecutionPlatform::of_host();
     if host.fingerprint.is_none() {
         let _ = writeln!(
             terminal.err,
@@ -133,7 +135,8 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         jobs: args.jobs.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
         }),
-        platform: host.platform(&machine()),
+        platform: host.platform(&execution.describe()),
+        execution,
         reuse: host.fingerprint.is_some(),
         host_tools: host.tools(),
     };

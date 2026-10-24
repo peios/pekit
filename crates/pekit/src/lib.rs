@@ -11,6 +11,7 @@ pub mod engine;
 pub mod events;
 pub mod host;
 pub mod load;
+pub mod platform;
 pub mod receipt;
 pub mod record;
 pub mod sandbox;

@@ -187,9 +187,3 @@ fn fingerprint(at: &dyn Fn(&str) -> PathBuf) -> Option<Digest> {
     }
     Some(Digest::from_hasher(hasher))
 }
-
-/// The machine pekit runs on, as receipts name it: `x86_64-linux`.
-#[must_use]
-pub fn machine() -> String {
-    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
-}

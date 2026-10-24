@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use pekit::engine::{BuildError, Built, Settings, build_observed};
 use pekit::events::{Event, EventKind};
 use pekit::load::load;
+use pekit::platform::ExecutionPlatform;
 use pekit::sandbox::HostTools;
 use pekit::target::resolve;
 
@@ -59,6 +60,17 @@ fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
 
 /// [`build_in`], with the events the build told.
 fn observed_in(root: &Path, state: &Path, name: &str) -> (Result<Built, String>, Vec<Event>) {
+    observed_on(root, state, name, "x86_64")
+}
+
+/// [`observed_in`], the execution platform's architecture `arch`.
+fn observed_on(
+    root: &Path,
+    state: &Path,
+    name: &str,
+    arch: &str,
+) -> (Result<Built, String>, Vec<Event>) {
+    let arch = arch.to_owned();
     let root = root.to_path_buf();
     let state = state.to_path_buf();
     let name = name.to_owned();
@@ -79,7 +91,11 @@ fn observed_in(root: &Path, state: &Path, name: &str) -> (Result<Built, String>,
                 outputs: root.join("pekit-out"),
                 scratch: state.join("scratch"),
                 jobs: 4,
-                platform: "x86_64-linux".to_owned(),
+                platform: format!("{arch}-linux"),
+                execution: ExecutionPlatform {
+                    arch,
+                    os: "linux".to_owned(),
+                },
                 host_tools: host_tools(),
                 reuse: true,
             };
@@ -298,4 +314,29 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
             "Cached { step: \"copy\" }",
         ]
     );
+}
+
+#[test]
+fn a_target_is_evaluated_on_its_execution_platform() {
+    let text = "type Platform = {arch: String, os: String}\n\
+                context host_platform: Platform = {arch = \"none\"; os = \"none\"}\n\
+                context platform: Platform = {...^host_platform}\n\
+                #[hermetic] fn arch(a: String) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo {a} > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = arch(\"{^host_platform.arch} for {^platform.arch}\") }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    observed_on(dir.path(), state.path(), "hello", "aarch64")
+        .0
+        .unwrap();
+    let out = dir.path().join("pekit-out/app/hello/arch/out.txt");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "aarch64 for aarch64\n");
+    // On another, another step.
+    let other = observed_on(dir.path(), state.path(), "hello", "riscv64")
+        .0
+        .unwrap();
+    assert_eq!((other.ran, other.cached), (1, 0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "riscv64 for riscv64\n");
 }
