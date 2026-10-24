@@ -196,4 +196,24 @@ Each leaves pekit2 working, and tested, as far as it goes.
 - E5: the logical layout `/w` and `/pekit-out`, and steps named by function
   and number in discovery order.
 - E5: a step's working directory is its `pekit-out/` path, `PATH` empty.
+  As built, with the host snapshot below, a step whose `exec` sets no
+  `PATH` gets `/usr/bin:/bin:/usr/sbin:/sbin`, since gcc finds its own
+  parts by `PATH`; a pinned environment (layer D) will set its own.
 - E9: pekit's def-types and attributes from a GCSL standard module.
+- As built in C5: steps are named in the order the target's code met them
+  (`Graph::nodes`), never in the order they started, so a name, and the
+  output paths under it, do not depend on what was cached; and a step's own
+  output directory is on its receipt.
+- As built in C5, until layer D gives a pinned build environment: the *host
+  snapshot*. Every step binds the host's `/usr`, `/bin`, `/lib`, `/lib64`,
+  `/sbin`, `/etc/alternatives` and `/etc/ld.so.cache` read-only, with
+  `/usr/local` hidden, as no package manager manages it. Its receipts'
+  platform carries a fingerprint of `/etc/os-release`, the package
+  database (dpkg, rpm, apk or pacman), the alternatives' targets and the
+  linker's cache, so an upgraded compiler invalidates what it built. A host
+  whose package database pekit does not know records steps but never
+  reuses them, and says so. `pekit build` notes that such a build is not
+  hermetic.
+- As built in C5: the cache directory is `$PEKIT_CACHE_DIR`, else
+  `$XDG_CACHE_HOME/pekit`, else `~/.cache/pekit`, holding the store and the
+  staging directories (never `/tmp`, which is often memory).

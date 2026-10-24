@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use pekit::engine::{BuildError, Built, Settings, build};
 use pekit::load::load;
+use pekit::sandbox::HostTools;
 use pekit::target::resolve;
 
 /// The fixture module that declares what pekit's def-types and attributes
@@ -22,14 +23,16 @@ fn write(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
-/// The host directories a test's shell needs, which a real step never
-/// borrows.
-fn host_tools() -> Vec<PathBuf> {
-    ["/usr", "/bin", "/lib", "/lib64"]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|dir| dir.exists())
-        .collect()
+/// The host tools a test's shell needs, which a real step never borrows.
+fn host_tools() -> HostTools {
+    HostTools {
+        bind: ["/usr", "/bin", "/lib", "/lib64"]
+            .iter()
+            .map(PathBuf::from)
+            .filter(|dir| dir.exists())
+            .collect(),
+        ..HostTools::default()
+    }
 }
 
 /// A workspace whose `app` has `build.gcsl` of `text` and the files `files`.
@@ -66,6 +69,7 @@ fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
                 jobs: 4,
                 platform: "x86_64-linux".to_owned(),
                 host_tools: host_tools(),
+                reuse: true,
             };
             build(&mut loaded, &target, &settings)
                 .map_err(|error: BuildError| error.render(&loaded))

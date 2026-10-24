@@ -44,7 +44,7 @@ use gcsl::{Diagnostic, Span, Value};
 use crate::load::Loaded;
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
-use crate::sandbox::{HostView, OUTPUTS, StepSandbox, WORKSPACE};
+use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Store};
 use crate::target::Target;
 
@@ -61,10 +61,15 @@ pub struct Settings {
     pub jobs: usize,
     /// The platform steps run on, as receipts name it.
     pub platform: String,
-    /// Host directories every step's sandbox binds read-only where they
-    /// are, which makes its steps not hermetic: a host snapshot's tools, or a
-    /// test's. None for a hermetic build.
-    pub host_tools: Vec<PathBuf>,
+    /// The host tools every step's sandbox borrows, which make its steps
+    /// not hermetic: a host snapshot's, or a test's. None for a hermetic
+    /// build.
+    pub host_tools: HostTools,
+    /// Whether a step found in the store is reused: not when nothing says
+    /// when the tools steps run with change (see
+    /// [The host snapshot](crate::host#the-host-snapshot)). Every step that
+    /// succeeds is recorded either way.
+    pub reuse: bool,
 }
 
 /// What building a target came to.
@@ -460,11 +465,14 @@ impl Run<'_> {
             };
             receipt(of, &mut contents).map_err(BuildError::Engine)?
         };
-        if let Some(record) = self
-            .store
-            .record::<StepRecord>(&receipt)
-            .map_err(|error| engine(&error))?
-        {
+        let found = if self.settings.reuse {
+            self.store
+                .record::<StepRecord>(&receipt)
+                .map_err(|error| engine(&error))?
+        } else {
+            None
+        };
+        if let Some(record) = found {
             for (path, kept) in record.result.files() {
                 self.outputs.insert(path.to_owned(), kept);
             }

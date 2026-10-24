@@ -7,17 +7,19 @@ use std::process::Command;
 
 use gcsl::eval::Effects;
 use pekit::record::Kept;
-use pekit::sandbox::{HostView, StepSandbox};
+use pekit::sandbox::{HostTools, HostView, StepSandbox};
 use pekit::store::Store;
 
-/// The host directories a test's shell needs, which a real step never
-/// borrows.
-fn host_tools() -> Vec<PathBuf> {
-    ["/usr", "/bin", "/lib", "/lib64"]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|dir| dir.exists())
-        .collect()
+/// The host tools a test's shell needs, which a real step never borrows.
+fn host_tools() -> HostTools {
+    HostTools {
+        bind: ["/usr", "/bin", "/lib", "/lib64"]
+            .iter()
+            .map(PathBuf::from)
+            .filter(|dir| dir.exists())
+            .collect(),
+        ..HostTools::default()
+    }
 }
 
 /// What `sh -c script` prints through `effects`, and whether it succeeded,

@@ -189,6 +189,19 @@ impl Effects for HostView {
     }
 }
 
+/// Host tools a step's sandbox borrows, which make its step not hermetic:
+/// a host snapshot's (see [The host snapshot](crate::host#the-host-snapshot)),
+/// or a test's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostTools {
+    /// Host paths bound read-only where they are.
+    pub bind: Vec<PathBuf>,
+    /// Paths under them hidden, each an empty directory instead.
+    pub hide: Vec<PathBuf>,
+    /// The `PATH` a program runs with if its `exec` sets none.
+    pub path: Option<String>,
+}
+
 /// The sandbox a hermetic step runs in (see [The logical
 /// layout](#the-logical-layout)): its staging directory on the host, which
 /// holds its view.
@@ -200,9 +213,8 @@ pub struct StepSandbox {
     stage: PathBuf,
     /// Its own output directory's logical path, `/pekit-out/<target>/<step>`.
     own: String,
-    /// Host directories bound read-only where they are, which make the step
-    /// not hermetic: a host snapshot's tools, or a test's.
-    host: Vec<PathBuf>,
+    /// The host tools it borrows, which make the step not hermetic.
+    host: HostTools,
     /// The number of the next temporary directory.
     temps: AtomicU32,
 }
@@ -225,16 +237,16 @@ impl StepSandbox {
         Ok(Self {
             stage: stage.to_path_buf(),
             own,
-            host: Vec::new(),
+            host: HostTools::default(),
             temps: AtomicU32::new(0),
         })
     }
 
-    /// The sandbox with the host directories `dirs` bound read-only where
-    /// they are, which makes the step not hermetic.
+    /// The sandbox borrowing the host tools `tools`, which makes the step
+    /// not hermetic.
     #[must_use]
-    pub fn with_host(mut self, dirs: &[PathBuf]) -> Self {
-        self.host.extend_from_slice(dirs);
+    pub fn with_host(mut self, tools: &HostTools) -> Self {
+        self.host = tools.clone();
         self
     }
 
@@ -268,8 +280,11 @@ impl Effects for StepSandbox {
         let mut wrapped = Command::new(bwrap()?);
         wrapped.args(["--unshare-all", "--die-with-parent", "--new-session"]);
         wrapped.args(["--tmpfs", "/"]);
-        for dir in &self.host {
-            wrapped.arg("--ro-bind").arg(dir).arg(dir);
+        for path in &self.host.bind {
+            wrapped.arg("--ro-bind").arg(path).arg(path);
+        }
+        for path in &self.host.hide {
+            wrapped.arg("--tmpfs").arg(path);
         }
         wrapped
             .arg("--ro-bind")
@@ -287,12 +302,18 @@ impl Effects for StepSandbox {
             .arg("/tmp");
         wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
         wrapped.args(["--chdir", cwd.as_deref().unwrap_or(&self.own)]);
-        // Only what its `exec` sets.
+        // Only what its `exec` sets, and the host tools' `PATH` if it sets
+        // none.
         wrapped.arg("--clearenv");
+        let mut has_path = false;
         for (name, value) in env {
             if let Some(value) = value {
+                has_path |= name == "PATH";
                 wrapped.args(["--setenv", &name, &value]);
             }
+        }
+        if let Some(path) = self.host.path.as_ref().filter(|_| !has_path) {
+            wrapped.args(["--setenv", "PATH", path]);
         }
         wrapped.arg("--").args(&words);
         wrapped.env_clear();
