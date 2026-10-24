@@ -214,6 +214,16 @@ Each leaves pekit2 working, and tested, as far as it goes.
   whose package database pekit does not know records steps but never
   reuses them, and says so. `pekit build` notes that such a build is not
   hermetic.
+- As built after C7: a step's temporary directories, a `Dir.sandbox`'s
+  copy among them, are `.pekit-tmp-<n>` in its own output directory, never
+  `/tmp`, and a step's result may name only files in its output directory
+  or those it was given; any other is an error. Otherwise two steps could
+  give files of one path, and one would stand for the other.
+- As built after C7: a `Dir.sandbox`'s commands run in a bubblewrap of
+  their own beside the step's (GCSL's `Effects::sandbox_command`), never
+  inside it, since Ubuntu's AppArmor profile for bubblewrap forbids a
+  bubblewrap inside another. A step that needs a failed step's result fails
+  with that failure, unrun.
 - As built in C5: the cache directory is `$PEKIT_CACHE_DIR`, else
   `$XDG_CACHE_HOME/pekit`, else `~/.cache/pekit`, holding the store and the
   staging directories (never `/tmp`, which is often memory).

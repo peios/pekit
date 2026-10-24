@@ -50,6 +50,13 @@ found ("`fetch` of `<url>` is not pinned: its sha256 is `<hex>`"), which is
 example 4's "what you write before you know it". A mismatch fails loudly
 with both digests. The file is named by the URL's last segment.
 
+`fetch` is not allowed inside a hermetic step: its sandbox has no
+network, and the result could not be given back, being neither the step's
+output nor its input. Pekit fails such a step with "`fetch` runs outside
+hermetic steps: fetch in a parameter default, or in the caller, and pass
+the file in". Toolchains are fetched in parameter defaults (L4), which run
+at the call site, outside the step.
+
 Pekit answers a `fetch` effect node itself, never running GCSL's: the
 store is keyed by SHA-256, so a pinned file the store holds is found with no
 network at all, on any machine sharing the store. Otherwise pekit downloads
@@ -94,7 +101,32 @@ toolchain's `fetch` is a node of the target's graph, run only if the target
 needs it. GCSL gains a way for a host to give a root context as *the value
 of a top-level field of a file* (`RootValue::Field { file, path }`), which
 `prepare_call` evaluates within the call's unit, as it runs the files the
-call needs.
+call needs. This is the riskiest GCSL change, since `workspace.gcsl` is not
+among the files a call needs unless the target refers to it: the field
+must bring its file into the unit. It is prototyped first in D5.
+
+### L6a. A pinned toolchain carries its own runtime
+
+Bootlin's compilers are dynamically linked, against
+`/lib64/ld-linux-x86-64.so.2`: in a step's empty root they cannot start.
+Checked by hand: the x86-64 compiler runs from any prefix, with no
+`relocate-sdk.sh`, in an empty root holding only its own sysroot at `/lib`,
+`/lib64` and `/usr`. So `Toolchain::C` gains `runtime: Dir`, a root its
+tools run on, which both x86-64-hosted Bootlin toolchains take from the
+x86-64 toolchain's sysroot; the aarch64 cross toolchain's tools are x86-64
+programs too. `gcc.compile` runs its compiler in `Dir.sandbox` over
+`fs.compose_dir({"/" = runtime, "/opt/cc" = root, ...inputs})`. A build
+with pinned toolchains is thus hermetic.
+
+For that to be affordable, pekit answers `fs.compose_dir` and `Dir.sandbox`
+inside a step itself (the plan's "`Dir.sandbox` implemented with
+overlays", owed since layer C). A composition hard-links the store's
+read-only blobs, which takes 91 ms for the 8,400 files of a toolchain, and
+is bound read-only to every command, so no program can change a blob. A
+sandbox is a copy-on-write overlay over its directory, its writes in an
+upper layer of the step's own; reading a file or directory of it reads the
+upper layer over the lower. GCSL gains the `Effects` hooks for both, with
+copying as the default.
 
 ### L6. The host snapshot answers for the host's own tools
 
@@ -120,6 +152,11 @@ workspace). A library not found is an error naming where it looked. Pekit
 passes the same roots. `pekit lock` (layer E) will fetch libraries pinned by
 commit into `.gcsl/libraries/`; until then they are put there, or on the
 path, by hand.
+
+A library's files are named on receipts by their import path,
+`github.com/gcslib/gcc/compile.gcsl`, never by where a library root put
+them, as standard files are named `<stdlib>/fs.gcsl`, so that a step keys
+the same on every checkout.
 
 The `gcslib` libraries are written in this repository, under
 `gcslib/github.com/gcslib/<name>/`, so that the path is one root, until Jack
@@ -161,8 +198,13 @@ secret's file is staged into the one step given it and never stored (C3).
 
 Each leaves pekit2 working, and tested, as far as it goes.
 
+0. **D0, compositions and sandboxes answered by pekit** (L6a): hard-linked
+   compositions, overlay sandboxes, and the merged reads.
 1. **D1, the prelude's build declarations** (L1), with the fixture module
-   of pekit's tests removed.
+   of pekit's tests removed. First, it is checked that `import * from
+   prelude` brings def-types and attribute types to every file; GCSL's own
+   fixtures that declare `build`, `host_platform` or `step` are updated, not
+   the prelude softened.
 2. **D2, `fetch`** (L2), in GCSL and in pekit.
 3. **D3, `archive.unpack`** (L3), in GCSL and in pekit.
 4. **D4, library roots** (L7).
@@ -187,5 +229,9 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
   a file's field.
 - L6: under pekit, `system_c` names the host snapshot's `/usr`, and host
   snapshot paths are inputs keyed by the fingerprint.
+- L6a: a toolchain's own runtime, `Toolchain::C`'s `runtime: Dir`, and
+  compiles in a sandbox over it; compositions hard-linked from the store
+  and bound read-only; sandboxes as overlays.
+- L2: `fetch` refused inside a hermetic step.
 - L7: library roots, `$GCSL_LIBRARY_PATH` then `.gcsl/libraries/`, and the
   `gcslib` libraries kept in this repository for now.
