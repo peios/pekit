@@ -29,3 +29,30 @@ definition, wherever you run pekit from.
 
 If no definition has the name, pekit says so and suggests the closest
 names it has.
+
+## Several targets at once
+
+A command takes as many targets as you give it, and a *directory glob*
+selects every definition of its kind in the directories it matches,
+relative to where you run pekit:
+
+| Glob | Selects the definitions in |
+|---|---|
+| `.` | this directory |
+| `*` | each directory directly below this one |
+| `pkgs/*` | each directory directly below `pkgs` |
+| `pkgs/**` | `pkgs` and every directory below it |
+| `**` | this directory and every directory below it |
+
+`*` matches one directory's name, or part of one, as in `net.*`, and `**`
+any number of directories, none included. A definition that several names
+or globs select is built once.
+
+```sh
+pekit build hello 'pkgs/**'
+```
+
+Quote a glob, so your shell doesn't expand it first. Several targets are
+one build: a step two of them need runs once, and their steps run at the
+same time. A target that fails doesn't stop the others, and pekit exits
+with status 1 if any did.

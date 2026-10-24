@@ -26,6 +26,15 @@
 //! their logical paths, so that the steps after it are staged with them. Once
 //! the target's value has no holes, the files under `/pekit-out` it names are
 //! copied out to the output directory, each a copy of its own.
+//!
+//! Several targets are one build ([`build_all_observed`]): each is a unit of
+//! its own, against the one graph, so that a step two of them reach runs
+//! once and their steps run at once. A step is the target's whose unit met
+//! it, or met the step that met it, and its directory is under that
+//! target's, its name counted among that target's steps. A target that
+//! fails, in its evaluation or by a step it needs, fails alone. Under
+//! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
+//! dependency, fails there.
 
 use std::collections::HashMap;
 use std::fs;
@@ -38,7 +47,7 @@ use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
 use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
-use gcsl::workspace::graph::RootField;
+use gcsl::workspace::graph::{PreparedCall, RootField};
 use gcsl::workspace::{InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
@@ -48,7 +57,7 @@ use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
-use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
+use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
@@ -146,6 +155,12 @@ pub struct Settings {
     /// This machine's own state, never shared as a store can be: the key
     /// secrets' identities are hashed with.
     pub state: PathBuf,
+    /// The platform built for, set as `^platform` where the workspace
+    /// declares it; `None` for its default, the platform steps run on.
+    pub building_for: Option<ExecutionPlatform>,
+    /// Whether a target that waits for a step's result, a dynamic
+    /// dependency, fails where it would wait.
+    pub no_dynamic: bool,
 }
 
 /// What building a target came to.
@@ -153,6 +168,21 @@ pub struct Settings {
 pub struct Built {
     /// Its value, as plain data.
     pub value: Plain,
+    /// How many steps ran.
+    pub ran: usize,
+    /// How many steps were found in the store.
+    pub cached: usize,
+    /// The steps that passed only on a retry, by name.
+    pub flaky: Vec<String>,
+}
+
+/// What building several targets came to: each target's value, as plain
+/// data, or why it failed, in the order the targets were given, and the
+/// steps of them all.
+#[derive(Debug)]
+pub struct Outcomes {
+    /// Each target's value or failure.
+    pub targets: Vec<Result<Plain, BuildError>>,
     /// How many steps ran.
     pub ran: usize,
     /// How many steps were found in the store.
@@ -171,6 +201,9 @@ pub enum BuildError {
     Failed(Vec<Diagnostic>),
     /// Something of pekit's own failed: the store, the sandbox, a job.
     Engine(String),
+    /// The target waited for a step's result, a dynamic dependency, which
+    /// the build forbids: where it waited.
+    Dynamic(Diagnostic),
 }
 
 impl BuildError {
@@ -185,6 +218,7 @@ impl BuildError {
                 format!("error: {}\n", error.message())
             }
             BuildError::Engine(message) => format!("error: {message}\n"),
+            BuildError::Dynamic(diagnostic) => loaded.render(std::slice::from_ref(diagnostic)),
         }
     }
 }
@@ -217,6 +251,34 @@ pub fn build_observed(
     settings: &Settings,
     events: &mut dyn FnMut(&Event),
 ) -> Result<Built, BuildError> {
+    let mut outcomes = build_all_observed(loaded, std::slice::from_ref(target), settings, events)?;
+    let value = outcomes
+        .targets
+        .pop()
+        .unwrap_or_else(|| Err(engine(&"a build of one target gave no outcome")))?;
+    Ok(Built {
+        value,
+        ran: outcomes.ran,
+        cached: outcomes.cached,
+        flaky: outcomes.flaky,
+    })
+}
+
+/// Builds `targets` of `loaded`'s workspace as one build, one graph, as
+/// `settings` say, telling `events` each [event](crate::events#events) as
+/// it happens (see [Building](#building)): a step two of them need runs
+/// once, and their steps run at once. Each target comes to its value, or
+/// fails apart from the others.
+///
+/// # Errors
+///
+/// That something of pekit's own failed, as no target's does.
+pub fn build_all_observed(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+    events: &mut dyn FnMut(&Event),
+) -> Result<Outcomes, BuildError> {
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
     let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
@@ -225,27 +287,141 @@ pub fn build_observed(
             settings.state.display()
         ))
     })?);
-    let host = Arc::new(
-        HostView::new(
-            &loaded.root,
-            &settings.outputs,
-            &target.definition.dir,
-            &settings.scratch,
-        )
-        .with_keychain(Arc::clone(&keychain)),
-    );
+    let roots = prepare_roots(loaded, targets, settings, &keychain);
+    let code_table: Rc<[(String, Digest)]> = loaded
+        .names
+        .iter()
+        .zip(&loaded.sources)
+        .map(|(name, source)| (name.clone(), Digest::of(source.text().as_bytes())))
+        .collect();
+    let unit_roots = roots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, root)| Some((root.call.as_ref()?.unit(), index)))
+        .collect();
+    let mut run = Run {
+        loaded,
+        store,
+        settings,
+        roots,
+        unit_roots,
+        graph: Graph::new(),
+        outputs: HashMap::new(),
+        steps: HashMap::new(),
+        step_names: HashMap::new(),
+        step_roots: HashMap::new(),
+        names_used: HashMap::new(),
+        named: 0,
+        pool: Pool::new(settings.jobs.max(1)),
+        in_flight: HashMap::new(),
+        events,
+        began: Instant::now(),
+        keychain,
+        code_table,
+        ran: 0,
+        cached: 0,
+        flaky: Vec::new(),
+    };
+    run.drive()?;
+    let mut outcomes = Vec::with_capacity(run.roots.len());
+    for index in 0..run.roots.len() {
+        let done = run.roots.get_mut(index).and_then(|root| root.done.take());
+        let outcome = match done {
+            Some(Ok(value)) => run.copy_out(&value).and_then(|()| {
+                run.loaded
+                    .workspace
+                    .to_plain(&value)
+                    .map_err(BuildError::Engine)
+            }),
+            Some(Err(error)) => Err(error),
+            None => Err(engine(&"a target the build never finished")),
+        };
+        outcomes.push(outcome);
+    }
+    Ok(Outcomes {
+        targets: outcomes,
+        ran: run.ran,
+        cached: run.cached,
+        flaky: std::mem::take(&mut run.flaky),
+    })
+}
+
+/// A root of each of `targets` of `loaded`'s workspace, as `settings` say,
+/// its own effects under a host view of its directory that asks `keychain`
+/// for secrets: its prepared call, or why it could not be prepared.
+fn prepare_roots(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+    keychain: &Arc<Keychain>,
+) -> Vec<Root> {
+    let contexts = root_contexts(loaded, settings);
+    let fields = root_fields(loaded);
+    targets
+        .iter()
+        .map(|target| {
+            let host = Arc::new(
+                HostView::new(
+                    &loaded.root,
+                    &settings.outputs,
+                    &target.definition.dir,
+                    &settings.scratch,
+                )
+                .with_keychain(Arc::clone(keychain)),
+            );
+            let call = loaded.workspace.prepare_call_with(
+                (&target.def_type, &target.qualified()),
+                &[],
+                &contexts,
+                &fields,
+            );
+            let dir = target.qualified().trim_start_matches('/').to_owned();
+            match call {
+                Ok(call) => Root {
+                    call: Some(call),
+                    dir,
+                    host,
+                    main: Main::Runnable,
+                    done: None,
+                },
+                Err(error) => Root {
+                    call: None,
+                    dir,
+                    host,
+                    main: Main::Runnable,
+                    done: Some(Err(BuildError::Invoke(error))),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The root contexts every target of `loaded`'s workspace is evaluated in,
+/// as `settings` say, where the workspace declares each: `^host_platform`,
+/// `^platform` if the build is for another, and `^keychain_profile`.
+fn root_contexts(loaded: &mut Loaded, settings: &Settings) -> Vec<(String, Value)> {
     let mut contexts = Vec::new();
     if loaded.workspace.declares_context(HOST_PLATFORM) {
         let platform = loaded.workspace.from_plain(&settings.execution.plain());
         contexts.push((HOST_PLATFORM.to_owned(), platform));
     }
+    if let Some(building_for) = &settings.building_for
+        && loaded.workspace.declares_context(PLATFORM)
+    {
+        let platform = loaded.workspace.from_plain(&building_for.plain());
+        contexts.push((PLATFORM.to_owned(), platform));
+    }
     if loaded.workspace.declares_context(KEYCHAIN_PROFILE) {
         let profile = Value::Str(Rc::from(settings.profile.as_str()));
         contexts.push((KEYCHAIN_PROFILE.to_owned(), profile));
     }
-    // The workspace's toolchains and keychain, from `workspace.gcsl`'s
-    // `pekitconf`, where the module that declares each context is loaded
-    // and the field is there.
+    contexts
+}
+
+/// The root contexts set from `workspace.gcsl`'s `pekitconf`: the
+/// toolchains and the keychain, where the module that declares each
+/// context is loaded and the field is there.
+fn root_fields(loaded: &Loaded) -> Vec<RootField<'static>> {
     let mut fields = Vec::new();
     if let Some(file) = loaded.workspace.file(WORKSPACE_FILE) {
         for (context, path) in [
@@ -264,56 +440,7 @@ pub fn build_observed(
             }
         }
     }
-    let call = loaded
-        .workspace
-        .prepare_call_with(
-            (&target.def_type, &target.qualified()),
-            &[],
-            &contexts,
-            &fields,
-        )
-        .map_err(BuildError::Invoke)?;
-    let code_table: Rc<[(String, Digest)]> = loaded
-        .names
-        .iter()
-        .zip(&loaded.sources)
-        .map(|(name, source)| (name.clone(), Digest::of(source.text().as_bytes())))
-        .collect();
-    let mut run = Run {
-        loaded,
-        store,
-        settings,
-        host,
-        graph: Graph::new(),
-        outputs: HashMap::new(),
-        steps: HashMap::new(),
-        step_names: HashMap::new(),
-        names_used: HashMap::new(),
-        named: 0,
-        pool: Pool::new(settings.jobs.max(1)),
-        in_flight: HashMap::new(),
-        events,
-        began: Instant::now(),
-        keychain,
-        code_table,
-        target_dir: target.qualified().trim_start_matches('/').to_owned(),
-        ran: 0,
-        cached: 0,
-        flaky: Vec::new(),
-    };
-    let value = run.drive(&call)?;
-    run.copy_out(&value)?;
-    let value = run
-        .loaded
-        .workspace
-        .to_plain(&value)
-        .map_err(BuildError::Engine)?;
-    Ok(Built {
-        value,
-        ran: run.ran,
-        cached: run.cached,
-        flaky: std::mem::take(&mut run.flaky),
-    })
+    fields
 }
 
 /// An engine error from an I/O failure.
@@ -375,8 +502,11 @@ struct Run<'a> {
     store: Store,
     /// How the build runs.
     settings: &'a Settings,
-    /// The host's view, for what is not hermetic.
-    host: Arc<HostView>,
+    /// The targets the build evaluates.
+    roots: Vec<Root>,
+    /// The target each unit is of, by unit: a target's own, and each
+    /// step's, so that a step met in one is of the same target.
+    unit_roots: HashMap<u32, usize>,
     /// The action graph.
     graph: Graph,
     /// What the store keeps of each output a step made, by its logical
@@ -386,8 +516,10 @@ struct Run<'a> {
     steps: HashMap<NodeId, StepRun>,
     /// Each step's name, `<function>` or `<function>.<n>`, by node.
     step_names: HashMap<NodeId, String>,
-    /// How many steps of each function's name have been named.
-    names_used: HashMap<String, u32>,
+    /// The target each step is of, by node, its number among the roots.
+    step_roots: HashMap<NodeId, usize>,
+    /// How many steps of each function's name each target has named.
+    names_used: HashMap<(usize, String), u32>,
     /// How many of the graph's nodes have been looked at to name steps.
     named: usize,
     /// The pool effects run on.
@@ -403,8 +535,6 @@ struct Run<'a> {
     /// Each source's name and contents' digest, by input number: what a
     /// step's code and the functions it reads are keyed by.
     code_table: Rc<[(String, Digest)]>,
-    /// The target's directory under `/pekit-out`, its qualified name.
-    target_dir: String,
     /// How many steps ran.
     ran: usize,
     /// How many steps were found in the store.
@@ -464,7 +594,23 @@ struct InFlight {
     effect: String,
 }
 
-/// Where the target's unit is.
+/// A target the build evaluates (see [Building](#building)).
+struct Root {
+    /// Its prepared call; `None` if it could not be prepared, which `done`
+    /// says.
+    call: Option<PreparedCall>,
+    /// Its directory under `/pekit-out`, its qualified name.
+    dir: String,
+    /// The view its own effects run in, its working directory its
+    /// directory.
+    host: Arc<HostView>,
+    /// Where its unit is.
+    main: Main,
+    /// What it came to, once it is done.
+    done: Option<Result<Value, BuildError>>,
+}
+
+/// Where a target's unit is.
 enum Main {
     /// It may run.
     Runnable,
@@ -475,42 +621,17 @@ enum Main {
 }
 
 impl Run<'_> {
-    /// Runs the target's unit, the steps it needs and their effects, until
-    /// its value has no holes: that value.
-    fn drive(&mut self, call: &gcsl::workspace::graph::PreparedCall) -> Result<Value, BuildError> {
-        let mut main = Main::Runnable;
+    /// Runs every target's unit, the steps they need and their effects,
+    /// until each target's value has no holes, or it failed: what each came
+    /// to is its root's.
+    fn drive(&mut self) -> Result<(), BuildError> {
         loop {
-            if let Main::Runnable = main {
-                let host = GraphHost {
-                    defers: &hermetic,
-                    effects: &*self.host,
-                };
-                main = match self
-                    .loaded
-                    .workspace
-                    .run_prepared(call, &mut self.graph, host)
-                    .map_err(BuildError::Invoke)?
-                {
-                    Progress::Paused(node) => Main::Paused(node),
-                    Progress::Done(value) => Main::Holding(value),
-                };
-                self.name_new_steps();
+            self.run_roots();
+            self.name_new_steps();
+            let demands = self.root_demands();
+            if self.roots.iter().all(|root| root.done.is_some()) {
+                return Ok(());
             }
-            let demands = match &main {
-                Main::Paused(node) => vec![*node],
-                Main::Holding(value) => {
-                    let holes = self.graph.holes(value);
-                    if holes.is_empty() {
-                        let failures = self.graph.failures(value);
-                        if failures.is_empty() {
-                            return Ok(value.clone());
-                        }
-                        return Err(BuildError::Failed(failures));
-                    }
-                    holes
-                }
-                Main::Runnable => Vec::new(),
-            };
             let mut progressed = self.start_needed(&demands)?;
             progressed |= self.advance_steps()?;
             if !self.in_flight.is_empty() {
@@ -522,11 +643,21 @@ impl Run<'_> {
                 self.finished_effect(ran);
                 progressed = true;
             }
-            if let Main::Paused(node) = main
-                && !self.is_waiting(node)
-            {
-                main = Main::Runnable;
-                progressed = true;
+            for index in 0..self.roots.len() {
+                let paused = match self.roots.get(index) {
+                    Some(Root {
+                        main: Main::Paused(node),
+                        done: None,
+                        ..
+                    }) => *node,
+                    _ => continue,
+                };
+                if !self.is_waiting(paused) {
+                    if let Some(root) = self.roots.get_mut(index) {
+                        root.main = Main::Runnable;
+                    }
+                    progressed = true;
+                }
             }
             if !progressed {
                 return Err(BuildError::Engine(
@@ -535,6 +666,90 @@ impl Run<'_> {
                 ));
             }
         }
+    }
+
+    /// Runs the unit of each target that may run once: until it stops for a
+    /// node's result, which, for a step's under `--no-dynamic`, fails it, or
+    /// ends with a value, or fails.
+    fn run_roots(&mut self) {
+        let no_dynamic = self.settings.no_dynamic;
+        for root in &mut self.roots {
+            if root.done.is_some() || !matches!(root.main, Main::Runnable) {
+                continue;
+            }
+            let Some(call) = &root.call else {
+                continue;
+            };
+            let host = GraphHost {
+                defers: &hermetic,
+                effects: &*root.host,
+            };
+            match self
+                .loaded
+                .workspace
+                .run_prepared(call, &mut self.graph, host)
+            {
+                Ok(Progress::Paused(node)) => {
+                    let step = self
+                        .graph
+                        .node(node)
+                        .filter(|found| found.kind() == NodeKind::Deferred);
+                    match step {
+                        Some(found) if no_dynamic => {
+                            root.done = Some(Err(BuildError::Dynamic(Diagnostic::error(
+                                "the target waits here for a step's result, a dynamic \
+                                 dependency, which `--no-dynamic` forbids",
+                                found.span(),
+                            ))));
+                        }
+                        _ => root.main = Main::Paused(node),
+                    }
+                }
+                Ok(Progress::Done(value)) => root.main = Main::Holding(value),
+                Err(error) => root.done = Some(Err(BuildError::Invoke(error))),
+            }
+        }
+    }
+
+    /// The nodes each target that is not done waits for: the one its unit
+    /// stopped for, or the holes of the value it ended with. A target whose
+    /// value has no holes is done: its value, or its failures.
+    fn root_demands(&mut self) -> Vec<NodeId> {
+        let mut demands = Vec::new();
+        for root in &mut self.roots {
+            if root.done.is_some() {
+                continue;
+            }
+            match &root.main {
+                Main::Paused(node) => demands.push(*node),
+                Main::Holding(value) => {
+                    let holes = self.graph.holes(value);
+                    if holes.is_empty() {
+                        let failures = self.graph.failures(value);
+                        root.done = Some(if failures.is_empty() {
+                            Ok(value.clone())
+                        } else {
+                            Err(BuildError::Failed(failures))
+                        });
+                    }
+                    demands.extend(holes);
+                }
+                Main::Runnable => {}
+            }
+        }
+        demands
+    }
+
+    /// The target the unit `unit` is of, by its number among the roots: a
+    /// target's own unit's, or a step's, as its step's target.
+    fn root_of(&self, unit: u32) -> usize {
+        self.unit_roots.get(&unit).copied().unwrap_or(0)
+    }
+
+    /// The directory under `/pekit-out` of the target the step `id` is of.
+    fn step_dir(&self, id: NodeId) -> &str {
+        let root = self.step_roots.get(&id).copied().unwrap_or(0);
+        self.roots.get(root).map_or("", |found| found.dir.as_str())
     }
 
     /// Whether the node `id` is still waiting for its result.
@@ -580,7 +795,12 @@ impl Run<'_> {
             match node.kind() {
                 NodeKind::Deferred => self.start_step(id)?,
                 NodeKind::Effect(_) if node.unit() < STEP_UNITS => {
-                    let host: Arc<dyn Effects + Send + Sync> = self.host.clone();
+                    let root = self.root_of(node.unit());
+                    let Some(view) = self.roots.get(root).map(|found| Arc::clone(&found.host))
+                    else {
+                        continue;
+                    };
+                    let host: Arc<dyn Effects + Send + Sync> = view;
                     self.dispatch(id, host, None, None)?;
                 }
                 NodeKind::Effect(_) => continue,
@@ -830,11 +1050,13 @@ impl Run<'_> {
                 .and_then(|code| code.name_text.as_deref())
                 .unwrap_or("step")
                 .to_owned();
-            found.push((id, function));
+            found.push((id, function, self.root_of(node.unit())));
         }
         self.named = self.graph.len();
-        for (id, function) in found {
-            let count = self.names_used.entry(function.clone()).or_insert(0);
+        for (id, function, root) in found {
+            self.step_roots.insert(id, root);
+            self.unit_roots.insert(STEP_UNITS + id.number(), root);
+            let count = self.names_used.entry((root, function.clone())).or_insert(0);
             *count += 1;
             let name = if *count == 1 {
                 function
@@ -935,7 +1157,7 @@ impl Run<'_> {
             .filter_map(|&file| self.code_table.get(file as usize).cloned())
             .collect();
         let name = self.step_name(id);
-        let own = format!("{}/{name}", self.target_dir);
+        let own = format!("{}/{name}", self.step_dir(id));
         let own_path = format!("{OUTPUTS}/{own}");
         let mut given: Vec<(String, Kept)> = Vec::new();
         let table = Rc::clone(&self.code_table);
@@ -1282,7 +1504,7 @@ impl Run<'_> {
             return Ok(());
         };
         self.unstage(id, &step)?;
-        let own = format!("{}/{name}", self.target_dir);
+        let own = format!("{}/{name}", self.step_dir(id));
         let attempt = step.attempt + 1;
         let sandbox = self.fresh_sandbox(id, &own, attempt, (&step.given, &step.secrets))?;
         self.graph.forget_unit(STEP_UNITS + id.number());

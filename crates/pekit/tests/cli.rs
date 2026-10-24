@@ -181,3 +181,49 @@ fn a_library_s_steps_key_the_same_wherever_the_library_is_found() {
         "{out}"
     );
 }
+
+#[test]
+fn several_targets_are_built_and_shown_each() {
+    let dir = workspace();
+    write(
+        dir.path(),
+        &[(
+            "other/build.gcsl",
+            "def build plain() { = 1 }\ndef build broken() { = panic(\"no\") }",
+        )],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    // A name and a glob: each target, then the steps of them all.
+    let both = pekit(dir.path(), cache.path(), &["build", "hello", "other/**"]);
+    let (out, err) = printed(&both);
+    assert_eq!(both.status.code(), Some(1), "{out}{err}");
+    assert_eq!(
+        out,
+        "built app/hello\n  pekit-out/app/hello/shout/out.txt\nbuilt other/plain\n1 step run, \
+         0 found in the store\n"
+    );
+    assert!(err.contains("error: no"), "{err}");
+    // `--rebuild` reuses nothing.
+    let again = pekit(dir.path(), cache.path(), &["build", "hello", "--rebuild"]);
+    let (out, _) = printed(&again);
+    assert!(
+        out.starts_with("built app/hello: 1 step run, 0 found"),
+        "{out}"
+    );
+    // A glob that selects nothing, and a platform that is none.
+    let none = pekit(dir.path(), cache.path(), &["build", "nowhere/*"]);
+    let (_, err) = printed(&none);
+    assert_eq!(none.status.code(), Some(1));
+    assert_eq!(err, "error: no `build` is selected by `nowhere/*`\n");
+    let bad = pekit(
+        dir.path(),
+        cache.path(),
+        &["build", "hello", "--platform=-linux"],
+    );
+    let (_, err) = printed(&bad);
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(
+        err.contains("`--platform -linux` names no platform"),
+        "{err}"
+    );
+}

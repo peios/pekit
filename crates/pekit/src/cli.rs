@@ -2,16 +2,20 @@
 //!
 //! # Commands
 //!
-//! `pekit build TARGET` builds the definition `TARGET` of the def-type
-//! `build`, named as [Targets](crate::target#targets) says, from the
-//! workspace the current directory is in. It shows the files the target
-//! gave, and how many steps ran and how many were found in the store.
+//! `pekit build TARGET...` builds the definitions `TARGET...` of the
+//! def-type `build`, each named or selected by a directory glob as
+//! [Targets](crate::target#targets) says, from the workspace the current
+//! directory is in, as one build ([`build_all_observed`]). It shows the files
+//! each target gave, and how many steps ran and how many were found in the
+//! store; a target that fails, its error.
 //! `--jobs N` runs at most `N` programs at once, by default as many as the
 //! machine has processors, `--profile NAME` uses the keychain's secrets of
 //! the profile `NAME`, `dev` by default ([Secrets](crate::keychain#secrets)),
-//! and `--trace FILE` writes a Chrome trace of the build ([The
-//! trace](crate::trace#the-trace)). On a terminal, a line shows the steps
-//! running as it goes.
+//! `--trace FILE` writes a Chrome trace of the build ([The
+//! trace](crate::trace#the-trace)), `--platform ARCH[-OS]` builds for that
+//! platform, `--rebuild` reuses nothing from the store, and `--no-dynamic`
+//! fails a target that waits for a step's result. On a terminal, a line
+//! shows the steps running as it goes.
 //!
 //! The store and the directories steps are staged in are under the cache
 //! directory: `$PEKIT_CACHE_DIR` if it is set, else `pekit` under
@@ -21,8 +25,8 @@
 //! `~/.local/state/pekit`. Outputs are copied to `pekit-out/` at the
 //! workspace's root.
 //!
-//! It exits with 0 once the target is built, 1 if it could not be, and 2
-//! for a command it does not understand.
+//! It exits with 0 once every target is built, 1 if one could not be, and
+//! 2 for a command it does not understand.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -32,12 +36,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::engine::{Settings, build_observed};
+use crate::engine::{BuildError, Outcomes, Settings, build_all_observed};
 use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
-use crate::load::load;
-use crate::target::resolve;
+use crate::load::{Loaded, load};
+use crate::target::{Target, select};
 use crate::trace::Trace;
 
 /// Pekit, a build system that runs GCSL build files as an action graph.
@@ -59,8 +63,18 @@ enum Command {
 /// `pekit build`'s arguments (see [Commands](#commands)).
 #[derive(Debug, clap::Args)]
 struct BuildArgs {
-    /// The target: `hello`, or qualified by its directory, `app/hello`.
-    target: String,
+    /// The targets: `hello`, qualified by its directory, `app/hello`, or a
+    /// directory glob, `pkgs/*` or `**`.
+    #[arg(required = true, value_name = "TARGET")]
+    targets: Vec<String>,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
+}
+
+/// The flags every command that builds takes (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct Shared {
     /// How many programs may run at once.
     #[arg(long, short)]
     jobs: Option<usize>,
@@ -70,6 +84,15 @@ struct BuildArgs {
     /// The keychain's profile, whose secrets the build uses.
     #[arg(long, default_value = "dev")]
     profile: String,
+    /// The platform to build for, `ARCH` or `ARCH-OS`: `aarch64-linux`.
+    #[arg(long, value_name = "PLATFORM")]
+    platform: Option<String>,
+    /// Run every step, reusing nothing from the store.
+    #[arg(long)]
+    rebuild: bool,
+    /// Fail a target that waits for a step's result, a dynamic dependency.
+    #[arg(long)]
+    no_dynamic: bool,
 }
 
 /// Where the command writes: what it shows, its warnings and errors, and
@@ -110,7 +133,7 @@ pub fn run(
     }
 }
 
-/// `pekit build TARGET` (see [Commands](#commands)).
+/// `pekit build TARGET...` (see [Commands](#commands)).
 fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
     let mut loaded = match load(cwd) {
         Ok(loaded) => loaded,
@@ -119,13 +142,86 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
             return ExitCode::FAILURE;
         }
     };
-    let target = match resolve(&loaded.workspace, ("build", &args.target), &loaded.here) {
-        Ok(target) => target,
+    let names: Vec<&str> = args.targets.iter().map(String::as_str).collect();
+    let targets = match select(&loaded.workspace, "build", &names, &loaded.here) {
+        Ok(targets) if targets.is_empty() => {
+            let _ = writeln!(
+                terminal.err,
+                "error: no `build` is selected by {}",
+                quoted(&names)
+            );
+            return ExitCode::FAILURE;
+        }
+        Ok(targets) => targets,
         Err(error) => {
             let _ = writeln!(terminal.err, "{}", error.message());
             return ExitCode::FAILURE;
         }
     };
+    let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let outcomes = match build_targets(&mut loaded, &targets, &settings, &args.shared, terminal) {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            return ExitCode::FAILURE;
+        }
+    };
+    let counts = steps_counted(outcomes.ran, outcomes.cached);
+    let mut failed = false;
+    for (target, outcome) in targets.iter().zip(&outcomes.targets) {
+        match outcome {
+            Ok(value) => {
+                if targets.len() == 1 {
+                    let _ = writeln!(terminal.out, "built {}: {counts}", target.qualified());
+                } else {
+                    let _ = writeln!(terminal.out, "built {}", target.qualified());
+                }
+                for (path, _) in value.files() {
+                    let shown = shown_path(path, &loaded.root, cwd);
+                    let _ = writeln!(terminal.out, "  {}", shown.display());
+                }
+            }
+            Err(error) => {
+                failed = true;
+                let _ = write!(terminal.err, "{}", error.render(&loaded));
+            }
+        }
+    }
+    if targets.len() > 1 {
+        let _ = writeln!(terminal.out, "{counts}");
+    }
+    if outcomes.ran > 0 {
+        let _ = writeln!(
+            terminal.err,
+            "note: steps ran with the host's own tools, so this build is not hermetic"
+        );
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `names`, each in backticks, joined as a list is.
+fn quoted(names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    quoted.join(", ")
+}
+
+/// How many steps ran and how many were found, as a build shows them.
+fn steps_counted(ran: usize, cached: usize) -> String {
+    let steps = if ran == 1 { "step" } else { "steps" };
+    format!("{ran} {steps} run, {cached} found in the store")
+}
+
+/// The settings a command builds `loaded`'s workspace with, as `shared`
+/// says: the host's snapshot, warned of on `terminal` if its packages
+/// cannot be identified. `None`, the error shown, for a `--platform` that
+/// names none.
+fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -> Option<Settings> {
     let cache = cache_dir();
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
@@ -136,24 +232,60 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
              from the store"
         );
     }
-    let settings = Settings {
+    let building_for = match &shared.platform {
+        None => None,
+        Some(named) => {
+            let (arch, os) = named.split_once('-').unwrap_or((named, &execution.os));
+            if arch.is_empty() || os.is_empty() {
+                let _ = writeln!(
+                    terminal.err,
+                    "error: `--platform {named}` names no platform: write `ARCH` or `ARCH-OS`, \
+                     such as `aarch64-linux`"
+                );
+                return None;
+            }
+            Some(ExecutionPlatform {
+                arch: arch.to_owned(),
+                os: os.to_owned(),
+            })
+        }
+    };
+    Some(Settings {
         store: cache.join("store"),
         outputs: loaded.root.join("pekit-out"),
         scratch: cache.join("scratch"),
-        jobs: args.jobs.unwrap_or_else(|| {
+        jobs: shared.jobs.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
         }),
         platform: host.platform(&execution.describe()),
         execution,
-        reuse: host.fingerprint.is_some(),
+        reuse: host.fingerprint.is_some() && !shared.rebuild,
         host_tools: host.tools(),
-        profile: args.profile.clone(),
+        profile: shared.profile.clone(),
         state: state_dir(),
-    };
+        building_for,
+        no_dynamic: shared.no_dynamic,
+    })
+}
+
+/// Builds `targets` of `loaded`'s workspace with `settings`, showing its
+/// progress on `terminal` as it goes and writing its trace where `shared`
+/// says.
+///
+/// # Errors
+///
+/// What [`build_all_observed`] fails with.
+fn build_targets(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Result<Outcomes, BuildError> {
     let mut trace = Trace::new();
     let mut progress = Progress::default();
     let live = terminal.live;
-    let built = {
+    let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
             trace.add(event);
@@ -161,12 +293,12 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
                 progress.show(event, err);
             }
         };
-        build_observed(&mut loaded, &target, &settings, &mut events)
+        build_all_observed(loaded, targets, settings, &mut events)
     };
     if live {
         progress.clear(terminal.err);
     }
-    if let Some(path) = &args.trace {
+    if let Some(path) = &shared.trace {
         let written = serde_json::to_vec(&trace.to_json())
             .map_err(|error| error.to_string())
             .and_then(|bytes| std::fs::write(path, bytes).map_err(|error| error.to_string()));
@@ -178,39 +310,14 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
             );
         }
     }
-    match built {
-        Ok(built) => {
-            for name in &built.flaky {
-                let _ = writeln!(
-                    terminal.err,
-                    "warning: step `{name}` passed only when it was run again: it is flaky"
-                );
-            }
-            let _ = writeln!(
-                terminal.out,
-                "built {}: {} {} run, {} found in the store",
-                target.qualified(),
-                built.ran,
-                if built.ran == 1 { "step" } else { "steps" },
-                built.cached
-            );
-            for (path, _) in built.value.files() {
-                let shown = shown_path(path, &loaded.root, cwd);
-                let _ = writeln!(terminal.out, "  {}", shown.display());
-            }
-            if built.ran > 0 {
-                let _ = writeln!(
-                    terminal.err,
-                    "note: steps ran with the host's own tools, so this build is not hermetic"
-                );
-            }
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render(&loaded));
-            ExitCode::FAILURE
-        }
+    let outcomes = outcomes?;
+    for name in &outcomes.flaky {
+        let _ = writeln!(
+            terminal.err,
+            "warning: step `{name}` passed only when it was run again: it is flaky"
+        );
     }
+    Ok(outcomes)
 }
 
 /// A build's progress, as a terminal shows it: one line, rewritten at each

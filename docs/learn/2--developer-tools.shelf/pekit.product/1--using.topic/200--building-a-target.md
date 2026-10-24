@@ -65,6 +65,9 @@ is never recorded, so it runs every time.
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
+`--rebuild` runs every step again, reusing nothing from the store, and
+records each as it goes.
+
 ## Toolchains
 
 A library asks GCSL's `toolchain` module for a compiler, as
@@ -187,6 +190,21 @@ do, pekit sets it to that machine for every target it builds, as a record
 such as `{arch = "x86_64"; os = "linux"}`. Toolchains read it to choose
 what runs where. Every step is keyed by its platform too, so results from
 one kind of machine are never reused on another.
+
+What a build is *for* is the `platform` context, by default the machine
+steps run on. `--platform aarch64-linux` builds for another, as
+`with { platform = ... }` would for every target, so the toolchains for
+that platform are chosen. `--platform aarch64` keeps the machine's
+operating system.
+
+## Dynamic dependencies
+
+A target can wait for a step's result, to decide what to build next from
+what a generator wrote, say. Pekit then builds that step, and carries on.
+`--no-dynamic` fails a target that waits for a step's result, at the
+point it waits, so that what a build runs is known before anything runs.
+A target waiting for a file it fetches or unpacks is not a dynamic
+dependency.
 
 ## The host's tools
 

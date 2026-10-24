@@ -20,6 +20,9 @@ use gcsl::eval::plain::Plain;
 /// The name of the context that holds the execution platform.
 pub const HOST_PLATFORM: &str = "host_platform";
 
+/// The context of the platform being built for, which `--platform` sets.
+pub const PLATFORM: &str = "platform";
+
 /// An execution platform (see [Platforms](#platforms)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionPlatform {

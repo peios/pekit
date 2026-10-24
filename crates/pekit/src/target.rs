@@ -17,6 +17,15 @@
 //! A qualified name always means the definition in that directory. A name
 //! that matches nothing is "no `build` is named `hello`", suggesting the
 //! closest names there are.
+//!
+//! A command takes any number of names ([`select`]), and a *directory
+//! glob* among them, a pattern with `*` in it, selects every definition of
+//! the def-type in the directories it matches, relative to the directory
+//! pekit is run from: `*` matches one directory's name, `**` any number of
+//! them, none among them, so `**` alone is every definition below, and
+//! `pkgs/*` every one a directory of `pkgs` holds. `.` is the directory
+//! itself. What several names select is selected once, the targets sorted
+//! by their qualified names.
 
 use std::fmt::Write as _;
 
@@ -25,7 +34,7 @@ use gcsl::Diagnostic;
 
 /// The def-types GCSL's prelude declares for pekit, which a workspace has
 /// whether or not it defines anything with them.
-const PRELUDE_DEF_TYPES: [&str; 1] = ["build"];
+const PRELUDE_DEF_TYPES: [&str; 2] = ["build", "package"];
 
 /// A definition someone named (see [Targets](#targets)).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +194,121 @@ pub fn resolve(
             })
         }
     }
+}
+
+/// The definitions of the def-type `def_type` in `workspace` that `names`
+/// select, each a name or a directory glob, named from the directory
+/// `here`, relative to its root (see [Targets](#targets)): sorted by
+/// qualified name, each once. A glob that selects nothing selects nothing.
+///
+/// # Errors
+///
+/// What [`resolve`] finds wrong with a name, or that the workspace's
+/// def-types cannot be listed.
+pub fn select(
+    workspace: &Workspace,
+    def_type: &str,
+    names: &[&str],
+    here: &str,
+) -> Result<Vec<Target>, TargetError> {
+    let mut targets: Vec<Target> = Vec::new();
+    for name in names {
+        if !is_glob(name) {
+            targets.push(resolve(workspace, (def_type, name), here)?);
+            continue;
+        }
+        let def_types = workspace.def_types().map_err(TargetError::DefTypes)?;
+        let Some(found) = def_types.iter().find(|found| found.path == def_type) else {
+            if PRELUDE_DEF_TYPES.contains(&def_type) {
+                continue;
+            }
+            return Err(TargetError::NoDefType {
+                def_type: def_type.to_owned(),
+            });
+        };
+        let pattern = glob_segments(here, name);
+        targets.extend(
+            found
+                .definitions
+                .iter()
+                .filter(|definition| {
+                    let dir: Vec<&str> = definition
+                        .dir
+                        .split('/')
+                        .filter(|part| !part.is_empty())
+                        .collect();
+                    matches_glob(&pattern, &dir)
+                })
+                .map(|definition| Target {
+                    def_type: def_type.to_owned(),
+                    definition: definition.clone(),
+                }),
+        );
+    }
+    targets.sort_by_key(Target::qualified);
+    targets.dedup();
+    Ok(targets)
+}
+
+/// Whether `name` is a directory glob: `.`, or a pattern with `*` in it.
+fn is_glob(name: &str) -> bool {
+    name == "." || name.contains('*')
+}
+
+/// The segments of the directory glob `name`, from the directory `here`:
+/// `here`'s own, then the glob's, `.` dropped and `..` leaving the one
+/// before.
+fn glob_segments<'a>(here: &'a str, name: &'a str) -> Vec<&'a str> {
+    let mut segments: Vec<&str> = Vec::new();
+    let start = if name.starts_with('/') { "" } else { here };
+    for part in start.split('/').chain(name.split('/')) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(part),
+        }
+    }
+    segments
+}
+
+/// Whether the directory of the segments `dir` matches the glob of the
+/// segments `pattern`: `**` any number of segments, a segment with `*` in it
+/// any one whose name its parts begin, end and are in, in order, and any
+/// other the same segment.
+fn matches_glob(pattern: &[&str], dir: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => dir.is_empty(),
+        Some((&"**", rest)) => (0..=dir.len()).any(|skip| matches_glob(rest, &dir[skip..])),
+        Some((first, rest)) => match dir.split_first() {
+            Some((segment, others)) => {
+                matches_segment(first, segment) && matches_glob(rest, others)
+            }
+            None => false,
+        },
+    }
+}
+
+/// Whether the directory name `segment` matches the glob segment `pattern`,
+/// whose `*`s each match any run of characters.
+fn matches_segment(pattern: &str, segment: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = segment.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 /// "no `build` is named `hello`", suggesting the closest names `found`'s

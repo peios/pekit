@@ -35,6 +35,29 @@ impl Default for Options<'_> {
     }
 }
 
+/// The settings a test builds the workspace at `root` with, its store and
+/// scratch in `state`, on the architecture `arch`, with the keychain's
+/// profile `profile`.
+pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Settings {
+    Settings {
+        store: state.join("store"),
+        outputs: root.join("pekit-out"),
+        scratch: state.join("scratch"),
+        jobs: 4,
+        platform: format!("{arch}-linux"),
+        execution: ExecutionPlatform {
+            arch: arch.to_owned(),
+            os: "linux".to_owned(),
+        },
+        host_tools: host_tools(),
+        reuse: true,
+        profile: profile.to_owned(),
+        state: state.join("state"),
+        building_for: None,
+        no_dynamic: false,
+    }
+}
+
 /// Builds `build <name>` of the workspace at `root`, its store and scratch
 /// beside it in `state`: what it came to, or its error as shown.
 pub fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
@@ -65,21 +88,7 @@ pub fn observed_with(
                 Ok(target) => target,
                 Err(error) => return (Err(error.message()), events),
             };
-            let settings = Settings {
-                store: state.join("store"),
-                outputs: root.join("pekit-out"),
-                scratch: state.join("scratch"),
-                jobs: 4,
-                platform: format!("{arch}-linux"),
-                execution: ExecutionPlatform {
-                    arch,
-                    os: "linux".to_owned(),
-                },
-                host_tools: host_tools(),
-                reuse: true,
-                profile,
-                state: state.join("state"),
-            };
+            let settings = settings(&root, &state, (&arch, &profile));
             let built = build_observed(&mut loaded, &target, &settings, &mut |event| {
                 events.push(event.clone());
             });
