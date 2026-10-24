@@ -721,6 +721,31 @@ value of its own type, `Variant<E, T>`, which can still be called as a
   `variant_payload` and `partial_matches` have generic signatures, which
   the prelude's methods `matches` and `payload` call.
 
+### As built (9a, 9b)
+
+GCSL `c8012a7` and `0b68623`. Differences from the plan above:
+
+- **Identity by key, not by declaration number.** An enum is
+  `TyKind::Enum { key, name }`. Its key is a name no source can write,
+  `<enum NAME@ORIGIN>`, where the origin is the declaring file's path, or
+  `input N` for a session input. Each variant has a key of its own too.
+  Declaration numbers change between scans and session inputs, so they
+  would have made one enum several types.
+- **Bounds are checked closed.** A payload fits its bound by its record
+  type as written (`TypeTable::fits_bound`). Under the ordinary rest-field
+  rule, `{side: Int}` would not fit `{*: Int}`.
+- **Equality.** `==` on values of an enum compares them whole, as `===`
+  does. It is refused for an enum without a bound, whose payloads may
+  hold functions.
+- **`is E`** tests a value's enum (`ValueTest::Enum`).
+- **Errors in the prelude.** The runtime error of `payload` points into
+  the prelude's method, since GCSL reports no call stack. A stack would
+  improve it; recorded as a possible later improvement.
+- **Hidden fields.** A payload's hidden fields are outside its bound's
+  check. To document if it matters for toolchains.
+- `Partial<T>` field reads are "field `arch` of `Partial<Platform>` may
+  be absent", noting `.matches(...)`.
+
 ### Decisions to confirm with Jack
 
 - A variant is a value of `Variant<E, T>`, a callable subtype of
