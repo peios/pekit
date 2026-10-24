@@ -414,12 +414,12 @@ checker. So generics come first, and methods are built on them.
   argument here". An argument whose type mentions `T` is checked bottom
   up, with no expected type, so that it can bind `T`.
 - **Bodies are checked once, for every `T`.** Inside the body a value of
-  type `T` is opaque. It can be passed, returned, stored in records and
-  lists, and compared with `===`, but not measured: no operator, field,
-  index, call, interpolation or equality. A `T` is a subtype only of itself
-  and of the either shape and `{}`-free supertypes that contain it. A
+  type `T` is opaque. It can be passed, returned, and stored in records
+  and lists, but nothing else: no operator, comparison (`===` included,
+  since `T` may be a function), field, index, call or interpolation. A `T`
+  is a subtype only of itself, and of a union that has it as a member. A
   `T` may be bound to any type, a lazy one included: it is
-  laziness-transparent, so bareness never wraps a `T` and a pure
+  laziness-transparent, so bareness never wraps a `T`, and a pure
   function's `T` parameter is not inferred.
 - **Generic types.** `type NAME<T, ...> = TYPE`, used as
   `NAME<Int, ...>`, its parameters substituted into its definition when
