@@ -64,6 +64,12 @@ How it is built, and where it departs from the plan:
 - **Settling (found while testing).** `settle_function` finds nested
   functions by their `Fn` or `Lazy` nodes, so it now also settles each
   function's default functions' captures.
+- **Parameter types (follow-up `fix(calls)` commit).** A default function's
+  copies of the earlier parameters take the types its function resolved,
+  before inference, instead of resolving the type expressions again. That
+  reported an erroneous type once per default, and gave a memoised
+  function's default either-shaped parameters where its body has present
+  ones.
 - **Top-level copies.** A top-level function's default functions' copies
   join its own (`DefaultsChecked::copies`), which decide where its closure
   is made.
@@ -82,8 +88,9 @@ How it is built, and where it departs from the plan:
   captures.
 - **Lowering.** Shadowed declarations stub their default functions too.
 - **Evaluator.** `Evaluator::default_arg` calls the closure's capture with
-  the new frame's earlier slots, passing the call's caller and its own
-  depth budget.
+  the new frame's earlier slots, copied up the stack in place so that a
+  call allocates nothing once the stack has grown, passing the call's caller
+  and its own depth budget.
 - **Index.** References, rename and hover treat a parameter read in a
   default as the parameter itself, with no change needed. Completion in a
   default offers only the parameters before it.
