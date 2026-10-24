@@ -27,7 +27,9 @@ the language server and Learn follow every syntax change.
    (an existing, tested feature); only a variable passed positionally by its
    name alone after a named argument changes meaning.
 4. **Defaults that are expressions** (`9a93d47`; see below).
-
+5. **Duration and size literals** (`c9b8040`; see below).
+6. **Host-declared attributes** (`b57331c`; see below), and **retry and
+   timeout** (`a705b27`).
 8. **Generics** (`ecbec8a`, `79f5461`, `7180d8a`; see below). Generic
    functions with inferred type parameters, and generic `type`
    declarations.
