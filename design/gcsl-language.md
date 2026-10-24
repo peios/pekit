@@ -1157,6 +1157,34 @@ GCSL `73e0562` and `84c63ce`. Differences from the plan above:
 - **Errors of a refused operation** name the types as written, "cannot
   add `Secret<String>` and Int".
 
+### As built (12b, 12c)
+
+GCSL `6761d60` and `d192a4d`. Differences from the plan above:
+
+- **`Revealed<T>` is the secret type with a flag**, `TyKind::Secret(T,
+  revealed)`, and values carry the flag too. `Revealed<A>` fits
+  `Secret<B>` if `A` fits `B`. No unrevealed secret fits a revealed one,
+  and the mismatch is noted "`.reveal()` reveals it".
+- **Contagion.** A result is revealed only if every secret computed on
+  is. So `"--token={s.reveal()}"` can go to a program, while mixing in an
+  unrevealed secret, or wrapping a revealed one in `secret()` again, keeps
+  it from one. Joins follow the same rule.
+- **`exec`'s `argv`** is `List<Revealed<String>>`: the union `String |
+  Revealed<String>` simplifies to it, since a plain string fits. A
+  revealed program name shows as "cannot run `***`".
+- **The flag is public.** Equality and memo keys include it, so a
+  memoised call of a revealed secret is never answered with the
+  unrevealed secret's result.
+- **A derived secret's identity is its derivation**, e.g.
+  `str-concat($(user), ":")` or `field.pass($(login))`. It records the
+  operation and each operand's token: a secret's identity, escaped, or a
+  plain value's source text, with a long one replaced by an FNV-1a-128
+  digest. It is not the sources joined. Joining was wrong: `s + "a"` and
+  `s + "b"` shared an identity while their values differed. Because
+  secrets compare by identity, one memoised call answered the other.
+- **Hosts** read the identities a value holds with
+  `Value::secret_identities`.
+
 ### Decisions to confirm with Jack
 
 - A secret compares and hashes by identity alone outside a secret
