@@ -1026,6 +1026,89 @@ kind of recover() in the test def_type that just marks the test failed".
 - What `recover` catches is exactly what `#[retry]` retries.
 - `assert COND, MESSAGE`, with both sides of a failed comparison shown.
 
+## 12. Secrets: `Secret<T>`
+
+Agreed in core-model.md ("Secrets and signing"): `Secret<T>` is a core
+type; GCSL guarantees a secret never leaks through `show`, formatting,
+logs, the event stream or the web view; secrets are contagious;
+`reveal()` returns `Revealed<T>`, which only the places where a value
+leaves GCSL accept; `unsafe_value()` is the deliberate escape; a secret
+carries a public identity. Built in three steps, each usable alone: 12a
+the type, contagion and redaction; 12b `reveal()` and `exec`; 12c
+identities for hosts' receipts.
+
+### Rule (12a: the type)
+
+- **Making one.** `secret(value, identity)` makes a `Secret<T>` of a
+  value of type `T`, with `identity`, a `String`, its public name, such
+  as a key's name and fingerprint. The keychain library (later) will
+  make them; plain code may too.
+- **Not its value.** `Secret<T>` is not a subtype of `T`, so a secret is
+  never passed where a plain value is expected: "a secret is used where
+  a `String` is expected", noting `reveal()` for a program and
+  `unsafe_value()` for the deliberate escape. A plain `T` fits
+  `Secret<T>`, so `if c { s } else { "default" }` is a `Secret<String>`.
+  A generic function takes a secret as its type parameter's binding, so
+  code that only passes values on needs nothing.
+- **Contagion.** An operator with a secret operand is the operator on the
+  values, its result a secret: `s + "x"`, `n * 2`, `s == t` (a
+  `Secret<Bool>`), interpolation, `"{s}"`, a `Secret<String>`. A field of
+  a secret record, `cfg.token`, and an element of a secret list at a
+  plain position, are secrets. A record or list holding a secret is not
+  itself one: its type says which field or element is.
+- **No branching.** A secret cannot decide what runs: an `if`'s
+  condition, a `for`'s iterable or guard, `&&` and `||`, a list's index,
+  `is`, and `as` refuse one, "a secret cannot decide what runs". That
+  closes the implicit flows by which a program could otherwise copy a
+  secret into a plain value.
+- **Redaction.** A secret shows as `***`, by `show`, by a value's display
+  in the REPL and in `gcsl run`'s output, and in a runtime error's
+  message. An error raised inside a secret's operation, an overflow say,
+  names no secret value.
+- **`unsafe_value()`**, a method of the prelude on `Secret<T>`, is the
+  value, a `T`. It is the escape the design names, for a linter or a
+  strict mode to flag.
+- **Equality and memoisation** compare secrets by value, in memory only.
+
+### Rule (12b: `reveal()`)
+
+- `s.reveal()` is a `Revealed<T>`, still redacted and still contagious,
+  which no GCSL code can read. Only where a value leaves GCSL takes one:
+  for now an element of `exec`'s `argv`, `String | Revealed<String>`;
+  `env` and mounted files follow with feature 14. Searching for
+  `.reveal()` lists every program that receives a secret.
+- `exec` passes a revealed argument's value to the program, and shows
+  it as `***` wherever GCSL shows the command line.
+
+### Rule (12c: identities)
+
+- A secret's identity is public. A secret derived from others, by an
+  operator or interpolation, has an identity derived from theirs, in
+  order, so that equal derivations have equal identities.
+- A host reads the identities of the secrets a value holds, without
+  their values, for its receipts: pekit records them in a step's
+  identity, so outputs signed with a test key and with the release key
+  never share a cache entry.
+
+### Implementation (planned, 12a)
+
+- **Types.** `TyKind::Secret(TyId)`, written `Secret<T>`; `T <: Secret<T>`
+  and `Secret<A> <: Secret<B>` if `A <: B`. The checker unwraps secret
+  layers of an operator's operands, checks the operator on the values'
+  types and wraps the result once.
+- **Runtime.** `Value::Secret(Rc<Secret { value, identity }>)`, of kind
+  `Mixed`. Lowering wraps a contagious operation: each secret operand
+  unwrapped, the typed operation, and the result wrapped, its identity
+  derived from the operands'.
+
+### Decisions to confirm with Jack
+
+- No branching on a secret: `if`, `for`, `&&`, `||`, indexes, `is`,
+  `as`.
+- A record or list holding a secret is not itself a secret.
+- `secret(value, identity)` is available to plain code.
+- `exec`'s `argv` accepts `Revealed<String>` elements.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
