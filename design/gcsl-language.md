@@ -37,8 +37,9 @@ the language server and Learn follow every syntax change.
    declarations.
 9. **Extensible enums, `Partial<T>` and generic def-types** (`c8012a7`, `d17f8ec`,
    `0b68623`; see below).
-10. **Context** (`c2545ce`, `e827138`, `9cabcf6`; see below). 10b is still
-    to do.
+10. **Context** (`c2545ce`, `e827138`, `9cabcf6`), and its inferred
+    requirements, 10b (`8184983`, `ab468d9`; see below). 10c is still to
+    do.
 11. **`assert` and `recover`** (`46f3dc9`; see below).
 12. **`Secret<T>`** (`73e0562`, `6761d60`, `d192a4d`) and its hardening,
     `exec_secret` (`1ee8782`; see below).
@@ -945,12 +946,13 @@ Specified in detail on 2026-10-24, before it was built:
   is expected. A join, of an `if`'s branches or a list's elements, takes
   the union. Generic instantiation carries the set through.
 - **Written form (to settle with Jack).** Display, and a later written
-  form: the needs after the parameters, `fn(x: Int, ^arch): String`. In a
-  declaration, `^arch: String` is a parameter defaulting from the
-  context; in a type, a bare `^arch` says the function reads it from the
-  context. Until the form is parsed, a closure that needs a context cannot
-  be passed where a written function type is expected; a `with` inside the
-  closure is the remedy.
+  form: the needs after the parameters, `fn(x: Int, ^arch): String`, and
+  `^arch | ^target` for a need read through a default (see "As built
+  (10b)"). In a declaration, `^arch: String` is a parameter defaulting
+  from the context; in a type, a bare `^arch` says the function reads it
+  from the context. Until the form is parsed, a closure that needs a
+  context cannot be passed where a written function type is expected; a
+  `with` inside the closure is the remedy.
 - **Mutual recursion.** A group's members see each other's declared types,
   so their sets come from a fixpoint after the group is checked: each
   member's set is what it needs itself, joined with what it needs through
@@ -974,6 +976,15 @@ pekit setting `host_platform` to the execution platform: a workspace
 API taking names and values, checked against the declared types. The
 values form a root `with` frame with a fresh identity for each
 evaluation, so memoised calls record them by value.
+
+10b's checks treat the root as binding nothing, in two places: a need at
+the top level, and a definition's needs, which its def-type's `F` alone
+allows. A context the host provides must count as bound in **both**, or
+a library that declares `context host_platform: Platform` with no
+default, for the host to provide, has every definition that reads it
+fail "context `host_platform` has no value in this definition", and
+every top-level read too. 10c must seed both from the host's root
+names.
 
 ### Implementation (planned, 10a)
 
@@ -1016,6 +1027,56 @@ evaluation, so memoised calls record them by value.
   rebuilt with it, and the uses the fixpoint did not cover are checked.
 - **Definitions.** A definition's body is checked against `F`'s set, so
   needing more is an error at the definition.
+
+### As built (10b)
+
+GCSL `8184983` and `ab468d9`. Differences from the rule and plan above:
+
+- **A need is a clause, not a context.** A flat set made `t() with {
+  target = "t" }` an error when `t` reads `^target`, whose default reads
+  `^arch`, though a bound `target`'s default never runs. So a need is a
+  context with no default, then the defaulted contexts it is read
+  through, met by binding any of them, and shown `^arch | ^target`. A
+  function's needs are all of its clauses. One clause *implies* another
+  if its contexts are among the other's; a function type fits another if
+  each of its clauses is implied by one of the other's; a set is kept
+  minimal and interned (`NeedsId`, 4 bytes, so `TyKind` stays 40 bytes).
+  The types side is `types/needs.rs`, the checker's `check/needs.rs`.
+- **Callee bindings.** A recursive function reaches itself through its
+  own name inside it, a binding typed before its needs are known. Uses
+  of it are recorded as uses of a group member are: for a top-level
+  function, as uses of that member; for a local one, checked when its
+  body ends. A direct call from the function itself needs nothing more;
+  a call from a function nested in it, or a use as a value, is "cannot
+  tell that `f` needs context `arch` here" if it would have missed a
+  need.
+- **Other files' defaults.** A context's default in another file is read
+  through a slot, without a type, so the declaring file records what each
+  default needs in the type table by the context's key as its check ends.
+- **One error per cause.** Of the needs one read or call leaves unmet,
+  only those no other implies are reported.
+- **Messages.** "context `arch` has no value here", noted with what needs
+  it (the read, a default, a named or unnamed callee, or a parameter's
+  default); "context `arch` has no value in this definition"; and a
+  mismatch of a function that needs a context with a written type is
+  noted to bind it with a `with` inside the function.
+- **No root coverage yet.** The top level covers only the `with`s there
+  (see 10c).
+- **Follow-ups.** Cyclic context defaults (`context a = ^b`, `context b
+  = ^a`) recurse to the depth limit at run time, where a check-time cycle
+  error would be cheap. A read whose default is in the reader's own
+  recursive group takes the default's needs without the guard of the
+  context read, which over-requires slightly. The written syntax, and
+  10a's deferred memo narrowing.
+
+### Decisions taken without Jack (10b, to surface)
+
+- The display `fn(^arch): String` and `^arch | ^target`.
+- A function that needs a context fits no written function type until a
+  written form exists; a `with` inside it is the remedy.
+- A use typed early inside recursion is an error, conservatively, rather
+  than a second check of the group.
+- The message wordings above.
 
 ### As built (10a)
 
@@ -1670,4 +1731,4 @@ Specified in detail when their turn comes: 7 receiver methods; 8
 generics; 9 extensible enums and `Partial<T>`; 10 context (`context`, `^`,
 `with`); 11 `recover` and `assert`; 12 `Secret<T>`; 13 persistent lists;
 14 `File`, `Dir`, `Sandbox` and `exec` options; 15 wildcard def-type
-imports; 16 the prelude moved to methods. All are done apart from 10b.
+imports; 16 the prelude moved to methods. All are done apart from 10c.
