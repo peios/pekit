@@ -209,7 +209,7 @@ existing program changes meaning.
 - No exabyte units.
 - No float arithmetic on quantities.
 
-## 6. Host-declared attributes with typed arguments (done; 6b open)
+## 6. Host-declared attributes with typed arguments (done)
 
 ### Rule
 
@@ -337,7 +337,7 @@ declaring the record type of its arguments, marked as an attribute:
 - `retry` and `timeout` built in, not declared in the prelude.
 - A positional argument only for a one-field attribute.
 
-## 6b. Retry and timeout in plain GCSL
+## 6b. Retry and timeout in plain GCSL (done)
 
 ### Rule
 
@@ -367,6 +367,15 @@ declaring the record type of its arguments, marked as an attribute:
 
 - **Lowering.** `FnCode` gains `retry: u32` and `timeout: Option<Duration>`,
   read from the function's built-in attributes.
+- **As built.** The timeout error is no new `Unwind` variant: a call
+  boundary turns every unwind into a `Diagnostic`, so the timeout travels
+  as an error carrying a private `Mark` (a `u32` in `Diagnostic`'s padding:
+  none, internal, or a deadline's number). Numbers are unique per run, so
+  an error never matches a later, unrelated deadline. The error points
+  where evaluation was when time ran out, so input stamping across
+  sessions and files stays correct. Checks on the recursion path are a
+  boolean test followed by a tail call into a cold function, so walker
+  frames gain no temporary.
 - **Evaluator.** A call of a function with either takes a guarded path
   (`Evaluator::guarded_body`), charged one more level against the depth
   budget. The unguarded path is unchanged. Deadlines are kept in a stack in
