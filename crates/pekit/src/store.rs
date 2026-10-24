@@ -450,6 +450,25 @@ impl Store {
         Ok(())
     }
 
+    /// Makes the directory of the tree `digest` at `at`, a path that does not
+    /// exist, every file a copy of its own ([`Store::copy_file`]): what
+    /// someone may change.
+    ///
+    /// # Errors
+    ///
+    /// That the store does not hold it, or `at` cannot be written.
+    pub fn copy_tree(&self, digest: &Digest, at: &Path) -> io::Result<()> {
+        fs::create_dir_all(at)?;
+        for entry in self.read_tree(digest)?.entries {
+            match entry {
+                TreeEntry::File { name, file } => self.copy_file(&file, &at.join(name))?,
+                TreeEntry::Dir { name, tree } => self.copy_tree(&tree, &at.join(name))?,
+                TreeEntry::Link { name, target } => symlink(target, at.join(name))?,
+            }
+        }
+        Ok(())
+    }
+
     /// Where the record of `receipt` is.
     fn record_path(&self, receipt: &Digest) -> PathBuf {
         let hex = receipt.hex();

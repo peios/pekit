@@ -29,6 +29,10 @@ pub struct Loaded {
     /// Every source, the standard files first, each named as it is shown,
     /// in input order: what diagnostics are shown against.
     pub sources: Vec<SourceFile>,
+    /// Every source's name relative to the root, `<stdlib>/fs.gcsl` for a
+    /// standard file's, in input order: what names a step's code in its
+    /// receipt, wherever pekit runs from.
+    pub names: Vec<String>,
     /// The checked workspace.
     pub workspace: Workspace,
 }
@@ -104,6 +108,11 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
     let read = gcsl_disk::read_workspace(&root, None).map_err(LoadError::Read)?;
     let (standard, checked) =
         workspace::check_with_standard(&read.relative, &read.nested, &root.to_string_lossy());
+    let mut names: Vec<String> = standard
+        .iter()
+        .map(|source| source.name().to_owned())
+        .collect();
+    names.extend(read.relative.iter().map(|source| source.name().to_owned()));
     let mut sources = standard;
     sources.extend(read.shown);
     match checked {
@@ -111,6 +120,7 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
             root,
             here,
             sources,
+            names,
             workspace,
         }),
         Err(diagnostics) => Err(LoadError::Check {

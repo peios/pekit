@@ -6,6 +6,7 @@
 //! inputs, from a content-addressed cache where it has them (see the
 //! design, `design/engine.md`).
 
+pub mod engine;
 pub mod load;
 pub mod receipt;
 pub mod record;

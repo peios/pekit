@@ -1,0 +1,168 @@
+//! Tests of building targets: steps run in their sandboxes, recorded, and
+//! found in the store again.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use pekit::engine::{BuildError, Built, Settings, build};
+use pekit::load::load;
+use pekit::target::resolve;
+
+/// The fixture module that declares what pekit's def-types and attributes
+/// will be declared by (see `design/engine.md`, E9).
+const STEPS: &str = "#[attribute] #[defers] type hermetic = {on: Bool = true}\n\
+                     #[def_type] def build(name: String, f: fn() -> {out: File}) -> {out: File} { f() }\n";
+
+/// Writes `files`, each a path relative to `root` and its text.
+fn write(root: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+}
+
+/// The host directories a test's shell needs, which a real step never
+/// borrows.
+fn host_tools() -> Vec<PathBuf> {
+    ["/usr", "/bin", "/lib", "/lib64"]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|dir| dir.exists())
+        .collect()
+}
+
+/// A workspace whose `app` has `build.gcsl` of `text` and the files `files`.
+fn workspace(text: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("steps.gcsl", STEPS),
+            ("app/build.gcsl", text),
+        ],
+    );
+    write(&dir.path().join("app"), files);
+    dir
+}
+
+/// Builds `build <name>` of the workspace at `root`, its store and scratch
+/// beside it in `state`: what it came to, or its error as shown.
+fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
+    let root = root.to_path_buf();
+    let state = state.to_path_buf();
+    let name = name.to_owned();
+    std::thread::Builder::new()
+        .stack_size(gcsl::STACK_SIZE)
+        .spawn(move || {
+            let mut loaded = load(&root).map_err(|error| error.render())?;
+            let target = resolve(&loaded.workspace, ("build", &name), "")
+                .map_err(|error| error.message())?;
+            let settings = Settings {
+                store: state.join("store"),
+                outputs: root.join("pekit-out"),
+                scratch: state.join("scratch"),
+                jobs: 4,
+                platform: "x86_64-linux".to_owned(),
+                host_tools: host_tools(),
+            };
+            build(&mut loaded, &target, &settings)
+                .map_err(|error: BuildError| error.render(&loaded))
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// A step that shouts its input file into its output.
+const SHOUT: &str = "#[hermetic] fn shout(src: File) -> File {\n\
+                     \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
+                     \x20   file(\"out.txt\")\n\
+                     }\n";
+
+#[test]
+fn a_step_runs_once_and_is_then_found_in_the_store() {
+    let text = format!("{SHOUT}def build hello() {{ out = shout(file(\"name.txt\")) }}\n");
+    let dir = workspace(&text, &[("name.txt", "world\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((built.ran, built.cached), (1, 0));
+    let out = dir.path().join("pekit-out/app/hello/shout/out.txt");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "WORLD\n");
+    // Again: found by its receipt, and copied out again.
+    fs::remove_dir_all(dir.path().join("pekit-out")).unwrap();
+    let again = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((again.ran, again.cached), (0, 1));
+    assert_eq!(again.value, built.value);
+    assert_eq!(fs::read_to_string(&out).unwrap(), "WORLD\n");
+    // Its input changed: run again.
+    fs::write(dir.path().join("app/name.txt"), "there\n").unwrap();
+    let changed = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((changed.ran, changed.cached), (1, 0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "THERE\n");
+    // No staging directory is left behind.
+    let left: Vec<_> = fs::read_dir(state.path().join("scratch"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("step-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_step_is_given_an_earlier_step_s_output() {
+    let text = format!(
+        "{SHOUT}#[hermetic] fn twice(src: File) -> File {{\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {{src.path}} {{src.path}} > out.txt\"])\n\
+         \x20   file(\"out.txt\")\n\
+         }}\n\
+         def build hello() {{ out = twice(shout(file(\"name.txt\"))) }}\n"
+    );
+    let dir = workspace(&text, &[("name.txt", "hi\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!(built.ran, 2);
+    let out = dir.path().join("pekit-out/app/hello/twice/out.txt");
+    assert_eq!(fs::read_to_string(out).unwrap(), "HI\nHI\n");
+}
+
+#[test]
+fn a_step_that_fails_fails_the_build_with_its_own_error() {
+    let text = "#[hermetic] #[retry(2)] fn broken() -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 0.3; echo nope >&2; exit 3\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = broken() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let error = build_in(dir.path(), state.path(), "hello").unwrap_err();
+    // Its own error, at its call, with what it printed.
+    assert!(
+        error.starts_with("error: `/bin/sh` exited with status 3\n"),
+        "{error}"
+    );
+    assert!(error.contains("app/build.gcsl:2:13"), "{error}");
+    assert!(error.contains("its standard error: nope"), "{error}");
+    // Run three times, each afresh.
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_step_s_timeout_stops_it() {
+    let text = "#[hermetic] #[timeout(1s)] fn slow() -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 20\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = slow() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let error = build_in(dir.path(), state.path(), "hello").unwrap_err();
+    assert!(started.elapsed().as_secs() < 10, "{error}");
+    assert!(error.starts_with("error: the step timed out\n"), "{error}");
+}

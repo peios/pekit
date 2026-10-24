@@ -1,0 +1,786 @@
+//! The engine: building a target by running the steps it needs.
+//!
+//! # Building
+//!
+//! A target's invocation is evaluated in GCSL's graph mode, as one unit,
+//! against one action graph (see `design/engine.md`, E1, E2 and E6). Its
+//! deferred calls of functions marked `#[hermetic]` are *steps*. The engine
+//! runs, repeatedly:
+//!
+//! - the target's unit, once it may progress: it stops for a result the
+//!   engine has not given, or ends with a value whose holes are the steps it
+//!   still waits for;
+//! - each step the target needs whose inputs are given: from its record, if
+//!   the store has one for its receipt; else in a sandbox of its own, its
+//!   inputs staged, its body run as a unit of its own, each effect a job;
+//! - each effect of a unit as a job on the pool, which has `jobs` threads:
+//!   a step's effects in its sandbox, the target's own, which are not
+//!   hermetic, under the host's view of the logical layout, one at a time,
+//!   in program order, since the target's unit stops at each.
+//!
+//! A unit runs again only once what it stopped for is given. A step that
+//! fails, by its code's own failure, is run again from its start in a fresh
+//! sandbox as its `#[retry]` allows, and one that passes only then is
+//! *flaky*; its `#[timeout]` spans every attempt. A step that succeeds is
+//! recorded, unless its result holds a secret, and its outputs are kept by
+//! their logical paths, so that the steps after it are staged with them. Once
+//! the target's value has no holes, the files under `/pekit-out` it names are
+//! copied out to the output directory, each a copy of its own.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
+use std::time::Instant;
+
+use gcsl::check::{Attribute, Constant, retry_of, timeout_of};
+use gcsl::eval::Effects;
+use gcsl::eval::graph::{EffectJob, Graph, GraphHost, NodeId, NodeKind, STEP_UNITS};
+use gcsl::eval::plain::Plain;
+use gcsl::workspace::{InvokeError, Progress};
+use gcsl::{Diagnostic, Span, Value};
+
+use crate::load::Loaded;
+use crate::receipt::{ReceiptOf, receipt};
+use crate::record::{Kept, StepRecord, StoreError, stored};
+use crate::sandbox::{HostView, OUTPUTS, StepSandbox, WORKSPACE};
+use crate::store::{Digest, Store};
+use crate::target::Target;
+
+/// How a build runs.
+#[derive(Clone, Debug)]
+pub struct Settings {
+    /// The content store's directory.
+    pub store: PathBuf,
+    /// The output directory, `pekit-out/` at the workspace's root.
+    pub outputs: PathBuf,
+    /// Where steps are staged and temporary directories made.
+    pub scratch: PathBuf,
+    /// How many effects may run at once.
+    pub jobs: usize,
+    /// The platform steps run on, as receipts name it.
+    pub platform: String,
+    /// Host directories every step's sandbox binds read-only where they
+    /// are, which makes its steps not hermetic: a host snapshot's tools, or a
+    /// test's. None for a hermetic build.
+    pub host_tools: Vec<PathBuf>,
+}
+
+/// What building a target came to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Built {
+    /// Its value, as plain data.
+    pub value: Plain,
+    /// How many steps ran.
+    pub ran: usize,
+    /// How many steps were found in the store.
+    pub cached: usize,
+    /// The steps that passed only on a retry, by name.
+    pub flaky: Vec<String>,
+}
+
+/// Why a build failed.
+#[derive(Debug)]
+pub enum BuildError {
+    /// The target could not be invoked, or its evaluation failed: the
+    /// diagnostics, or a request's error.
+    Invoke(InvokeError),
+    /// What the build ran failed: a step that is not caught, say.
+    Failed(Vec<Diagnostic>),
+    /// Something of pekit's own failed: the store, the sandbox, a job.
+    Engine(String),
+}
+
+impl BuildError {
+    /// The error as the `pekit` command shows it, its diagnostics against
+    /// `loaded`'s sources.
+    #[must_use]
+    pub fn render(&self, loaded: &Loaded) -> String {
+        match self {
+            BuildError::Invoke(InvokeError::Diagnostics(diagnostics))
+            | BuildError::Failed(diagnostics) => loaded.render(diagnostics),
+            BuildError::Invoke(InvokeError::Request(error)) => {
+                format!("error: {}\n", error.message())
+            }
+            BuildError::Engine(message) => format!("error: {message}\n"),
+        }
+    }
+}
+
+/// Builds `target` of `loaded`'s workspace as `settings` say (see
+/// [Building](#building)). Like all of GCSL's pipeline, it must run on a
+/// thread with at least [`gcsl::STACK_SIZE`] bytes of stack.
+///
+/// # Errors
+///
+/// That the target's evaluation, or a step it needs, failed, or something of
+/// pekit's own did.
+pub fn build(
+    loaded: &mut Loaded,
+    target: &Target,
+    settings: &Settings,
+) -> Result<Built, BuildError> {
+    let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
+    std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
+    let host = Arc::new(HostView::new(
+        &loaded.root,
+        &settings.outputs,
+        &target.definition.dir,
+        &settings.scratch,
+    ));
+    let call = loaded
+        .workspace
+        .prepare_call((&target.def_type, &target.qualified()), &[], &[])
+        .map_err(BuildError::Invoke)?;
+    let mut run = Run {
+        loaded,
+        store,
+        settings,
+        host,
+        graph: Graph::new(),
+        outputs: HashMap::new(),
+        steps: HashMap::new(),
+        step_names: HashMap::new(),
+        names_used: HashMap::new(),
+        pool: Pool::new(settings.jobs.max(1)),
+        in_flight: HashSet::new(),
+        target_dir: target.qualified().trim_start_matches('/').to_owned(),
+        ran: 0,
+        cached: 0,
+        flaky: Vec::new(),
+    };
+    let value = run.drive(&call)?;
+    run.copy_out(&value)?;
+    let value = run
+        .loaded
+        .workspace
+        .to_plain(&value)
+        .map_err(BuildError::Engine)?;
+    Ok(Built {
+        value,
+        ran: run.ran,
+        cached: run.cached,
+        flaky: run.flaky,
+    })
+}
+
+/// An engine error from an I/O failure.
+fn engine(error: &dyn std::fmt::Display) -> BuildError {
+    BuildError::Engine(error.to_string())
+}
+
+/// Whether a host takes a call of a function with `attributes` as a step:
+/// if one is `hermetic`, not `hermetic(false)`.
+fn hermetic(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.id.name() == "hermetic"
+            && !attribute
+                .args
+                .iter()
+                .any(|(name, value)| &**name == "on" && *value == Constant::Bool(false))
+    })
+}
+
+/// No deferred call is a step: what runs in a step's own unit, inline.
+fn inline(_: &[Attribute]) -> bool {
+    false
+}
+
+/// A step the engine is running (see [Building](#building)).
+struct StepRun {
+    /// Its sandbox.
+    sandbox: Arc<StepSandbox>,
+    /// What it is given, by logical path, which each attempt is staged with.
+    given: Vec<(String, Kept)>,
+    /// Its attempt's number, from 0.
+    attempt: u32,
+    /// Its receipt.
+    receipt: Digest,
+    /// When its first attempt began.
+    started: Instant,
+    /// When its attempts must end, by its `#[timeout]`.
+    deadline: Option<Instant>,
+    /// How many more attempts it may have.
+    retries: u32,
+    /// Whether an attempt of it has failed.
+    failed_once: bool,
+    /// The effect its unit stopped for, if it did.
+    waiting: Option<NodeId>,
+}
+
+/// One build's state (see [Building](#building)).
+struct Run<'a> {
+    /// The workspace.
+    loaded: &'a mut Loaded,
+    /// The store.
+    store: Store,
+    /// How the build runs.
+    settings: &'a Settings,
+    /// The host's view, for what is not hermetic.
+    host: Arc<HostView>,
+    /// The action graph.
+    graph: Graph,
+    /// What the store keeps of each output a step made, by its logical
+    /// path, and of each workspace input hashed so far.
+    outputs: HashMap<String, Kept>,
+    /// The steps running, by node.
+    steps: HashMap<NodeId, StepRun>,
+    /// Each step's name, `<function>` or `<function>.<n>`, by node.
+    step_names: HashMap<NodeId, String>,
+    /// How many steps of each function's name have been named.
+    names_used: HashMap<String, u32>,
+    /// The pool effects run on.
+    pool: Pool,
+    /// The effects running, by node.
+    in_flight: HashSet<NodeId>,
+    /// The target's directory under `/pekit-out`, its qualified name.
+    target_dir: String,
+    /// How many steps ran.
+    ran: usize,
+    /// How many steps were found in the store.
+    cached: usize,
+    /// The steps that passed only on a retry, by name.
+    flaky: Vec<String>,
+}
+
+/// Where the target's unit is.
+enum Main {
+    /// It may run.
+    Runnable,
+    /// It stopped for this node's result.
+    Paused(NodeId),
+    /// It ended with this value, whose holes are still waited for.
+    Holding(Value),
+}
+
+impl Run<'_> {
+    /// Runs the target's unit, the steps it needs and their effects, until
+    /// its value has no holes: that value.
+    fn drive(&mut self, call: &gcsl::workspace::graph::PreparedCall) -> Result<Value, BuildError> {
+        let mut main = Main::Runnable;
+        loop {
+            if let Main::Runnable = main {
+                let host = GraphHost {
+                    defers: &hermetic,
+                    effects: &*self.host,
+                };
+                main = match self
+                    .loaded
+                    .workspace
+                    .run_prepared(call, &mut self.graph, host)
+                    .map_err(BuildError::Invoke)?
+                {
+                    Progress::Paused(node) => Main::Paused(node),
+                    Progress::Done(value) => Main::Holding(value),
+                };
+            }
+            let demands = match &main {
+                Main::Paused(node) => vec![*node],
+                Main::Holding(value) => {
+                    let holes = self.graph.holes(value);
+                    if holes.is_empty() {
+                        let failures = self.graph.failures(value);
+                        if failures.is_empty() {
+                            return Ok(value.clone());
+                        }
+                        return Err(BuildError::Failed(failures));
+                    }
+                    holes
+                }
+                Main::Runnable => Vec::new(),
+            };
+            let mut progressed = self.start_needed(&demands)?;
+            progressed |= self.advance_steps()?;
+            if !self.in_flight.is_empty() {
+                let Some((node, outcome)) = self.pool.next() else {
+                    return Err(BuildError::Engine(
+                        "the threads effects run on stopped".to_owned(),
+                    ));
+                };
+                self.in_flight.remove(&node);
+                self.finished_effect(node, outcome);
+                progressed = true;
+            }
+            if let Main::Paused(node) = main
+                && !self.is_waiting(node)
+            {
+                main = Main::Runnable;
+                progressed = true;
+            }
+            if !progressed {
+                return Err(BuildError::Engine(
+                    "the build is waiting for nothing: a step it needs never became ready"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
+    /// Whether the node `id` is still waiting for its result.
+    fn is_waiting(&self, id: NodeId) -> bool {
+        self.graph
+            .node(id)
+            .is_some_and(|node| *node.state() == gcsl::eval::graph::NodeState::Waiting)
+    }
+
+    /// Starts every step `demands` need that is ready and not started, and
+    /// runs every effect of the target's unit they need: whether it did any.
+    fn start_needed(&mut self, demands: &[NodeId]) -> Result<bool, BuildError> {
+        let mut started = false;
+        let needed = self.graph.needed(demands);
+        for id in self.graph.ready(&needed) {
+            if self.steps.contains_key(&id) || self.in_flight.contains(&id) {
+                continue;
+            }
+            let Some(node) = self.graph.node(id) else {
+                continue;
+            };
+            match node.kind() {
+                NodeKind::Deferred => self.start_step(id)?,
+                NodeKind::Effect(_) if node.unit() < STEP_UNITS => {
+                    let host: Arc<dyn Effects + Send + Sync> = self.host.clone();
+                    self.dispatch(id, host, None)?;
+                }
+                NodeKind::Effect(_) => continue,
+            }
+            started = true;
+        }
+        Ok(started)
+    }
+
+    /// Sends the effect `id` to the pool, to run under `effects` until
+    /// `deadline`.
+    fn dispatch(
+        &mut self,
+        id: NodeId,
+        effects: Arc<dyn Effects + Send + Sync>,
+        deadline: Option<Instant>,
+    ) -> Result<(), BuildError> {
+        let job = self
+            .loaded
+            .workspace
+            .effect_job(&self.graph, id)
+            .map_err(BuildError::Engine)?;
+        self.pool.send(id, job, effects, deadline);
+        self.in_flight.insert(id);
+        Ok(())
+    }
+
+    /// The name of the step `id`, its function's and its number among the
+    /// target's steps of that name, in the order they are met.
+    fn step_name(&mut self, id: NodeId) -> String {
+        if let Some(name) = self.step_names.get(&id) {
+            return name.clone();
+        }
+        let function = self
+            .graph
+            .node(id)
+            .and_then(|node| node.closure())
+            .and_then(|closure| closure.code.find_function(closure.function))
+            .and_then(|code| code.name_text.as_deref())
+            .unwrap_or("step")
+            .to_owned();
+        let count = self.names_used.entry(function.clone()).or_insert(0);
+        *count += 1;
+        let name = if *count == 1 {
+            function
+        } else {
+            format!("{function}.{count}")
+        };
+        self.step_names.insert(id, name.clone());
+        name
+    }
+
+    /// Starts the step `id`: from its record if the store has one for its
+    /// receipt, else in a sandbox of its own, its inputs staged.
+    fn start_step(&mut self, id: NodeId) -> Result<(), BuildError> {
+        let inputs = self
+            .loaded
+            .workspace
+            .step_inputs(&self.graph, id)
+            .map_err(BuildError::Engine)?;
+        let code: Vec<(String, Digest)> = inputs
+            .code_files
+            .iter()
+            .filter_map(|&file| {
+                let source = self.loaded.sources.get(file as usize)?;
+                let name = self.loaded.names.get(file as usize)?;
+                Some((name.clone(), Digest::of(source.text().as_bytes())))
+            })
+            .collect();
+        let mut given: Vec<(String, Kept)> = Vec::new();
+        let of = ReceiptOf {
+            code: &code,
+            args: &inputs.args,
+            captures: &inputs.captures,
+            context: &inputs.context,
+            platform: &self.settings.platform,
+        };
+        let receipt = {
+            let mut contents = |path: &str, dir: bool| -> Result<Digest, String> {
+                let kept = self.input(path, dir)?;
+                given.push((path.to_owned(), kept));
+                Ok(match kept {
+                    Kept::File(entry) => entry.digest,
+                    Kept::Dir(tree) => tree,
+                })
+            };
+            receipt(of, &mut contents).map_err(BuildError::Engine)?
+        };
+        if let Some(record) = self
+            .store
+            .record::<StepRecord>(&receipt)
+            .map_err(|error| engine(&error))?
+        {
+            for (path, kept) in record.result.files() {
+                self.outputs.insert(path.to_owned(), kept);
+            }
+            let value = self.loaded.workspace.from_plain(&record.result.plain());
+            self.graph.resolve(id, Ok(value));
+            self.cached += 1;
+            return Ok(());
+        }
+        let name = self.step_name(id);
+        let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
+        let sandbox = self.fresh_sandbox(id, &name, 0, &given)?;
+        let started = Instant::now();
+        self.steps.insert(
+            id,
+            StepRun {
+                sandbox,
+                given,
+                attempt: 0,
+                receipt,
+                started,
+                deadline: timeout.map(|limit| started + limit),
+                retries,
+                failed_once: false,
+                waiting: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// A new sandbox for the attempt `attempt` of the step `id`, named
+    /// `name`, staged with `given`.
+    fn fresh_sandbox(
+        &self,
+        id: NodeId,
+        name: &str,
+        attempt: u32,
+        given: &[(String, Kept)],
+    ) -> Result<Arc<StepSandbox>, BuildError> {
+        let stage = self.stage_dir(id, attempt);
+        if stage.exists() {
+            std::fs::remove_dir_all(&stage).map_err(|error| engine(&error))?;
+        }
+        let own = format!("{}/{name}", self.target_dir);
+        let sandbox = StepSandbox::new(&stage, &own)
+            .map_err(|error| engine(&error))?
+            .with_host(&self.settings.host_tools);
+        for (path, kept) in given {
+            sandbox
+                .stage(&self.store, path, *kept)
+                .map_err(|error| engine(&format!("cannot stage `{path}`: {error}")))?;
+        }
+        Ok(Arc::new(sandbox))
+    }
+
+    /// Where the attempt `attempt` of the step `id` is staged.
+    fn stage_dir(&self, id: NodeId, attempt: u32) -> PathBuf {
+        self.settings.scratch.join(format!(
+            "step-{}-{}-{attempt}",
+            std::process::id(),
+            id.number()
+        ))
+    }
+
+    /// Removes the staging directory of the step `step`, the node `id`, once
+    /// it is done with.
+    fn unstage(&self, id: NodeId, step: &StepRun) -> Result<(), BuildError> {
+        let stage = self.stage_dir(id, step.attempt);
+        if stage.exists() {
+            std::fs::remove_dir_all(&stage).map_err(|error| engine(&error))?;
+        }
+        Ok(())
+    }
+
+    /// What the store keeps of the input at `path`, a file or, if `dir`, a
+    /// directory: a workspace file's, put into the store, or an output's.
+    fn input(&mut self, path: &str, dir: bool) -> Result<Kept, String> {
+        if let Some(kept) = self.outputs.get(path) {
+            return Ok(*kept);
+        }
+        // A workspace file, or an output that what is not hermetic wrote.
+        let host = if let Some(rest) = path
+            .strip_prefix(WORKSPACE)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            self.loaded.root.join(rest)
+        } else if let Some(at) = output_path(&self.settings.outputs, path) {
+            at
+        } else {
+            return Err(format!(
+                "`{path}` is outside the workspace: a hermetic step is given only the \
+                 workspace's files and other steps' outputs"
+            ));
+        };
+        let kept = if dir {
+            Kept::Dir(
+                self.store
+                    .put_tree(&host)
+                    .map_err(|error| format!("cannot read `{path}`: {error}"))?,
+            )
+        } else {
+            Kept::File(
+                self.store
+                    .put_file(&host)
+                    .map_err(|error| format!("cannot read `{path}`: {error}"))?,
+            )
+        };
+        self.outputs.insert(path.to_owned(), kept);
+        Ok(kept)
+    }
+
+    /// Runs every step's unit that may progress, until each stops for an
+    /// effect, which goes to the pool, or ends: whether any did.
+    fn advance_steps(&mut self) -> Result<bool, BuildError> {
+        let runnable: Vec<NodeId> = self
+            .steps
+            .iter()
+            .filter(|(_, step)| step.waiting.is_none())
+            .map(|(&id, _)| id)
+            .collect();
+        let advanced = !runnable.is_empty();
+        for id in runnable {
+            self.advance_step(id)?;
+        }
+        Ok(advanced)
+    }
+
+    /// Runs the step `id`'s unit once.
+    fn advance_step(&mut self, id: NodeId) -> Result<(), BuildError> {
+        let Some(step) = self.steps.get(&id) else {
+            return Ok(());
+        };
+        let sandbox = Arc::clone(&step.sandbox);
+        let deadline = step.deadline;
+        let host = GraphHost {
+            defers: &inline,
+            effects: &*sandbox,
+        };
+        match self.loaded.workspace.run_step(&mut self.graph, id, host) {
+            Ok(Progress::Paused(effect)) => {
+                if let Some(step) = self.steps.get_mut(&id) {
+                    step.waiting = Some(effect);
+                }
+                let effects: Arc<dyn Effects + Send + Sync> = sandbox;
+                self.dispatch(effect, effects, deadline)
+            }
+            Ok(Progress::Done(value)) => self.succeeded(id, &value),
+            Err(failure) => self.failed(id, failure),
+        }
+    }
+
+    /// Records the step `id`, which gave `value`, and gives it to the graph.
+    fn succeeded(&mut self, id: NodeId, value: &Value) -> Result<(), BuildError> {
+        let Some(step) = self.steps.remove(&id) else {
+            return Ok(());
+        };
+        let outcome = self.record(id, &step, value);
+        self.unstage(id, &step)?;
+        outcome
+    }
+
+    /// Records the step `step`, the node `id`, which gave `value`, and gives
+    /// it to the graph, its outputs kept.
+    fn record(&mut self, id: NodeId, step: &StepRun, value: &Value) -> Result<(), BuildError> {
+        let plain = self
+            .loaded
+            .workspace
+            .to_plain(value)
+            .map_err(BuildError::Engine)?;
+        let host = |path: &str| step.sandbox.host_path(path).unwrap_or_default();
+        match stored(&plain, &self.store, &host) {
+            Ok(kept) => {
+                for (path, kept) in kept.files() {
+                    self.outputs.insert(path.to_owned(), kept);
+                }
+                let record = StepRecord {
+                    receipt: step.receipt,
+                    result: kept,
+                    duration_ms: u64::try_from(step.started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                };
+                self.store
+                    .put_record(&step.receipt, &record)
+                    .map_err(|error| engine(&error))?;
+            }
+            // A secret is never stored: the step runs every time.
+            Err(StoreError::Secret) => {}
+            Err(StoreError::Io { path, error }) => {
+                let message =
+                    format!("the step's result names `{path}`, which it did not make: {error}");
+                self.graph
+                    .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
+                return Ok(());
+            }
+        }
+        if step.failed_once {
+            let name = self.step_names.get(&id).cloned().unwrap_or_default();
+            self.flaky.push(name);
+        }
+        self.ran += 1;
+        self.graph.resolve(id, Ok(value.clone()));
+        Ok(())
+    }
+
+    /// The step `id` failed with `failure`: run again afresh if its
+    /// `#[retry]` allows and its time has not run out, else its failure.
+    fn failed(&mut self, id: NodeId, failure: Diagnostic) -> Result<(), BuildError> {
+        let retry = self.steps.get(&id).is_some_and(|step| {
+            step.retries > 0
+                && step
+                    .deadline
+                    .is_none_or(|deadline| Instant::now() < deadline)
+        });
+        if !retry {
+            if let Some(step) = self.steps.remove(&id) {
+                self.unstage(id, &step)?;
+            }
+            self.graph.resolve(id, Err(failure));
+            return Ok(());
+        }
+        let Some(step) = self.steps.remove(&id) else {
+            return Ok(());
+        };
+        self.unstage(id, &step)?;
+        let name = self.step_name(id);
+        let attempt = step.attempt + 1;
+        let sandbox = self.fresh_sandbox(id, &name, attempt, &step.given)?;
+        self.graph.forget_unit(STEP_UNITS + id.number());
+        self.steps.insert(
+            id,
+            StepRun {
+                sandbox,
+                attempt,
+                retries: step.retries - 1,
+                failed_once: true,
+                waiting: None,
+                ..step
+            },
+        );
+        Ok(())
+    }
+
+    /// The effect `node` finished, with `outcome`: gives it to the graph, the
+    /// step that waits on it able to run again.
+    fn finished_effect(&mut self, node: NodeId, outcome: Result<Plain, Diagnostic>) {
+        let value = outcome.map(|plain| self.loaded.workspace.from_plain(&plain));
+        self.graph.resolve(node, value);
+        for step in self.steps.values_mut() {
+            if step.waiting == Some(node) {
+                step.waiting = None;
+            }
+        }
+    }
+
+    /// Copies every output under `/pekit-out` that `value` names out to the
+    /// output directory, each file a copy of its own.
+    fn copy_out(&self, value: &Value) -> Result<(), BuildError> {
+        let plain = self
+            .loaded
+            .workspace
+            .to_plain(value)
+            .map_err(BuildError::Engine)?;
+        for (path, _) in plain.files() {
+            let Some(rest) = path
+                .strip_prefix(OUTPUTS)
+                .and_then(|rest| rest.strip_prefix('/'))
+            else {
+                continue;
+            };
+            let Some(kept) = self.outputs.get(path) else {
+                continue;
+            };
+            let at = self.settings.outputs.join(rest);
+            let _ = std::fs::remove_file(&at);
+            let _ = std::fs::remove_dir_all(&at);
+            let copied = match kept {
+                Kept::File(entry) => self.store.copy_file(entry, &at),
+                Kept::Dir(tree) => self.store.copy_tree(tree, &at),
+            };
+            copied.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))?;
+        }
+        Ok(())
+    }
+}
+
+/// A job of the pool: an effect to run, under its effect context, until its
+/// deadline.
+type PoolJob = (
+    NodeId,
+    EffectJob,
+    Arc<dyn Effects + Send + Sync>,
+    Option<Instant>,
+);
+
+/// The threads effects run on (see [Building](#building)).
+struct Pool {
+    /// Where jobs go.
+    jobs: Sender<PoolJob>,
+    /// Where their outcomes come back.
+    done: Receiver<(NodeId, Result<Plain, Diagnostic>)>,
+}
+
+impl Pool {
+    /// A pool of `size` threads.
+    fn new(size: usize) -> Self {
+        let (jobs, queue) = channel::<PoolJob>();
+        let (report, done) = channel();
+        let queue = Arc::new(std::sync::Mutex::new(queue));
+        for _ in 0..size {
+            let queue = Arc::clone(&queue);
+            let report = report.clone();
+            thread::spawn(move || {
+                loop {
+                    let next = queue.lock().ok().and_then(|queue| queue.recv().ok());
+                    let Some((node, job, effects, deadline)) = next else {
+                        return;
+                    };
+                    let outcome = job.run(&*effects, deadline);
+                    if report.send((node, outcome)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Self { jobs, done }
+    }
+
+    /// Sends the effect `node`'s `job` to run under `effects` until
+    /// `deadline`.
+    fn send(
+        &self,
+        node: NodeId,
+        job: EffectJob,
+        effects: Arc<dyn Effects + Send + Sync>,
+        deadline: Option<Instant>,
+    ) {
+        let _ = self.jobs.send((node, job, effects, deadline));
+    }
+
+    /// The next job's outcome, waiting for one: none if every thread of the
+    /// pool has stopped.
+    fn next(&self) -> Option<(NodeId, Result<Plain, Diagnostic>)> {
+        self.done.recv().ok()
+    }
+}
+
+/// The path under the output directory a logical output path is at.
+#[must_use]
+pub fn output_path(outputs: &Path, path: &str) -> Option<PathBuf> {
+    let rest = path.strip_prefix(OUTPUTS)?.strip_prefix('/')?;
+    Some(outputs.join(rest))
+}
