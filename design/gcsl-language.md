@@ -28,6 +28,10 @@ the language server and Learn follow every syntax change.
    name alone after a named argument changes meaning.
 4. **Defaults that are expressions** (`9a93d47`; see below).
 
+8. **Generics** (`ecbec8a`, `79f5461`, `7180d8a`; see below). Generic
+   functions with inferred type parameters, and generic `type`
+   declarations.
+
 ## 4. Defaults that are expressions: as built
 
 The rule is as designed. A default may be any expression and is evaluated
@@ -452,6 +456,48 @@ checker. So generics come first, and methods are built on them.
   kind.
 - **Workspace.** A generic `type` declaration is expanded per use, its
   parameters substituted.
+
+### Implementation, as built
+
+- **Generic functions** (`ecbec8a`). `Generics { owner, params, types }`
+  records a function's or type's parameters with the range of type
+  expressions where they are in scope; `Ast::type_param` picks the
+  innermost. The type table has `TyKind::Param { generic, index }` of a
+  `GenericId` made once per owner, and `FnTy.generic`. A parameter is
+  opaque, a subtype only of itself, `Present` to the await rules and of
+  value kind `Deferred`, so lazy bindings pass through untouched (tested
+  with `lazy` arguments and `->>`). Calls infer in `Checker::instantiate`:
+  the arguments filling a parameter that mentions a type parameter are
+  checked bottom up and bind structurally (`TypeTable::bind`), then the
+  call is bound against the substituted signature, prechecked arguments
+  only expected to fit. `[]` and `{}` bind nothing; an integer literal
+  binds last, only what nothing else binds or what it does not fit, so
+  `first([1.5], 0)` is a `Float`. A binding widened to a union warns, "the
+  arguments for `T` have different types" (`79f5461`), as a mixed list
+  does. Interpolating a `T` is an error (it may be an unawaited future).
+- **Generic types** (`7180d8a`). Applied types take argument lists and
+  qualified names may be applied (`TypeExprKind::PathApplied`). The store
+  holds a generic definition's parameters as `TypeExprKind::Param` and a
+  use in another definition as `TypeExprKind::Instance`; settling and tree
+  expansion substitute (`TypeArena::substitute`), making nodes only above
+  a parameter, so nesting costs linear space. The workspace checks arity
+  when linking ("needs its type arguments", "takes 2 type arguments,
+  given 1"); the store keeps arities for later session inputs.
+- **Divergence from the outline above.** No `generics: u8` count on `FnTy`
+  and no positional `Param(u8)` in the type table: parameters belong to a
+  `GenericId`, so nested generic signatures (a generic function's type
+  inside another's) can never confuse whose parameter is whose.
+
+### Decisions to confirm with Jack
+
+- A binding widened to a union is a warning, not an error, matching list
+  literals and `if` branches.
+- `TyKind` grew from 32 to 40 bytes for the generic's id.
+- Type-parameter lists take no trailing comma, as type-argument lists
+  don't.
+- A generic attribute type is an error.
+- Spreading a type parameter in a generic type is an error, since the
+  definition is merged before its arguments are known.
 
 ## Later features
 
