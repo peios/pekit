@@ -1253,6 +1253,91 @@ GCSL `6fe5bfc`. As planned, with these details:
   methods: it needs the elements' equality, which a generic method cannot
   require yet.
 
+## 14. Files, directories, sandboxes and `exec` options
+
+From core-model.md (open question 1, "Directories you can run commands in")
+and Jack's drafts (examples 1, 3, 4 and 10): `file(path)` is a `File`, used
+method-style; a `FileSet` is a list of them; `fs.compose_dir(...)` makes a
+`Dir`, and `dir.sandbox(...)` a `Sandbox` that commands run in; and `exec`
+takes its words as arguments, `cc.exec("-o", out, src.path)`, with named
+options such as `panic = false` and `until = "peios login:"`. Built in five
+steps, each usable alone.
+
+### 14a: rest parameters
+
+- **A rest parameter**, `...words: T`, collects the positional arguments
+  from its position on into a `List<T>`, which the body sees it as. A
+  function has at most one; the parameters after it are given by name only,
+  and it has no default (none given is the empty list).
+- **At a call**, a spread argument, `f(...xs)`, gives a list's elements to
+  the rest parameter, among single ones: `f("a", ...xs, "b")`.
+- **In a type**, `fn(...words: String): Int`, the rest parameter is part
+  of the function type; two function types fit only with rest parameters
+  in the same place, of fitting element types.
+
+### 14b: `exec` options
+
+- **`exec(argv, options)`**: the built-in takes the options as a record,
+  `{cwd, env, panic, until, interactive}`; the prelude's `exec`, and later
+  `File.exec` and `Sandbox.exec`, give them as named parameters with
+  defaults.
+- **`cwd`** is the program's working directory, `""` for GCSL's own.
+- **`env`**, `{*: Revealed<String>}`, is the program's environment:
+  revealed secrets may be given (12b); empty means none but what the host
+  sets, never GCSL's own.
+- **`panic`**: if true, an exit status other than 0 is a failure of the
+  call, "`cc` exited with status 1", with its standard error; if false it
+  is data, as it is today.
+- **`until`**: if set, the program is killed once a line of either stream
+  contains the text; the output read so far is the result, and its status
+  is 0, as the condition was met.
+- **`interactive`**: the program has GCSL's terminal; nothing is captured.
+
+### 14c: `File`
+
+- **A nominal type**, `File`, of a value kind of its own, so that a host
+  finds files deeply in a step's arguments and result, through records,
+  lists and payloads, as it finds secrets. A file holds its path and a slot
+  for a host's content identity, unfilled under plain GCSL. Two files are
+  equal if their paths are, under plain GCSL; pekit's keys are by content.
+- **The prelude**: `file(path)`, `f.path`, `f.read()`, `f.exec(...words)`
+  (the file is the program), and `files.file(name)` on a `List<File>`, the
+  file of that name; `type FilePath = String` and `type FileSet =
+  List<File>`.
+
+### 14d: `Dir`
+
+- **`Dir`**, a directory tree, a value kind as `File` is.
+  `fs.compose_dir({path = files})` makes one of a record from paths to
+  file sets; `dir.file(path)` and `dir.dir(path)` read out of it;
+  `dir.exec(...words)` runs a program with it as the working directory.
+  Under plain GCSL a composed directory is made in a temporary directory
+  of the run.
+
+### 14e: `Sandbox`
+
+- **`dir.sandbox(cwd, env)`** is a `Sandbox`: a live, copy-on-write layer
+  over the directory, whose `/` is the directory, with default `cwd` and
+  `env` for its commands. `sandbox.exec(...words)` runs a command in it;
+  `sandbox.file(path)` and `sandbox.dir(path)` read results out. One
+  directory backs any number of independent sandboxes, and none changes it.
+- **Under plain GCSL** a sandbox is a copy of its directory in a
+  temporary directory, and its commands run with it as their working
+  directory: no isolation, and `/` is not changed. Pekit implements
+  sandboxes with mount namespaces and overlays (layer B), as it implements
+  sandboxing a hermetic step and taking `File`s back into its store.
+
+### Decisions to confirm with Jack
+
+- GCSL gains rest parameters (14a), for the drafts' `exec("-o", out)`.
+- `File.exec` and `Sandbox.exec` panic on a non-zero status by default,
+  as example 10's `panic = false` implies; the built-in `exec` keeps
+  returning it as data by default.
+- `until`'s status is 0, the condition having been met.
+- A plain host's sandbox is a copy, not isolation.
+- `contains` (example 10's `stdout.contains`) is feature 16's, with the
+  other string methods.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
