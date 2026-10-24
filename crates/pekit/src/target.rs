@@ -23,6 +23,10 @@ use std::fmt::Write as _;
 use gcsl::workspace::{DefType, Definition, Workspace};
 use gcsl::Diagnostic;
 
+/// The def-types GCSL's prelude declares for pekit, which a workspace has
+/// whether or not it defines anything with them.
+const PRELUDE_DEF_TYPES: [&str; 1] = ["build"];
+
 /// A definition someone named (see [Targets](#targets)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
@@ -128,6 +132,14 @@ pub fn resolve(
 ) -> Result<Target, TargetError> {
     let def_types = workspace.def_types().map_err(TargetError::DefTypes)?;
     let Some(found) = def_types.iter().find(|found| found.path == def_type) else {
+        // The prelude's are listed only once something is defined with them.
+        if PRELUDE_DEF_TYPES.contains(&def_type) {
+            return Err(TargetError::NoDefinition {
+                def_type: def_type.to_owned(),
+                name: name.to_owned(),
+                similar: Vec::new(),
+            });
+        }
         return Err(TargetError::NoDefType {
             def_type: def_type.to_owned(),
         });

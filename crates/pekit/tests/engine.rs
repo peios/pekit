@@ -11,11 +11,6 @@ use pekit::platform::ExecutionPlatform;
 use pekit::sandbox::HostTools;
 use pekit::target::resolve;
 
-/// The fixture module that declares what pekit's def-types and attributes
-/// will be declared by (see `design/engine.md`, E9).
-const STEPS: &str = "#[attribute] #[defers] type hermetic = {on: Bool = true}\n\
-                     #[def_type] def build(name: String, f: fn() -> {out: File}) -> {out: File} { f() }\n";
-
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
     for (path, text) in files {
@@ -42,11 +37,7 @@ fn workspace(text: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
-        &[
-            ("workspace.gcsl", ""),
-            ("steps.gcsl", STEPS),
-            ("app/build.gcsl", text),
-        ],
+        &[("workspace.gcsl", ""), ("app/build.gcsl", text)],
     );
     write(&dir.path().join("app"), files);
     dir
@@ -318,10 +309,8 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
 
 #[test]
 fn a_target_is_evaluated_on_its_execution_platform() {
-    let text = "type Platform = {arch: String, os: String}\n\
-                context host_platform: Platform = {arch = \"none\"; os = \"none\"}\n\
-                context platform: Platform = {...^host_platform}\n\
-                #[hermetic] fn arch(a: String) -> File {\n\
+    // The prelude's contexts.
+    let text = "#[hermetic] fn arch(a: String) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo {a} > out.txt\"])\n\
                 \x20   file(\"out.txt\")\n\
                 }\n\

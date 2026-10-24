@@ -6,11 +6,6 @@ use std::path::Path;
 use pekit::load::{LoadError, load};
 use pekit::target::{TargetError, resolve};
 
-/// The fixture module that declares what pekit's def-types and attributes
-/// will be declared by (see `design/engine.md`, E9).
-const STEPS: &str = "#[attribute] #[defers] type hermetic = {on: Bool = true}\n\
-                     #[def_type] def build(name: String, f: fn() -> String) -> String { f() }\n";
-
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
     for (path, text) in files {
@@ -28,7 +23,6 @@ fn two_hellos() -> tempfile::TempDir {
         dir.path(),
         &[
             ("workspace.gcsl", ""),
-            ("steps.gcsl", STEPS),
             (
                 "app/one/build.gcsl",
                 "def build hello() { \"one\" }\ndef build world() { \"w\" }",
@@ -92,6 +86,15 @@ fn a_name_that_matches_nothing_suggests_the_closest() {
             .message(),
         "error: no def-type is named `biuld`"
     );
+}
+
+#[test]
+fn a_workspace_with_no_builds_has_none_of_any_name() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &[("workspace.gcsl", ""), ("app.gcsl", "x = 1")]);
+    let loaded = load(dir.path()).unwrap();
+    let error = resolve(&loaded.workspace, ("build", "hello"), "").unwrap_err();
+    assert_eq!(error.message(), "error: no `build` is named `hello`");
 }
 
 #[test]

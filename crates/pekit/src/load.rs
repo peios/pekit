@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use gcsl::workspace::{self, Workspace};
+use gcsl::diagnostic::Renderer;
 use gcsl::{Diagnostic, SourceFile};
 
 /// A workspace loaded and checked (see [Loading](#loading)).
@@ -134,12 +135,19 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
 /// or with no source if it names none.
 fn render(sources: &[SourceFile], diagnostics: &[Diagnostic]) -> String {
     let mut shown = String::new();
+    let renderer = Renderer::plain();
     for diagnostic in diagnostics {
         let source = diagnostic
             .input
             .and_then(|input| sources.get(input as usize));
         match source {
-            Some(source) => shown.push_str(&diagnostic.render(source)),
+            // Each label against its own file's source, a standard file's
+            // among them.
+            Some(source) => shown.push_str(&renderer.render_in(diagnostic, |input| {
+                input
+                    .and_then(|input| sources.get(input as usize))
+                    .unwrap_or(source)
+            })),
             None => {
                 let _ = writeln!(shown, "error: {}", diagnostic.message);
             }

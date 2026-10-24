@@ -21,11 +21,6 @@ fn workspace() -> tempfile::TempDir {
         &[
             ("workspace.gcsl", ""),
             (
-                "steps.gcsl",
-                "#[attribute] #[defers] type hermetic = {on: Bool = true}\n\
-                 #[def_type] def build(name: String, f: fn() -> {out: File}) -> {out: File} { f() }\n",
-            ),
-            (
                 "app/build.gcsl",
                 "#[hermetic] fn shout(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
