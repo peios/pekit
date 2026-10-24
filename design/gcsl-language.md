@@ -1282,9 +1282,12 @@ steps, each usable alone.
   `File.exec` and `Sandbox.exec`, give them as named parameters with
   defaults.
 - **`cwd`** is the program's working directory, `""` for GCSL's own.
-- **`env`**, `{*: Revealed<String>}`, is the program's environment:
-  revealed secrets may be given (12b); empty means none but what the host
-  sets, never GCSL's own.
+- **`env`**, `{*: Revealed<String>}`, is set over the environment the
+  host gives the program: revealed secrets may be given (12b). Plain
+  GCSL's base is its own environment; a host that isolates a step, as
+  pekit does, gives a base of its own. (Amended in 14b: the first version
+  said "never GCSL's own", which left plain GCSL unable to run host
+  tools; see the decisions below.)
 - **`panic`**: if true, an exit status other than 0 is a failure of the
   call, "`cc` exited with status 1", with its standard error; if false it
   is data, as it is today.
@@ -1327,6 +1330,61 @@ steps, each usable alone.
   sandboxes with mount namespaces and overlays (layer B), as it implements
   sandboxing a hermetic step and taking `File`s back into its store.
 
+### As built (14a)
+
+GCSL `f193238`. As planned, with these details:
+
+- **Where a rest parameter sits.** Anywhere, but the parameters after it
+  are given by name. A function has one at most, and it has no default:
+  given nothing, it is the empty list.
+- **Its arguments are written together**, "a rest parameter's arguments
+  are written together" otherwise, so that they are evaluated in the
+  order they are written. It is never named; `...list` gives it a list's
+  elements, and a spread where there is no rest parameter is "a spread
+  argument fills a rest parameter".
+- **In types**, `FnTy::rest` is the rest parameter's position. Two
+  function types fit, join or are the same only with rest parameters in
+  the same place. Methods move it down past the receiver.
+- **Lowering** gives the rest parameter one list, built where its first
+  argument is written.
+- **The editor**: signature help keeps the rest parameter active for every
+  positional argument from it; completion never offers it by name.
+- **A regression, fixed in 14b**: 14a's restructuring of `bind_call`
+  overflowed the checker's stack at the deepest nesting, under
+  `cargo test`'s unoptimised build only. The gate builds the tests with
+  Bazel, whose frames are smaller, so it passed.
+
+### As built (14b)
+
+GCSL `857d72f`. As planned, with the amended `env`, and these details:
+
+- **The prelude's `exec` and `exec_live` are functions** that call the
+  built-ins with the options as a record. By the rule for defaults, a call
+  through a value gives every argument: `let e = exec` then
+  `e(argv, "", {}, false, false, "")`. Optional parameters in function
+  types would lift this; nothing needs them yet.
+- **`#[track_caller]`**, a new built-in attribute, reports an error raised
+  in a function's own body at its call, as Rust's does. `exec`, `sh` and
+  their live forms use it, so a failure points at the user's call, not
+  inside the prelude. 14c to 14e's prelude wrappers, `File.exec` and the
+  rest, need it for the same reason, as will pekit's own libraries. An
+  error of an untracked function the body calls, or of a callback, stays
+  where it was raised.
+- **Killing.** A program that may be killed, by `until` or by a deadline,
+  runs in a process group of its own, killed whole with `killpg`. This
+  also fixes timeouts, which used to kill only the program and then wait
+  for any child holding its output. `nix` was already in the lockfile.
+- **`until` met is status 0** even if the program then exits by itself
+  with another status: the text was seen first, deterministically.
+- **The checker's stack.** `bind_call` now gathers a call's facts once in
+  a `Binding`; a nested call costs about 4.9 KB, not 7.0 KB, against a
+  budget of about 6.7 KB a level.
+- **Known limitations.** A program in its own process group misses the
+  terminal's Ctrl-C, so if GCSL is interrupted it can outlive it. The
+  follow-up is forwarding SIGINT to running groups, which pekit's daemon
+  needs anyway. Separately, every checked call formats its callee's type
+  for an error label it rarely uses, a cost that predates 14.
+
 ### Decisions to confirm with Jack
 
 - GCSL gains rest parameters (14a), for the drafts' `exec("-o", out)`.
@@ -1337,6 +1395,18 @@ steps, each usable alone.
 - A plain host's sandbox is a copy, not isolation.
 - `contains` (example 10's `stdout.contains`) is feature 16's, with the
   other string methods.
+- `env` is set over the host's base environment, GCSL's own under plain
+  GCSL, not a whole environment of its own. The strict reading broke
+  `exec(["cargo", ...])`, whose lookup then used only the default path,
+  and `sh("cargo build")`, which takes no options and so could not be
+  given a `PATH`. Strict would need `sh` and `sh_live` to take options,
+  and GCSL to read its own environment.
+- `#[track_caller]` is a language feature, usable by any library; the
+  prelude's `exec`, `exec_live`, `sh` and `sh_live` use it.
+- `tools/check` runs the tests under Bazel only, whose build has smaller
+  frames than `cargo test`'s, though `STACK_SIZE` promises the depth
+  tests pass unoptimised. Running `cargo test --workspace` in the gate
+  too would have caught 14a's regression.
 
 ## Later features
 
