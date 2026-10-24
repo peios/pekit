@@ -47,6 +47,7 @@ the language server and Learn follow every syntax change.
     (`f193238`), `exec`'s options and `#[track_caller]` (`857d72f`),
     `File` (`9ed5107`), `Dir` (`2333f8f`) and `Sandbox` (`b59cfa8`; see
     below).
+15. **Importing every definition of a def-type** (`b08afbd`; see below).
 
 ## 4. Defaults that are expressions: as built
 
@@ -1515,6 +1516,31 @@ otherwise.
   frames than `cargo test`'s, though `STACK_SIZE` promises the depth
   tests pass unoptimised. Running `cargo test --workspace` in the gate
   too would have caught 14a's regression.
+
+## 15. Importing every definition of a def-type (done)
+
+GCSL `b08afbd`, as agreed for example 10 (see `core-model.md`).
+
+- **Syntax:** `import DT * from PATH`, whose path may end in a glob:
+  `pkgs` reads the directory itself, `pkgs/*` every directory directly in
+  it, `pkgs/**` every directory at any depth below it, and `*` or `**`
+  alone does the same from the root. `DT` is a name or names joined by
+  `.`; variant def-types, `Toolchain::C *`, are not covered.
+- **What it imports:** only the definitions of `DT`. Hidden directories,
+  and what is below them, are skipped even when a host passes their files
+  in; a nested workspace is no directory of this one. Two directories
+  defining one name is an error at the import, naming both; finding none
+  is not.
+- **How:** the import is a use of the def-type with a role of its own, so
+  its key is found in the scan's first pass, as a definition's is. The
+  second pass binds one alias of the key for each directory, which the
+  file's view merges. The import's `DT` is a mention, so the file needs
+  the def-type's declaration even when it finds no definitions.
+- **Fixed along the way:** a view conflict of definitions now shows them
+  as written, `build x`, instead of the namespace's raw key.
+- **Evaluation units:** the importing file needs every file it reads
+  definitions from. Making evaluation units per definition, so that a
+  change under `pkgs/` does not re-evaluate an image, is layer B's work.
 
 ## Later features
 
