@@ -35,6 +35,18 @@ the language server and Learn follow every syntax change.
 8. **Generics** (`ecbec8a`, `79f5461`, `7180d8a`; see below). Generic
    functions with inferred type parameters, and generic `type`
    declarations.
+9. **Extensible enums, `Partial<T>` and generic def-types** (`c8012a7`,
+   `0b68623`; see below).
+10. **Context** (`c2545ce`, `e827138`, `9cabcf6`; see below). 10b is still
+    to do.
+11. **`assert` and `recover`** (`46f3dc9`; see below).
+12. **`Secret<T>`** (`73e0562`, `6761d60`, `d192a4d`) and its hardening,
+    `exec_secret` (`1ee8782`; see below).
+13. **Persistent lists** (`6fe5bfc`; see below).
+14. **Files, directories, sandboxes and `exec` options:** rest parameters
+    (`f193238`), `exec`'s options and `#[track_caller]` (`857d72f`),
+    `File` (`9ed5107`), `Dir` (`2333f8f`) and `Sandbox` (`b59cfa8`; see
+    below).
 
 ## 4. Defaults that are expressions: as built
 
@@ -1444,6 +1456,31 @@ since a list has no root. Drafts 1 and 4, whose toolchains are typed
   so that a program writing in the result changes nothing it was made
   of; pekit mounts instead.
 - **`Value::dirs()`** finds a value's trees, apart from its files.
+
+### As built (14e)
+
+GCSL `b59cfa8`.
+
+- **A copy alone is wrong, not only slow.** Without a new `/`, example
+  4's `CC = "/opt/cc/bin/cc"` runs the machine's own compiler. So a plain
+  host runs each command under bubblewrap, with the sandbox's private copy
+  bound as `/`, and without `bwrap` a sandbox is an error (Jack,
+  2026-10-24).
+- **The command** is `bwrap --bind COPY / --proc /proc --dev /dev
+  --unshare-user --unshare-pid --die-with-parent --chdir CWD --clearenv
+  --setenv ...`. `--die-with-parent` lets 14b's group kill reach the whole
+  pid namespace. The environment is exactly the sandbox's with the call's
+  over it. The network is left on; that is pekit's policy.
+- **For layer C:** `bwrap --overlay-src DIR --overlay UPPER WORK /` works
+  here, unprivileged. Reading an overlay's merged view from outside needs
+  `user.overlay.opaque` xattrs, and a mount kept alive beside per-exec
+  mounts hits EBUSY, so pekit should read results from inside, or keep its
+  upper layers to itself.
+- **Each sandbox copies its directory,** creates its working directory,
+  is equal only to itself, and has no source form. `s.file` and `s.dir`
+  read the live copy.
+
+Feature 14 is complete.
 
 ### Decisions
 
