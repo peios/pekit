@@ -99,9 +99,114 @@ How it is built, and where it departs from the plan:
   gcsl(5).
 
 
+## 5. Duration and size literals
+
+### Rule
+
+Two new primitive types, `Duration` and `Size`, with literals written as a
+number glued to a unit. A number glued to letters is an error today, so no
+existing program changes meaning.
+
+- **Duration literals.** One or more components in strictly decreasing
+  unit order, each unit at most once: `30s`, `500ms`, `1h30m`, `2d`. The
+  units are `d` (exactly 24h; there is no calendar), `h`, `m`, `s`, `ms`,
+  `us` and `ns`. Only the last component may have a decimal fraction
+  (`1.5h`, `1m0.5s`), and the total must be a whole number of
+  nanoseconds. A `Duration` is an `i64` count of nanoseconds, which covers
+  about ±292 years. A literal beyond that is "duration literal out of range
+  for Duration".
+- **Size literals.** One component: `B`, the decimal units `KB` `MB` `GB`
+  `TB` `PB` (powers of 1000), or the binary units `KiB` `MiB` `GiB` `TiB`
+  `PiB` (powers of 1024). Examples are `512B`, `2GiB` and `1.5MB`. A
+  fraction must make a whole number of bytes. A `Size` is an `i64` count of
+  bytes; one beyond that is "size literal out of range for Size". There
+  are no exabyte units, because `1E5` is a float exponent.
+- Digits may use `_` separators, as in other number literals. There is no
+  exponent. A unit is case-sensitive, and an unknown unit is "unknown unit
+  `x`". The error lists the units of the literal's type, or of both types
+  when the unit matches neither.
+- **Negative values** are written with unary minus: `-30s`. Minus applied
+  directly to one of these literals is a constant, as for numbers, so
+  `timeout: Duration = 30s` is a constant default.
+- **Arithmetic**, with `Q` standing for either type:
+  - `Q + Q` and `Q - Q` give `Q`; `-Q` gives `Q`;
+  - `Q * Int` and `Int * Q` give `Q`;
+  - `Q // Int` gives `Q`, floored;
+  - `Q // Q` gives `Int`, and `Q % Q` gives `Q`, both floored as for `Int`.
+  
+  Overflow is a run-time error, as for `Int` ("duration overflow", "size
+  overflow"), and dividing by zero is too. `/` is an error on these types,
+  noted "use `//`; a Duration is a whole number of nanoseconds" or "of
+  bytes". Mixing `Duration` with `Size`, or either with `Float`, is a type
+  error. There is no implicit conversion from `Int`, so `0` is not a
+  duration; write `0s`.
+- **Comparison and equality.** `==`, `!=`, `<`, `<=`, `>` and `>=` work
+  within one type.
+- **Shown form, the canonical literal.**
+  - A duration is shown as its non-zero components from `d` down to `ns`,
+    for example `1m30s` or `1s500ms`; zero is `0s`, and a negative duration
+    is `-` followed by the form of its magnitude.
+  - A size is shown in the largest unit, decimal or binary, that divides it
+    exactly: `2GiB`, `1500B`, `1MB`; zero is `0B`.
+
+  Every shown form is a literal of the same value. `show`, interpolation
+  and `gcsl run` use it.
+- **Types.** The new types join `Int`, `Float`, `Bool` and `String`
+  everywhere a primitive goes: annotations, unions, `is` and `as`, record
+  fields, and constants in defaults and field defaults.
+- **Conversions** to and from numbers, such as `d.seconds()` and
+  `size.bytes()`, wait for receiver methods (feature 7) and the prelude's
+  move to methods (feature 16). Adding them now as global functions would be
+  churn. A host reads `Value::Duration` and `Value::Size` directly.
+
+### Implementation
+
+- **Lexer.** `Lexer::number` lexes a unit glued to the digits and gives
+  `TokenKind::Duration(i64)` or `TokenKind::Size(i64)`, computed exactly
+  with integer arithmetic (no float rounding). `number_end` learns the
+  units, for the scan.
+- **AST.** `ExprKind::Duration(i64)` and `ExprKind::Size(i64)`.
+  `is_constant` accepts them, with or without a unary minus.
+- **Types.** `TyId::DURATION` and `TyId::SIZE` are pre-interned after
+  `ERROR`, so existing ids keep their numbers. They are shown as `Duration`
+  and `Size`, have `ValueKind::Duration` and `ValueKind::Size`, and are
+  builtin type names.
+- **Checker.** Literals are typed as above, and the operator table is
+  extended. `Constant::Duration(i64)` and `Constant::Size(i64)` are added.
+- **IR.** Values stay tagged at run time (`Value::Duration`,
+  `Value::Size`), so that `gcsl run`, `is` and a host all see the unit.
+  Arithmetic and comparison reuse the checked `i64` nodes (`IntAdd`,
+  `IntCmp` and so on), whose operands may be of these kinds. A new node,
+  `IrKind::Measured { unit, value }`, gives an `i64` computation its unit,
+  and so its kind. Lowering wraps each quantity-typed arithmetic result
+  and constant in one.
+- **Evaluator.** The `Int` walker evaluates operands of these kinds, taking
+  the `i64` from the tagged value as the node's kind says. The general
+  walker builds the tagged value for `Measured`. Overflow messages come from
+  the unit. Before this, a refactor shares the typed walkers' handling of
+  nodes of any kind (loads, captures, calls, fields, indexes, awaits and
+  narrowing), which each walker repeats today. That keeps every walker's
+  match exhaustive and within the lint limit.
+- **Value.** `Value::Duration(i64)`, `Value::Size(i64)` and their display
+  forms. Equality, memo keys and `same` follow `Int`'s.
+- **Formatter, index, LSP.** Literals are kept verbatim. Hover shows the
+  type. Completion offers the type names.
+- **Documentation.** The lexer's literal grammar, the checker's types and
+  operators, the IR, the evaluator and the value docs; Learn's records and
+  types page and an expressions page; gcsl(5); and the tree-sitter grammar
+  later, with the other syntax.
+
+### Decisions to confirm with Jack
+
+- The names `Duration` and `Size`. Pkl uses `Duration` and `DataSize`.
+  `Size` is shorter and reads well in `memory: Size = 2GiB`.
+- `d` as exactly 24 hours, with no `w` and no months.
+- No exabyte units.
+- No float arithmetic on quantities.
+
 ## Later features
 
-Specified in detail when their turn comes: 5 duration and size literals; 6
+Specified in detail when their turn comes: 6
 host-declared attributes with typed arguments; 7 receiver methods; 8
 generics; 9 extensible enums and `Partial<T>`; 10 context (`context`, `^`,
 `with`); 11 `recover` and `assert`; 12 `Secret<T>`; 13 persistent lists;
