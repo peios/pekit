@@ -17,6 +17,8 @@
 //!   input with the same bytes at the same path keys the same;
 //! - each secret by its identity and whether it is revealed, never by its
 //!   value;
+//! - its own output directory, `/pekit-out/<target>/<step>`, which names
+//!   the files it makes;
 //! - the platform it runs on.
 //!
 //! Its attributes are not on it: `#[retry]` and `#[timeout]` change how it
@@ -40,6 +42,8 @@ pub struct ReceiptOf<'a> {
     pub captures: &'a [Plain],
     /// The context it runs in, by key, sorted.
     pub context: &'a [(String, Plain)],
+    /// Its own output directory, logically.
+    pub own: &'a str,
     /// The platform it runs on, as pekit describes it.
     pub platform: &'a str,
 }
@@ -61,7 +65,7 @@ pub fn receipt(
         hasher: &mut hasher,
         contents,
     };
-    out.text("pekit-receipt-1");
+    out.text("pekit-receipt-2");
     out.count(of.code.len());
     for (path, digest) in of.code {
         out.text(path);
@@ -78,6 +82,7 @@ pub fn receipt(
         out.text(key);
         out.plain(plain)?;
     }
+    out.text(of.own);
     out.text(of.platform);
     Ok(Digest::from_hasher(hasher))
 }

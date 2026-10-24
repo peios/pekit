@@ -43,7 +43,7 @@ use gcsl::{Diagnostic, Span, Value};
 
 use crate::load::Loaded;
 use crate::receipt::{ReceiptOf, receipt};
-use crate::record::{Kept, StepRecord, StoreError, stored};
+use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use crate::sandbox::{HostView, OUTPUTS, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Store};
 use crate::target::Target;
@@ -143,6 +143,7 @@ pub fn build(
         steps: HashMap::new(),
         step_names: HashMap::new(),
         names_used: HashMap::new(),
+        named: 0,
         pool: Pool::new(settings.jobs.max(1)),
         in_flight: HashSet::new(),
         target_dir: target.qualified().trim_start_matches('/').to_owned(),
@@ -161,7 +162,7 @@ pub fn build(
         value,
         ran: run.ran,
         cached: run.cached,
-        flaky: run.flaky,
+        flaky: std::mem::take(&mut run.flaky),
     })
 }
 
@@ -230,6 +231,8 @@ struct Run<'a> {
     step_names: HashMap<NodeId, String>,
     /// How many steps of each function's name have been named.
     names_used: HashMap<String, u32>,
+    /// How many of the graph's nodes have been looked at to name steps.
+    named: usize,
     /// The pool effects run on.
     pool: Pool,
     /// The effects running, by node.
@@ -242,6 +245,16 @@ struct Run<'a> {
     cached: usize,
     /// The steps that passed only on a retry, by name.
     flaky: Vec<String>,
+}
+
+impl Drop for Run<'_> {
+    /// Removes the staging directory of every step still running, as when
+    /// the build fails.
+    fn drop(&mut self) {
+        for (&id, step) in &self.steps {
+            let _ = std::fs::remove_dir_all(self.stage_dir(id, step.attempt));
+        }
+    }
 }
 
 /// Where the target's unit is.
@@ -274,6 +287,7 @@ impl Run<'_> {
                     Progress::Paused(node) => Main::Paused(node),
                     Progress::Done(value) => Main::Holding(value),
                 };
+                self.name_new_steps();
             }
             let demands = match &main {
                 Main::Paused(node) => vec![*node],
@@ -367,29 +381,43 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// The name of the step `id`, its function's and its number among the
-    /// target's steps of that name, in the order they are met.
-    fn step_name(&mut self, id: NodeId) -> String {
-        if let Some(name) = self.step_names.get(&id) {
-            return name.clone();
+    /// Names every step the graph has that is not named, in the order the
+    /// target's code met them, which is the same in every build whatever
+    /// order steps finish in: its function's name, and its number among the
+    /// target's steps of that name after the first, `compile.2`.
+    fn name_new_steps(&mut self) {
+        let mut found = Vec::new();
+        for (id, node) in self.graph.nodes().skip(self.named) {
+            if node.kind() != NodeKind::Deferred {
+                continue;
+            }
+            let function = node
+                .closure()
+                .and_then(|closure| closure.code.find_function(closure.function))
+                .and_then(|code| code.name_text.as_deref())
+                .unwrap_or("step")
+                .to_owned();
+            found.push((id, function));
         }
-        let function = self
-            .graph
-            .node(id)
-            .and_then(|node| node.closure())
-            .and_then(|closure| closure.code.find_function(closure.function))
-            .and_then(|code| code.name_text.as_deref())
-            .unwrap_or("step")
-            .to_owned();
-        let count = self.names_used.entry(function.clone()).or_insert(0);
-        *count += 1;
-        let name = if *count == 1 {
-            function
-        } else {
-            format!("{function}.{count}")
-        };
-        self.step_names.insert(id, name.clone());
-        name
+        self.named = self.graph.len();
+        for (id, function) in found {
+            let count = self.names_used.entry(function.clone()).or_insert(0);
+            *count += 1;
+            let name = if *count == 1 {
+                function
+            } else {
+                format!("{function}.{count}")
+            };
+            self.step_names.insert(id, name);
+        }
+    }
+
+    /// The name of the step `id` ([`Run::name_new_steps`]).
+    fn step_name(&self, id: NodeId) -> String {
+        self.step_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("step-{}", id.number()))
     }
 
     /// Starts the step `id`: from its record if the store has one for its
@@ -409,12 +437,16 @@ impl Run<'_> {
                 Some((name.clone(), Digest::of(source.text().as_bytes())))
             })
             .collect();
+        let name = self.step_name(id);
+        let own = format!("{}/{name}", self.target_dir);
+        let own_path = format!("{OUTPUTS}/{own}");
         let mut given: Vec<(String, Kept)> = Vec::new();
         let of = ReceiptOf {
             code: &code,
             args: &inputs.args,
             captures: &inputs.captures,
             context: &inputs.context,
+            own: &own_path,
             platform: &self.settings.platform,
         };
         let receipt = {
@@ -441,9 +473,8 @@ impl Run<'_> {
             self.cached += 1;
             return Ok(());
         }
-        let name = self.step_name(id);
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
-        let sandbox = self.fresh_sandbox(id, &name, 0, &given)?;
+        let sandbox = self.fresh_sandbox(id, &own, 0, &given)?;
         let started = Instant::now();
         self.steps.insert(
             id,
@@ -462,12 +493,13 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// A new sandbox for the attempt `attempt` of the step `id`, named
-    /// `name`, staged with `given`.
+    /// A new sandbox for the attempt `attempt` of the step `id`, whose own
+    /// output directory is `own`, `<target>/<step>` under `/pekit-out`,
+    /// staged with `given`; nothing left behind if it cannot be made.
     fn fresh_sandbox(
         &self,
         id: NodeId,
-        name: &str,
+        own: &str,
         attempt: u32,
         given: &[(String, Kept)],
     ) -> Result<Arc<StepSandbox>, BuildError> {
@@ -475,16 +507,21 @@ impl Run<'_> {
         if stage.exists() {
             std::fs::remove_dir_all(&stage).map_err(|error| engine(&error))?;
         }
-        let own = format!("{}/{name}", self.target_dir);
-        let sandbox = StepSandbox::new(&stage, &own)
-            .map_err(|error| engine(&error))?
-            .with_host(&self.settings.host_tools);
-        for (path, kept) in given {
-            sandbox
-                .stage(&self.store, path, *kept)
-                .map_err(|error| engine(&format!("cannot stage `{path}`: {error}")))?;
+        let staged = (|| {
+            let sandbox = StepSandbox::new(&stage, own)
+                .map_err(|error| engine(&error))?
+                .with_host(&self.settings.host_tools);
+            for (path, kept) in given {
+                sandbox
+                    .stage(&self.store, path, *kept)
+                    .map_err(|error| engine(&format!("cannot stage `{path}`: {error}")))?;
+            }
+            Ok(Arc::new(sandbox))
+        })();
+        if staged.is_err() {
+            let _ = std::fs::remove_dir_all(&stage);
         }
-        Ok(Arc::new(sandbox))
+        staged
     }
 
     /// Where the attempt `attempt` of the step `id` is staged.
@@ -507,25 +544,26 @@ impl Run<'_> {
     }
 
     /// What the store keeps of the input at `path`, a file or, if `dir`, a
-    /// directory: a workspace file's, put into the store, or an output's.
+    /// directory: an output of a step of this build, or a workspace file's,
+    /// put into the store. Never what an earlier build left in the output
+    /// directory, which might be stale.
     fn input(&mut self, path: &str, dir: bool) -> Result<Kept, String> {
         if let Some(kept) = self.outputs.get(path) {
             return Ok(*kept);
         }
-        // A workspace file, or an output that what is not hermetic wrote.
-        let host = if let Some(rest) = path
+        let Some(rest) = path
             .strip_prefix(WORKSPACE)
             .and_then(|rest| rest.strip_prefix('/'))
-        {
-            self.loaded.root.join(rest)
-        } else if let Some(at) = output_path(&self.settings.outputs, path) {
-            at
-        } else {
+        else {
+            if path == OUTPUTS || path.starts_with(&format!("{OUTPUTS}/")) {
+                return Err(format!("`{path}` is no output of any step of this build"));
+            }
             return Err(format!(
                 "`{path}` is outside the workspace: a hermetic step is given only the \
                  workspace's files and other steps' outputs"
             ));
         };
+        let host = self.loaded.root.join(rest);
         let kept = if dir {
             Kept::Dir(
                 self.store
@@ -602,14 +640,26 @@ impl Run<'_> {
             .to_plain(value)
             .map_err(BuildError::Engine)?;
         let host = |path: &str| step.sandbox.host_path(path).unwrap_or_default();
-        match stored(&plain, &self.store, &host) {
-            Ok(kept) => {
-                for (path, kept) in kept.files() {
-                    self.outputs.insert(path.to_owned(), kept);
-                }
+        // Its files are kept whatever it holds: later steps are given them.
+        let kept = match keep_files(&plain, &self.store, &host) {
+            Ok(kept) => kept,
+            Err(StoreError::Io { path, error }) => {
+                let message =
+                    format!("the step's result names `{path}`, which it did not make: {error}");
+                self.graph
+                    .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
+                return Ok(());
+            }
+            Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
+        };
+        for (path, entry) in &kept {
+            self.outputs.insert(path.clone(), *entry);
+        }
+        match stored(&plain, &kept) {
+            Ok(result) => {
                 let record = StepRecord {
                     receipt: step.receipt,
-                    result: kept,
+                    result,
                     duration_ms: u64::try_from(step.started.elapsed().as_millis())
                         .unwrap_or(u64::MAX),
                 };
@@ -619,13 +669,7 @@ impl Run<'_> {
             }
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
-            Err(StoreError::Io { path, error }) => {
-                let message =
-                    format!("the step's result names `{path}`, which it did not make: {error}");
-                self.graph
-                    .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
-                return Ok(());
-            }
+            Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
         }
         if step.failed_once {
             let name = self.step_names.get(&id).cloned().unwrap_or_default();
@@ -656,9 +700,9 @@ impl Run<'_> {
             return Ok(());
         };
         self.unstage(id, &step)?;
-        let name = self.step_name(id);
+        let own = format!("{}/{}", self.target_dir, self.step_name(id));
         let attempt = step.attempt + 1;
-        let sandbox = self.fresh_sandbox(id, &name, attempt, &step.given)?;
+        let sandbox = self.fresh_sandbox(id, &own, attempt, &step.given)?;
         self.graph.forget_unit(STEP_UNITS + id.number());
         self.steps.insert(
             id,
@@ -695,16 +739,13 @@ impl Run<'_> {
             .to_plain(value)
             .map_err(BuildError::Engine)?;
         for (path, _) in plain.files() {
-            let Some(rest) = path
-                .strip_prefix(OUTPUTS)
-                .and_then(|rest| rest.strip_prefix('/'))
-            else {
+            let Some(at) = output_path(&self.settings.outputs, path) else {
                 continue;
             };
+            // What no step made, the target's own effects wrote there.
             let Some(kept) = self.outputs.get(path) else {
                 continue;
             };
-            let at = self.settings.outputs.join(rest);
             let _ = std::fs::remove_file(&at);
             let _ = std::fs::remove_dir_all(&at);
             let copied = match kept {

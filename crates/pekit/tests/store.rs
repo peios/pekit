@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use gcsl::eval::plain::Plain;
 use pekit::receipt::{ReceiptOf, receipt};
-use pekit::record::{Kept, StepRecord, StoreError, stored};
+use pekit::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use pekit::store::{Digest, Store};
 
 /// A store in a new temporary directory, and the directory.
@@ -72,12 +72,19 @@ fn a_directory_is_a_tree_whose_digest_is_its_whole_content_s() {
 /// The receipt of a step given `args`, its files' contents those of the
 /// digests of `contents`, by path.
 fn receipt_of(args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
+    receipt_in("/pekit-out/app/hello/compile", args, contents)
+}
+
+/// The receipt of a step whose output directory is `own`, given `args`, its
+/// files' contents those of the digests of `contents`, by path.
+fn receipt_in(own: &str, args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
     let code = [("app/build.gcsl".to_owned(), Digest::of(b"code"))];
     let of = ReceiptOf {
         code: &code,
         args,
         captures: &[],
         context: &[],
+        own,
         platform: "x86_64-linux",
     };
     let mut lookup = |path: &str, _dir: bool| {
@@ -133,6 +140,11 @@ fn a_receipt_keys_files_by_path_and_contents_and_secrets_by_identity() {
         receipt_of(&[secret("k3y", "test key")], &[]),
         receipt_of(&[secret("k3y", "release key")], &[])
     );
+    // Its output directory, which names what it makes.
+    assert_ne!(
+        receipt_of(&[], &[]),
+        receipt_in("/pekit-out/app/hello/compile.2", &[], &[])
+    );
     // A NaN keys as itself.
     assert_eq!(
         receipt_of(&[Plain::Float(f64::NAN)], &[]),
@@ -157,7 +169,8 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         ),
         ("n".to_owned(), Plain::Int(1)),
     ]);
-    let kept = stored(&result, &store, &host).unwrap();
+    let files = keep_files(&result, &store, &host).unwrap();
+    let kept = stored(&result, &files).unwrap();
     assert_eq!(kept.plain(), result);
     let [(path, Kept::File(entry))] = kept.files()[..] else {
         panic!("{:?}", kept.files());
@@ -177,14 +190,22 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         store.record::<StepRecord>(&Digest::of(b"none")).unwrap(),
         None
     );
-    // A secret is never stored.
+    // A secret is never stored, though the files beside it are kept.
     let secret = Plain::Secret {
         identity: "key".to_owned(),
         revealed: false,
         value: Box::new(Plain::Str("k3y".to_owned())),
     };
+    let with_secret = Plain::List(vec![result.clone(), secret]);
+    let files = keep_files(&with_secret, &store, &host).unwrap();
+    assert!(files.contains_key("/pekit-out/hello"));
     assert!(matches!(
-        stored(&secret, &store, &host),
+        stored(&with_secret, &files),
         Err(StoreError::Secret)
+    ));
+    // A file not kept is no record's.
+    assert!(matches!(
+        stored(&result, &std::collections::HashMap::new()),
+        Err(StoreError::Unkept(path)) if path == "/pekit-out/hello"
     ));
 }

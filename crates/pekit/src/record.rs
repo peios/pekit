@@ -4,13 +4,18 @@
 //!
 //! A step that succeeds is recorded (see `design/engine.md`, E3): its
 //! receipt, its result, and how long it took, which eviction weighs later.
-//! Its result is kept as a [`Stored`] value, plain data whose files and
-//! directories are kept in the store ([`stored`]) and named in it by their
-//! paths and contents, so that a later run with the same receipt gives the
-//! result back, its files at their paths ([`Stored::files`]), without
-//! running the step. A result that holds a secret is no record's: a secret
-//! is never stored ([`StoreError::Secret`]), so such a step runs every time.
+//! Every file and directory a step's result names is kept in the store
+//! ([`keep_files`]), whatever else it holds, since later steps are given
+//! them. Its result is then kept as a [`Stored`] value, plain data whose
+//! files and directories are named by their paths and contents
+//! ([`stored`]), so that a later run with the same receipt gives the result
+//! back, its files at their paths ([`Stored::files`]), without running the
+//! step. A result that holds a secret is no record's: a secret is never
+//! stored ([`StoreError::Secret`]), so such a step runs every time, though
+//! its files are kept as any step's are.
 
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::io;
 use std::path::PathBuf;
 
@@ -69,6 +74,8 @@ pub enum Stored {
 pub enum StoreError {
     /// It holds a secret, which is never stored.
     Secret,
+    /// A file or directory it names was not kept ([`keep_files`]).
+    Unkept(String),
     /// A file or directory it names could not be put into the store.
     Io {
         /// The path, as GCSL code names it.
@@ -78,22 +85,54 @@ pub enum StoreError {
     },
 }
 
-/// `plain`, a step's result, as a record keeps it, every file and directory
-/// it names put into `store` from where `host` says it is on the host's file
-/// system (see [Records](#records)).
+/// Puts every file and directory `plain`, a step's result, names into
+/// `store`, from where `host` says each is on the host's file system: what
+/// the store keeps of each, by its path (see [Records](#records)).
 ///
 /// # Errors
 ///
-/// That it holds a secret, or a file or directory it names cannot be read.
-pub fn stored(
+/// A file or directory it names that cannot be read: one the step did not
+/// make, say.
+pub fn keep_files(
     plain: &Plain,
     store: &Store,
     host: &dyn Fn(&str) -> PathBuf,
+) -> Result<HashMap<String, Kept>, StoreError> {
+    let mut kept = HashMap::new();
+    for (path, dir) in plain.files() {
+        if kept.contains_key(path) {
+            continue;
+        }
+        let at = host(path);
+        let io = |error| StoreError::Io {
+            path: path.to_owned(),
+            error,
+        };
+        let entry = if dir {
+            Kept::Dir(store.put_tree(&at).map_err(io)?)
+        } else {
+            Kept::File(store.put_file(&at).map_err(io)?)
+        };
+        kept.insert(path.to_owned(), entry);
+    }
+    Ok(kept)
+}
+
+/// `plain`, a step's result, as a record keeps it, each file and directory
+/// it names by what the store keeps of it, from `kept` (see
+/// [Records](#records)).
+///
+/// # Errors
+///
+/// That it holds a secret, or names a file or directory `kept` lacks.
+pub fn stored<S: BuildHasher>(
+    plain: &Plain,
+    kept: &HashMap<String, Kept, S>,
 ) -> Result<Stored, StoreError> {
-    let at = |path: &str| -> PathBuf { host(path) };
-    let io = |path: &str, error| StoreError::Io {
-        path: path.to_owned(),
-        error,
+    let of = |path: &str| {
+        kept.get(path)
+            .copied()
+            .ok_or_else(|| StoreError::Unkept(path.to_owned()))
     };
     Ok(match plain {
         Plain::Int(n) => Stored::Int(*n),
@@ -106,38 +145,38 @@ pub fn stored(
         Plain::Record(fields) => Stored::Record(
             fields
                 .iter()
-                .map(|(name, value)| Ok((name.clone(), stored(value, store, host)?)))
+                .map(|(name, value)| Ok((name.clone(), stored(value, kept)?)))
                 .collect::<Result<_, StoreError>>()?,
         ),
         Plain::List(items) => Stored::List(
             items
                 .iter()
-                .map(|item| stored(item, store, host))
+                .map(|item| stored(item, kept))
                 .collect::<Result<_, _>>()?,
         ),
         Plain::Variant {
             key,
-            of,
+            of: enum_of,
             shown,
             payload,
         } => Stored::Variant(
             key.clone(),
-            of.clone(),
+            enum_of.clone(),
             shown.clone(),
             match payload {
-                Some(payload) => Some(Box::new(stored(payload, store, host)?)),
+                Some(payload) => Some(Box::new(stored(payload, kept)?)),
                 None => None,
             },
         ),
         Plain::Secret { .. } => return Err(StoreError::Secret),
-        Plain::File { path, identity } => {
-            let entry = store.put_file(&at(path)).map_err(|error| io(path, error))?;
-            Stored::File(path.clone(), identity.clone(), entry)
-        }
-        Plain::Dir { path, identity } => {
-            let tree = store.put_tree(&at(path)).map_err(|error| io(path, error))?;
-            Stored::Dir(path.clone(), identity.clone(), tree)
-        }
+        Plain::File { path, identity } => match of(path)? {
+            Kept::File(entry) => Stored::File(path.clone(), identity.clone(), entry),
+            Kept::Dir(_) => return Err(StoreError::Unkept(path.clone())),
+        },
+        Plain::Dir { path, identity } => match of(path)? {
+            Kept::Dir(tree) => Stored::Dir(path.clone(), identity.clone(), tree),
+            Kept::File(_) => return Err(StoreError::Unkept(path.clone())),
+        },
         Plain::Sandbox { root, cwd, env } => {
             Stored::Sandbox(root.clone(), cwd.clone(), env.clone())
         }

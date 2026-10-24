@@ -166,3 +166,49 @@ fn a_step_s_timeout_stops_it() {
     assert!(started.elapsed().as_secs() < 10, "{error}");
     assert!(error.starts_with("error: the step timed out\n"), "{error}");
 }
+
+/// A step that joins two files into its output.
+const JOIN: &str = "#[hermetic] fn join(a: File, b: File) -> File {\n\
+                    \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {a.path} {b.path} > out.txt\"])\n\
+                    \x20   file(\"out.txt\")\n\
+                    }\n";
+
+#[test]
+fn steps_of_one_function_keep_their_names_whichever_is_cached() {
+    let text = format!(
+        "{SHOUT}{JOIN}def build hello() {{ out = join(shout(file(\"a.txt\")), shout(file(\"b.txt\"))) }}\n"
+    );
+    let dir = workspace(&text, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((built.ran, built.cached), (3, 0));
+    let out = dir.path().join("pekit-out/app/hello/join/out.txt");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "A\nB\n");
+    // The second changed: the first found, the second run, each under its
+    // own name.
+    fs::write(dir.path().join("app/b.txt"), "c\n").unwrap();
+    let again = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((again.ran, again.cached), (2, 1));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "A\nC\n");
+}
+
+#[test]
+fn a_step_whose_result_holds_a_secret_runs_each_time_and_keeps_its_files() {
+    let text = format!(
+        "{SHOUT}#[hermetic] fn sealed(src: File) -> {{out: File, key: Secret<String>}} {{\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"cp {{src.path}} out.txt\"])\n\
+         \x20   {{out = file(\"out.txt\"); key = secret(\"k3y\", \"test key\")}}\n\
+         }}\n\
+         def build hello() {{ out = shout(sealed(file(\"name.txt\")).out) }}\n"
+    );
+    let dir = workspace(&text, &[("name.txt", "hidden\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((built.ran, built.cached), (2, 0));
+    let out = dir.path().join("pekit-out/app/hello/shout/out.txt");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "HIDDEN\n");
+    // Never recorded, so run again; the step after it is found.
+    let again = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((again.ran, again.cached), (1, 1));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "HIDDEN\n");
+}
