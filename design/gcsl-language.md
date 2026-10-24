@@ -99,7 +99,7 @@ How it is built, and where it departs from the plan:
   gcsl(5).
 
 
-## 5. Duration and size literals
+## 5. Duration and size literals (done)
 
 ### Rule
 
@@ -157,44 +157,49 @@ existing program changes meaning.
 - **Conversions** to and from numbers, such as `d.seconds()` and
   `size.bytes()`, wait for receiver methods (feature 7) and the prelude's
   move to methods (feature 16). Adding them now as global functions would be
-  churn. A host reads `Value::Duration` and `Value::Size` directly.
+  churn. A host reads `Value::Quantity` directly.
 
-### Implementation
+### Implementation, as built
 
-- **Lexer.** `Lexer::number` lexes a unit glued to the digits and gives
-  `TokenKind::Duration(i64)` or `TokenKind::Size(i64)`, computed exactly
-  with integer arithmetic (no float rounding). `number_end` learns the
-  units, for the scan.
-- **AST.** `ExprKind::Duration(i64)` and `ExprKind::Size(i64)`.
-  `is_constant` accepts them, with or without a unary minus.
-- **Types.** `TyId::DURATION` and `TyId::SIZE` are pre-interned after
-  `ERROR`, so existing ids keep their numbers. They are shown as `Duration`
-  and `Size`, have `ValueKind::Duration` and `ValueKind::Size`, and are
-  builtin type names.
-- **Checker.** Literals are typed as above, and the operator table is
-  extended. `Constant::Duration(i64)` and `Constant::Size(i64)` are added.
-- **IR.** Values stay tagged at run time (`Value::Duration`,
-  `Value::Size`), so that `gcsl run`, `is` and a host all see the unit.
-  Arithmetic and comparison reuse the checked `i64` nodes (`IntAdd`,
-  `IntCmp` and so on), whose operands may be of these kinds. A new node,
-  `IrKind::Measured { unit, value }`, gives an `i64` computation its unit,
-  and so its kind. Lowering wraps each quantity-typed arithmetic result
-  and constant in one.
-- **Evaluator.** The `Int` walker evaluates operands of these kinds, taking
-  the `i64` from the tagged value as the node's kind says. The general
-  walker builds the tagged value for `Measured`. Overflow messages come from
-  the unit. Before this, a refactor shares the typed walkers' handling of
-  nodes of any kind (loads, captures, calls, fields, indexes, awaits and
-  narrowing), which each walker repeats today. That keeps every walker's
-  match exhaustive and within the lint limit.
-- **Value.** `Value::Duration(i64)`, `Value::Size(i64)` and their display
-  forms. Equality, memo keys and `same` follow `Int`'s.
-- **Formatter, index, LSP.** Literals are kept verbatim. Hover shows the
-  type. Completion offers the type names.
-- **Documentation.** The lexer's literal grammar, the checker's types and
-  operators, the IR, the evaluator and the value docs; Learn's records and
-  types page and an expressions page; gcsl(5); and the tree-sitter grammar
-  later, with the other syntax.
+- **Lexer.** A number becomes a quantity only when the letters glued to it
+  start with a unit's name (`unit_at`). Any other letters lex as they
+  always did, a number and then a name, so a module path's `pkgs/7zip` and
+  `pkgs/0ad` keep working. Where an expression is expected, the parser
+  reports `30sec` as "unknown unit `sec`" (`Parser::unitless`). This
+  departs from the plan, under which the lexer reported every unknown
+  unit, and would have broken directory names that start with a digit.
+  `Lexer::quantity` computes values exactly: it cancels the fraction's
+  power of ten against the unit's factors of 2 and 5, so there is no
+  rounding. A fraction with more than 38 significant digits is an honest
+  "too many digits" error. The unit tables live in `value.rs`, shared by
+  the lexer and the shown form.
+- **One quantity variant per layer.** The enum is `Quantity { Duration,
+  Size }`. It is used as `TyKind::Quantity(Quantity)`,
+  `ValueKind::Quantity(Quantity)`, `Value::Quantity(Quantity, i64)`,
+  `Constant::Quantity(Quantity, i64)` and `IrKind::Quantity(Quantity,
+  IrId)`, rather than as two variants each. ("Measure" already means
+  indentation in the lexer and parameter demand in the checker.)
+- **IR and evaluator.** Arithmetic and comparison reuse the `Int` nodes,
+  whose operands may be quantities. Lowering lowers each operand of an
+  integer operator as its own kind, because `Q // Q` is an `Int` with
+  quantity operands. The `Int` walker takes amounts by the node's kind
+  (`amount_taken`). An overflow in a quantity's own operator is "duration
+  overflow" or "size overflow", and error labels show operands as literals.
+  A refactor before this (`shared_as`) moved the typed walkers' any-kind
+  arms into one helper, to keep the walkers exhaustive and within the lint.
+- **Stack.** The `for`-depth end-to-end test needs between 63 and 64 MB,
+  against the 64 MB `STACK_SIZE`, both before this feature and after it.
+  The margin was already under 2%: two temporaries in the general walker
+  were enough to overflow it, until they moved out of line. This needs
+  Jack's decision: raise `STACK_SIZE`, which is public and costs only a
+  reservation, or slim the walkers.
+- **Host API.** `Given::Quantity`, and a `Duration` or `Size` invocation
+  parameter read from text by the lexer itself, as in `--timeout 30s`.
+  Invocation parameters can now be of six types.
+- **Errors.** `//` and `%` with a quantity that does not fit name both
+  operands, with a note on what a quantity divides by.
+- Zero is shown as `0s` and `0B`. The most negative duration is the one
+  shown form that is no literal, as for `Int`.
 
 ### Decisions to confirm with Jack
 
