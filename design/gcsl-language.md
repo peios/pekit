@@ -26,7 +26,7 @@ the language server and Learn follow every syntax change.
    alone is `NAME = NAME`. Positional arguments after named ones stay legal
    (an existing, tested feature); only a variable passed positionally by its
    name alone after a named argument changes meaning.
-4. **Defaults that are expressions** (commit after `d0d3c72`; see below).
+4. **Defaults that are expressions** (`9a93d47`; see below).
 
 ## 4. Defaults that are expressions: as built
 
