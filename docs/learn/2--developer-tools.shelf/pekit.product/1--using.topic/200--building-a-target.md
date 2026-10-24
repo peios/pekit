@@ -65,6 +65,15 @@ is never recorded, so it runs every time.
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
+## Libraries
+
+A build file imports a library by its path, such as
+`import "github.com/gcslib/gcc"`, as GCSL does: pekit finds it in each
+directory of `$GCSL_LIBRARY_PATH`, then in `.gcsl/libraries/` at the
+workspace's root. A library's steps are keyed by its path and contents,
+never by where it was found, so the same library in another place gives
+the same results from the store.
+
 ## Fetching files
 
 `fetch(url, sha256)` is the only part of a build that uses the network.

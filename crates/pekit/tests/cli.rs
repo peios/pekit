@@ -132,3 +132,50 @@ fn a_build_s_trace_is_written_where_asked() {
     // Not a terminal: no progress line.
     assert!(!printed(&built).1.contains('\r'));
 }
+
+#[test]
+fn a_library_s_steps_key_the_same_wherever_the_library_is_found() {
+    let library = "#[hermetic] def shout(src: File) -> File {\n\
+                   \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
+                   \x20   file(\"out.txt\")\n\
+                   }\n";
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "import \"github.com/x/loud\"\n\
+                 def build hello() { out = loud.shout(file(\"name.txt\")) }\n",
+            ),
+            ("app/name.txt", "lib\n"),
+            (".gcsl/libraries/github.com/x/loud/loud.gcsl", library),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let first = pekit(dir.path(), cache.path(), &["build", "hello"]);
+    let (out, err) = printed(&first);
+    assert!(first.status.success(), "{err}");
+    assert!(out.starts_with("built app/hello: 1 step run"), "{out}");
+    // The same library from elsewhere: the same receipts.
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(
+        elsewhere.path(),
+        &[("github.com/x/loud/loud.gcsl", library)],
+    );
+    fs::remove_dir_all(dir.path().join(".gcsl")).unwrap();
+    let again = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["build", "hello"])
+        .current_dir(dir.path())
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("GCSL_LIBRARY_PATH", elsewhere.path())
+        .output()
+        .unwrap();
+    let (out, err) = printed(&again);
+    assert!(again.status.success(), "{err}");
+    assert!(
+        out.starts_with("built app/hello: 0 steps run, 1 found"),
+        "{out}"
+    );
+}
