@@ -1290,7 +1290,8 @@ steps, each usable alone.
   tools; see the decisions below.)
 - **`panic`**: if true, an exit status other than 0 is a failure of the
   call, "`cc` exited with status 1", with its standard error; if false it
-  is data, as it is today.
+  is data. True by default for every `exec` (Jack, 2026-10-24; built in
+  14c).
 - **`until`**: if set, the program is killed once a line of either stream
   contains the text; the output read so far is the result, and its status
   is 0, as the condition was met.
@@ -1385,7 +1386,36 @@ GCSL `857d72f`. As planned, with the amended `env`, and these details:
   needs anyway. Separately, every checked call formats its callee's type
   for an error label it rarely uses, a cost that predates 14.
 
-### Decisions to confirm with Jack
+### As built (14c)
+
+GCSL `9ed5107`. As planned, with these details:
+
+- **`file(path)` is impure.** A relative path is resolved against the
+  working directory, the same one `exec` gives a program by default, then
+  normalised lexically. Under plain GCSL that is the process's directory;
+  a host sets it for each step (Jack, 2026-10-24). Nothing is read until
+  `f.read()`.
+- **`f.path`** is the one field of a file; it is lowered to a node of its
+  own, `FilePath`, since a file is no record.
+- **Every `exec` fails by default** (Jack, 2026-10-24): `panic = false`
+  gives the status back as data. `sh` keeps its own messages.
+- **`files.file(name)`** matches whole path segments: `name`, or a path
+  ending in `/name`. None or several is a panic at the call.
+- **`File` is a reserved type name** now. Nothing in `pkgs` declares one.
+- **The gate** runs `cargo test --workspace` too (Jack, 2026-10-24).
+
+### Decisions
+
+Agreed with Jack on 2026-10-24: rest parameters stay; every `exec`,
+`File.exec` and `Sandbox.exec` included, fails by default; `until`'s
+status is 0; `env` is set over the host's environment; `#[track_caller]`
+is a public feature; `contains` and `unique()` wait for feature 16; and
+`file()` and `exec` share one working directory. A plain host's sandbox:
+one implementation, GCSL's, that pekit reuses if that is possible (for
+example namespaces with an overlay), and a copy with no isolation
+otherwise.
+
+### Decisions to confirm with Jack (historical)
 
 - GCSL gains rest parameters (14a), for the drafts' `exec("-o", out)`.
 - `File.exec` and `Sandbox.exec` panic on a non-zero status by default,
