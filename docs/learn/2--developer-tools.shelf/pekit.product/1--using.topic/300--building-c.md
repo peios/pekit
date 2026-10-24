@@ -50,6 +50,43 @@ def build app() {
 Editing `lib/internal.h` then reruns the library's compile, its archive,
 and the link, but never the program's compile.
 
+## Building upstream code
+
+Code from elsewhere, built with its own build system, is one step:
+`buildenv.configure_make` runs `./configure`, `make`, and `make install`
+on a source directory and gives the directory it installed into.
+
+```text
+import unpack from archive
+import "github.com/gcslib/buildenv"
+
+def build zlib() {
+    let src = unpack(fetch("https://zlib.net/fossils/zlib-1.3.1.tar.gz", sha256 = "9a93..."))
+    let out = buildenv.configure_make(src.dir("zlib-1.3.1"), configure = ["--static"])
+    headers = [out.file("include/zlib.h"), out.file("include/zconf.h")]
+    archive = out.file("lib/libz.a")
+}
+```
+
+The build runs with the registered C toolchain, given to it as `CC`,
+`AR`, `RANLIB`, and `LD`, in the registered build environment. The
+buildenv library's `busybox_x86_64` gives `/bin/sh` and the usual tools
+from a static busybox, and GNU make built from source, all pinned. The
+source is copied to a writable directory first, and every path is the
+same on every run, so anything the build records, such as its install
+prefix, doesn't change from one run to the next. Pekit can't see inside
+the step, so any change to the source rebuilds all of it.
+
+To use the host's own tools instead, register `host_tools` from the
+buildenv library and `system_c` from the `toolchain` module:
+
+```text
+import * from "github.com/gcslib/buildenv"
+import * from toolchain
+
+pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::BuildEnv host_tools]}
+```
+
 ## Tools built during the build
 
 A program the build makes and then runs, such as a code generator, is a

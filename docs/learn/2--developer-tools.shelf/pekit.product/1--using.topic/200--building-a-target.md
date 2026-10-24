@@ -71,13 +71,20 @@ A library asks GCSL's `toolchain` module for a compiler, as
 `toolchain.get(Toolchain::C)`, rather than naming one. With nothing
 registered, the answer is the host's own `cc`, found on `PATH`, which
 builds for the host alone. To build with pinned toolchains, register them
-in `pekitconf` in `workspace.gcsl`. The gcc library provides Bootlin's:
+in `pekitconf` in `workspace.gcsl`. The gcc library provides Bootlin's
+compilers, and the buildenv library a build environment for upstream
+build systems:
 
 ```text
 import * from "github.com/gcslib/gcc"
+import * from "github.com/gcslib/buildenv"
 import Toolchain from toolchain
 
-pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::C gcc_x86_64_to_aarch64]}
+pekitconf = {toolchains = [
+    Toolchain::C gcc_x86_64,
+    Toolchain::C gcc_x86_64_to_aarch64,
+    Toolchain::BuildEnv busybox_x86_64,
+]}
 ```
 
 Pekit sets the `toolchains` context from `pekitconf.toolchains` for every
@@ -148,10 +155,12 @@ one kind of machine are never reused on another.
 
 ## The host's tools
 
-Until the build libraries provide a pinned build environment, steps run
-with the host's own tools: its `/usr`, `/bin`, `/lib`, `/lib64`, and
-`/sbin`, read-only. `/usr/local` is hidden from steps. A step whose
-program doesn't set `PATH` runs with `/usr/bin:/bin:/usr/sbin:/sbin`.
+Every step can see the host's own tools: its `/usr`, `/bin`, `/lib`,
+`/lib64`, and `/sbin`, read-only. A step that runs its programs in a
+sandbox of their own, as the build libraries do with pinned toolchains
+and environments, uses none of them. `/usr/local` is hidden from steps. A
+step whose program doesn't set `PATH` runs with
+`/usr/bin:/bin:/usr/sbin:/sbin`.
 
 Such a build isn't hermetic, and pekit notes this when it runs a step.
 So that an upgraded compiler doesn't leave stale results in the store,

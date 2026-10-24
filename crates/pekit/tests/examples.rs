@@ -147,6 +147,29 @@ fn example_3_runs_a_tool_the_build_made() {
     );
 }
 
+/// What example 4's program prints.
+const ZLIB: &str = "zlib 1.3.1: 56 bytes -> 19 bytes -> \"pekit2 pekit2 pekit2 pekit2 pekit2 \
+                    pekit2 pekit2 pekit2\"\n";
+
+#[test]
+fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
+    let Some(state) = seeded(&["zlib-1.3.1.tar.gz"]) else {
+        eprintln!("skipped: zlib's source is not on this machine");
+        return;
+    };
+    let dir = example(4, HOST);
+    let built = build_in(dir.path(), state.path(), "app").unwrap();
+    // zlib's build, the program's compile, and the link.
+    assert_eq!((built.ran, built.cached), (3, 0));
+    assert_eq!(run(dir.path(), file_of(&built.value, None)), ZLIB);
+    // The program changed: zlib's build is found in the store.
+    let main = dir.path().join("example/main.c");
+    let text = fs::read_to_string(&main).unwrap();
+    fs::write(&main, text.replacen("pekit2", "pekit3", 1)).unwrap();
+    let again = build_in(dir.path(), state.path(), "app").unwrap();
+    assert_eq!((again.ran, again.cached), (2, 1));
+}
+
 #[test]
 fn example_6_builds_for_the_host_alone_with_the_host_s_toolchain() {
     let dir = example(6, "");
@@ -182,32 +205,67 @@ fn example_9_compiles_files_found_only_once_their_generator_has_run() {
 }
 
 /// The workspace configuration that registers the gcc library's Bootlin
-/// toolchains.
+/// toolchains and the buildenv library's pinned environment.
 const PINNED: &str = "import * from \"github.com/gcslib/gcc\"\n\
+                      import * from \"github.com/gcslib/buildenv\"\n\
                       import Toolchain from toolchain\n\
                       pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::C \
-                      gcc_x86_64_to_aarch64]}\n";
+                      gcc_x86_64_to_aarch64, Toolchain::BuildEnv busybox_x86_64]}\n";
 
-/// Bootlin's archives of the toolchains the gcc library pins, each with its
-/// pin: from `$PEKIT_TEST_TOOLCHAINS`, else the Peios workspace's
-/// `local/pekit2-data`; `None` if either is missing.
-fn bootlin_archives() -> Option<[(PathBuf, &'static str); 2]> {
-    let dir = std::env::var_os("PEKIT_TEST_TOOLCHAINS")
-        .map_or_else(|| repository().join("../local/pekit2-data"), PathBuf::from);
-    let archives = [
-        (
-            dir.join("x86-64--glibc--stable-2026.08-1.tar.xz"),
-            "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3",
-        ),
-        (
-            dir.join("aarch64--glibc--stable-2026.08-1.tar.xz"),
-            "0213efac9b5577f20d58de9431960a191347ffc2257b27ffe7250522bf1f7867",
-        ),
-    ];
-    archives
-        .iter()
-        .all(|(path, _)| path.exists())
-        .then_some(archives)
+/// The workspace configuration that registers the host's own C toolchain
+/// and tools.
+const HOST: &str = "import * from \"github.com/gcslib/buildenv\"\n\
+                    import * from toolchain\n\
+                    pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::BuildEnv \
+                    host_tools]}\n";
+
+/// Each file the libraries and examples fetch, by its name in the
+/// directory of [`downloads`], with its pin.
+const DOWNLOADS: [(&str, &str); 5] = [
+    (
+        "x86-64--glibc--stable-2026.08-1.tar.xz",
+        "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3",
+    ),
+    (
+        "aarch64--glibc--stable-2026.08-1.tar.xz",
+        "0213efac9b5577f20d58de9431960a191347ffc2257b27ffe7250522bf1f7867",
+    ),
+    (
+        "busybox-1.35.0-x86_64-linux-musl",
+        "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348",
+    ),
+    (
+        "make-4.4.1.tar.gz",
+        "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3",
+    ),
+    (
+        "zlib-1.3.1.tar.gz",
+        "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+    ),
+];
+
+/// The directory the files the libraries and examples fetch are in, so
+/// that a test downloads nothing: `$PEKIT_TEST_DOWNLOADS`, else the Peios
+/// workspace's `local/pekit2-data`.
+fn downloads() -> PathBuf {
+    std::env::var_os("PEKIT_TEST_DOWNLOADS")
+        .map_or_else(|| repository().join("../local/pekit2-data"), PathBuf::from)
+}
+
+/// A new state directory whose store holds the files of [`DOWNLOADS`]
+/// named `names`, as a fetch would leave them; `None` if one is missing.
+fn seeded(names: &[&str]) -> Option<tempfile::TempDir> {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for name in names {
+        let (_, pin) = DOWNLOADS.iter().find(|(file, _)| file == name)?;
+        let path = downloads().join(name);
+        if !path.exists() {
+            return None;
+        }
+        assert_eq!(store.put_file(&path).unwrap().digest.hex(), *pin, "{name}");
+    }
+    Some(state)
 }
 
 /// The machine an ELF file at `path` is for, by its header's `e_machine`.
@@ -231,17 +289,14 @@ const AARCH64: u16 = 0xb7;
 
 #[test]
 fn the_examples_build_with_bootlin_s_pinned_toolchains() {
-    let Some(archives) = bootlin_archives() else {
-        eprintln!("skipped: Bootlin's toolchain archives are not on this machine");
+    // One store, given what the builds fetch as a fetch would, so that each
+    // toolchain is unpacked once for every example, and nothing is
+    // downloaded.
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) = seeded(&names) else {
+        eprintln!("skipped: what the builds fetch is not on this machine");
         return;
     };
-    // One store, given the archives as a fetch would, so that each is
-    // unpacked once for every example, and nothing is downloaded.
-    let state = tempfile::tempdir().unwrap();
-    let store = Store::open(&state.path().join("store")).unwrap();
-    for (path, pin) in &archives {
-        assert_eq!(store.put_file(path).unwrap().digest.hex(), *pin);
-    }
     let bootlin = "toolchains.bootlin.com";
     for (n, target, prints) in [
         (1, "hello", "Hello from pekit2\n"),
@@ -251,6 +306,7 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
             "app",
             "Hello from a file that was turned into code during the build.\n",
         ),
+        (4, "app", ZLIB),
         (
             9,
             "app",

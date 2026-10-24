@@ -1,0 +1,145 @@
+# The buildenv library: what an upstream build system expects to find at
+# the usual places, `/bin/sh`, `make`, `sed` and the rest, and its rule for
+# running one.
+#
+# - `Toolchain::BuildEnv`: a build environment, an `Env`: `root`, a
+#   directory whose tools run as its programs' `/`, `/` for the host's own.
+#   A workspace registers one in `pekitconf` beside its C toolchains.
+# - `busybox_x86_64`: a pinned environment for x86-64 Linux: a static
+#   busybox, fetched by its SHA-256, for `/bin/sh` and the usual tools, and
+#   GNU make, built from its pinned source with the gcc library's Bootlin
+#   toolchain, statically, so that the root needs nothing else.
+# - `host_tools`: the host's own tools, for a workspace that registers no
+#   pinned environment.
+# - `configure_make(src, configure, make)`: the directory an upstream
+#   `./configure && make && make install` installs into, run as one
+#   hermetic step on the source `src`, `configure` given to `./configure`
+#   after `--prefix` and `make` to `make`. It is given the C toolchain and
+#   the environment as arguments, resolved as any rule's are, and the
+#   toolchain's tools as `CC`, `AR`, `RANLIB` and `LD`. In a pinned
+#   environment it runs in a sandbox of the environment, the toolchain's
+#   runtime, its install at `/opt/cc` and the source at `/work/src-in`,
+#   copied to `/work/src` and made writable, as a build system expects of
+#   its source, installing into `/work/out`, the same paths on every run,
+#   so that what an install records of them is the same too; in the host's,
+#   in the step itself.
+import fs
+import unpack from archive
+import toolchain
+import Toolchain from toolchain
+import * from "github.com/gcslib/gcc"
+
+type Env = {root: Dir}
+
+enum Toolchain::BuildEnv<Env>
+
+let BUSYBOX = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+
+let MAKE = "https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"
+
+def Toolchain::BuildEnv busybox_x86_64() {
+    let busybox = fetch(BUSYBOX, sha256 = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348")
+    let make = unpack(fetch(MAKE, sha256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"))
+    let registered = (Toolchain::C gcc_x86_64)()
+    let made: Toolchain = registered.provides
+    host_platform = {arch = "x86_64"; os = "linux"}
+    platform = {}
+    provides = {root = assemble(busybox, make.dir("make-4.4.1"), Toolchain::C.payload(made))}
+}
+
+def Toolchain::BuildEnv host_tools() {
+    host_platform = ^host_platform
+    platform = {}
+    provides = {root = dir("/")}
+}
+
+# Where a pinned environment's sandbox places what it builds with.
+let OPT = "/opt/cc"
+
+let SRC = "/work/src"
+
+let SRC_IN = "/work/src-in"
+
+let OUT = "/work/out"
+
+#[hermetic]
+def configure_make(
+    src: Dir,
+    configure: List<String> = [],
+    make: List<String> = [],
+    cchain: toolchain.CToolchain = toolchain.get(Toolchain::C),
+    env: Env = toolchain.get(Toolchain::BuildEnv),
+) -> Dir {
+    let words = configure.join(" ")
+    let jobs = make.join(" ")
+    if env.root.path == "/" {
+        let out = dir("out")
+        let script = "cp -R {src.path} src && chmod -R u+w src && cd src \
+                      && ./configure --prefix={out.path} {words} && make {jobs} && make install"
+        let ran = exec(["/bin/sh", "-c", script], env = tools(cchain, cchain.root.path))
+        return out
+    }
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = env.root},
+        {at = "/"; place = cchain.runtime},
+        {at = OPT; place = cchain.root},
+        {at = SRC_IN; place = src},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/work", env = tools(cchain, OPT))
+    let script = "mkdir -p /tmp && cp -R {SRC_IN} {SRC} && chmod -R u+w {SRC} && cd {SRC} \
+                  && ./configure --prefix={OUT} {words} && make {jobs} && make install"
+    let ran = box.exec("/bin/sh", "-c", script)
+    = box.dir(OUT)
+}
+
+# The environment a build system's commands get: the toolchain `cchain`'s
+# tools, its install found at `at`, and the usual `PATH`.
+fn tools(cchain: toolchain.CToolchain, at: String) -> {*: String} {
+    let prefix = "{cchain.root.path}/"
+    let placed = fn(tool: File) -> String { "{at}/{tool.path.strip_prefix(prefix)}" }
+    CC = placed(cchain.cc)
+    AR = placed(cchain.ar)
+    RANLIB = ranlib(placed(cchain.ar))
+    LD = placed(cchain.ld)
+    PATH = "/bin:/usr/bin:/sbin:/usr/sbin"
+    TMPDIR = "/tmp"
+    HOME = "/tmp"
+}
+
+# The `ranlib` beside the `ar` at `ar`, as binutils installs them.
+fn ranlib(ar: String): String {
+    = if ar.ends_with("ar") { "{ar.strip_suffix("ar")}ranlib" } else { "ranlib" }
+}
+
+# A build environment's root: `busybox` at `/bin/busybox`, a link to it for
+# each of its tools in `/bin`, `/usr/bin/env`, and GNU make, built from
+# `make_src` with `cchain`, statically, at `/usr/bin/make`.
+#[hermetic]
+fn assemble(busybox: File, make_src: Dir, cchain: toolchain.CToolchain) -> Dir {
+    # A fetched file is data: the copy is the program.
+    let program = file("busybox")
+    fs.copy(busybox.path, program.path)
+    fs.set_executable(program.path, true)
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = cchain.runtime},
+        {at = OPT; place = cchain.root},
+        {at = "/env/bin/busybox"; place = program},
+        {at = SRC; place = make_src},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/env/bin", env = tools(cchain, OPT))
+    let linked = box.exec(
+        "/env/bin/busybox",
+        "sh",
+        "-c",
+        "for tool in $(./busybox --list); do ./busybox ln -s busybox $tool; done \
+         && PATH=/env/bin && mkdir -p /env/usr/bin /bin /tmp \
+         && ln -s ../../bin/busybox /env/usr/bin/env && ln -s /env/bin/busybox /bin/sh",
+    )
+    let built = box.exec(
+        "/env/bin/sh",
+        "-c",
+        "PATH=/env/bin && cd {SRC} && ./configure --disable-dependency-tracking --without-guile \
+         --disable-nls LDFLAGS=-static && ./build.sh && cp make /env/usr/bin/make",
+    )
+    = box.dir("/env")
+}

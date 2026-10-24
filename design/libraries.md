@@ -276,3 +276,33 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
   repeated for each target platform; a target's steps called from another
   target take that target's names, `link.2`; and every workspace input is
   hashed on every build, where Bazel keeps a digest cache.
+- As built in D7, `gcslib/buildenv`:
+  - A build environment is a toolchain kind, `Toolchain::BuildEnv`, of a
+    `root: Dir`, registered beside the C toolchains, so that one is
+    resolved for the platform as a compiler is. `busybox_x86_64` is busybox
+    1.35.0's static build, fetched by its SHA-256 (busybox.net signs no
+    binaries; pinned on first use), and GNU make 4.4.1, whose signature was
+    checked, built statically from source in one step with the gcc
+    library's Bootlin toolchain, named directly rather than resolved, since
+    a definition resolving through the registry it is in could reach
+    itself. `host_tools` is the host's own, `/`.
+  - `configure_make` is in `buildenv`, not `gcc` as L9 lists it, so that
+    the two libraries don't import each other. It copies its source to a
+    writable directory first and makes it writable, as Nix's
+    `unpackPhase` and Bazel's `rules_foreign_cc` do: a build writes beside
+    its source, and the source's files are the store's, read-only. It
+    runs `make` without `-j`, until pekit shares cores between steps.
+  - GCSL gains `fs.set_executable`, since a fetched program is data. It
+    refuses a file of several hard links, which share one mode, so that
+    nothing can change a store's blob through a staged input.
+- Found in D7 and fixed (pekit): a sealed composition's directories were
+  read-only, and a sandbox's merged directories show their lower's mode,
+  so a build in a sandbox of one could write nothing; directories now keep
+  their modes, the files alone read-only, as is all that guards the store.
+  And a staged tree's identical files, and a composition's, were one inode
+  through the store's blob, which `cp` refuses to copy between; each is
+  now a file of its own, the first a link and the rest copies.
+- Follow-ups from D7: steps always see the host's tools, so a build with
+  pinned toolchains and environment is still noted as not hermetic; a
+  workspace should be able to say that steps borrow nothing. And `make -j`
+  inside a step waits for a jobserver shared between steps.
