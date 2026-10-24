@@ -1425,6 +1425,26 @@ GCSL `9ed5107`. As planned, with these details:
 - **`File` is a reserved type name** now. Nothing in `pkgs` declares one.
 - **The gate** runs `cargo test --workspace` too (Jack, 2026-10-24).
 
+### As built (14d)
+
+GCSL `2333f8f`. Jack decided on 2026-10-24 that a tree of files is a
+`Dir`: an unpacked archive, a toolchain's root, a step's output directory
+and what `fs.compose_dir` makes. A `FileSet` is a list of loose files,
+since a list has no root. Drafts 1 and 4, whose toolchains are typed
+`FileSet`, read as `Dir`.
+
+- **`dir(path)`** resolves as `file()` does. `d.file(path)` and
+  `d.dir(path)` are pure, relative to `d`, and refuse a path that would
+  leave it. `d.files()` lists the tree, sorted, without following links.
+  `d.exec(...words)` runs in it.
+- **`fs.compose_dir({key = Dir | File | List<File>})`** places a tree
+  under its key, a file at its key, and a list's files under their key by
+  name, the drafts' `flatten()`. Directories merge, and two entries
+  placing one path is an error. Under plain GCSL everything is copied,
+  so that a program writing in the result changes nothing it was made
+  of; pekit mounts instead.
+- **`Value::dirs()`** finds a value's trees, apart from its files.
+
 ### Decisions
 
 Agreed with Jack on 2026-10-24: rest parameters stay; every `exec`,
