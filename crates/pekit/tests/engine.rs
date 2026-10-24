@@ -340,3 +340,82 @@ fn a_target_is_evaluated_on_its_execution_platform() {
     assert_eq!((other.ran, other.cached), (1, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "riscv64 for riscv64\n");
 }
+
+#[test]
+fn a_step_s_result_names_only_its_own_files_or_those_it_was_given() {
+    let text = "#[hermetic] fn stray() -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo x > /tmp/x\"])\n\
+                \x20   file(\"/tmp/x\")\n\
+                }\n\
+                def build hello() { out = stray() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let error = build_in(dir.path(), state.path(), "hello").unwrap_err();
+    assert!(
+        error.contains("names `/tmp/x`, which is neither in its output directory"),
+        "{error}"
+    );
+    // A file it was given, passed on, is its to name.
+    let text = "#[hermetic] fn pass(src: File) -> File { src }\n\
+                def build hello() { out = pass(file(\"name.txt\")) }\n";
+    let dir = workspace(text, &[("name.txt", "n\n")]);
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!(built.ran, 1);
+}
+
+#[test]
+fn steps_run_commands_in_sandboxes_of_their_own_directories() {
+    let busybox = Path::new("/usr/bin/busybox");
+    if !busybox.exists() {
+        eprintln!("skipped: no static busybox on this host");
+        return;
+    }
+    let text = "#[hermetic] fn inside(root: Dir, word: String) -> File {\n\
+                \x20   let s = root.sandbox()\n\
+                \x20   let r = s.exec(\"/bin/sh\", \"-c\", \"echo {word} > /made.txt\")\n\
+                \x20   s.file(\"/made.txt\")\n\
+                }\n\
+                #[hermetic] fn join(a: File, b: File) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {a.path} {b.path} > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() {\n\
+                \x20   out = join(inside(dir(\"root\"), \"one\"), inside(dir(\"root\"), \"two\"))\n\
+                }\n";
+    let dir = workspace(text, &[]);
+    let bin = dir.path().join("app/root/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(busybox, bin.join("busybox")).unwrap();
+    std::os::unix::fs::symlink("busybox", bin.join("sh")).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!(built.ran, 3);
+    let out = dir.path().join("pekit-out/app/hello/join/out.txt");
+    assert_eq!(fs::read_to_string(out).unwrap(), "one\ntwo\n");
+}
+
+#[test]
+fn a_step_that_needs_a_failed_step_s_result_fails_with_its_error_unrun() {
+    let text = format!(
+        "{SHOUT}{JOIN}#[hermetic] fn broken() -> File {{\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"exit 4\"])\n\
+         \x20   file(\"out.txt\")\n\
+         }}\n\
+         def build hello() {{ out = join(broken(), shout(file(\"name.txt\"))) }}\n"
+    );
+    let dir = workspace(&text, &[("name.txt", "n\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let (built, events) = observed_in(dir.path(), state.path(), "hello");
+    let error = built.unwrap_err();
+    assert!(
+        error.starts_with("error: `/bin/sh` exited with status 4"),
+        "{error}"
+    );
+    // `join` never started.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Started { step, .. } if step == "join")),
+        "{events:?}"
+    );
+}

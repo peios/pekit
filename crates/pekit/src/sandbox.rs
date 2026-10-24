@@ -22,7 +22,16 @@
 //!   directory; `/tmp` is its own; and a program runs with every namespace
 //!   unshared, the network's among them, and only the environment its
 //!   `exec` sets, killed if pekit dies. A path outside what it is given is
-//!   no path of its: "it is outside the step".
+//!   no path of its: "it is outside the step". The temporary directories
+//!   GCSL makes for it, a `Dir.sandbox`'s copy among them, are in its own
+//!   output directory, `.pekit-tmp-<n>`, so that the files it gives from one
+//!   have paths no other step's have.
+//!
+//! A `Dir.sandbox`'s commands are run by each with the sandbox's copy as
+//! their `/`, in a bubblewrap of their own beside the step's, never inside
+//! it: a host such as Ubuntu forbids one inside another. A step's are cut
+//! off as the step is; others' have their own users and processes, as plain
+//! GCSL gives them.
 //!
 //! Each counts its temporary directories itself, so both are `Sync`: a
 //! step's effects run on a pool's threads.
@@ -89,6 +98,42 @@ fn parts(command: &Command) -> Parts {
         })
         .collect();
     (words, cwd, env)
+}
+
+/// How much a sandbox's command is cut off from the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Isolation {
+    /// Its own users and processes, as plain GCSL runs it: what is not
+    /// hermetic.
+    Plain,
+    /// Every namespace its own, the network's among them: a hermetic step's.
+    Hermetic,
+}
+
+/// The command that runs `command`, a program of a sandbox whose copy is at
+/// `root` on the host, with the copy as its `/`, cut off as `isolation`
+/// says: one bubblewrap, never one inside another, which a host such as
+/// Ubuntu forbids.
+fn sandboxed(root: &Path, command: &Command, isolation: Isolation) -> Result<Command, String> {
+    let (words, cwd, env) = parts(command);
+    let mut wrapped = Command::new(bwrap()?);
+    match isolation {
+        Isolation::Plain => wrapped.args(["--unshare-user", "--unshare-pid"]),
+        Isolation::Hermetic => wrapped.args(["--unshare-all", "--new-session"]),
+    };
+    wrapped.arg("--die-with-parent");
+    wrapped.arg("--bind").arg(root).arg("/");
+    wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
+    wrapped.args(["--chdir", cwd.as_deref().unwrap_or("/")]);
+    wrapped.arg("--clearenv");
+    for (name, value) in env {
+        if let Some(value) = value {
+            wrapped.args(["--setenv", &name, &value]);
+        }
+    }
+    wrapped.arg("--").args(&words);
+    wrapped.env_clear();
+    Ok(wrapped)
 }
 
 /// The effect context of what is not hermetic (see [The logical
@@ -160,6 +205,13 @@ impl Effects for HostView {
             };
         }
         Ok(wrapped)
+    }
+
+    fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
+        Some(
+            self.host_path(root)
+                .and_then(|root| sandboxed(&root, &command, Isolation::Plain)),
+        )
     }
 
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
@@ -323,6 +375,13 @@ impl Effects for StepSandbox {
         Ok(wrapped)
     }
 
+    fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
+        Some(
+            self.host_path(root)
+                .and_then(|root| sandboxed(&root, &command, Isolation::Hermetic)),
+        )
+    }
+
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
         if let Some(rest) = under(path, WORKSPACE) {
             return Ok(self.stage.join("w").join(rest));
@@ -342,7 +401,7 @@ impl Effects for StepSandbox {
 
     fn temp_dir(&self) -> Option<Result<String, String>> {
         let number = self.temps.fetch_add(1, Ordering::Relaxed);
-        let path = format!("/tmp/pekit-{number}");
+        let path = format!("{}/.pekit-tmp-{number}", self.own);
         let made = self
             .host_path(&path)
             .and_then(|at| fs::create_dir_all(at).map_err(|error| error.to_string()))

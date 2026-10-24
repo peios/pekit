@@ -36,7 +36,7 @@ use std::time::Instant;
 
 use gcsl::check::{Attribute, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
-use gcsl::eval::graph::{EffectJob, Graph, GraphHost, NodeId, NodeKind, STEP_UNITS};
+use gcsl::eval::graph::{EffectJob, Graph, GraphHost, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
 use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
@@ -284,6 +284,30 @@ struct Run<'a> {
     flaky: Vec<String>,
 }
 
+/// A file or directory `plain`, the result of `step`, names that is
+/// neither in its own output directory nor one it was given, nor in one it
+/// was given: one whose path another step's file might have.
+fn foreign_file<'a>(plain: &'a Plain, step: &StepRun) -> Option<&'a str> {
+    let own = step.sandbox.own();
+    let within = |path: &str, dir: &str| {
+        path == dir
+            || path
+                .strip_prefix(dir)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    plain
+        .files()
+        .into_iter()
+        .map(|(path, _)| path)
+        .find(|path| {
+            !within(path, own)
+                && !step.given.iter().any(|(given, kept)| match kept {
+                    Kept::File(_) => path == given,
+                    Kept::Dir(_) => within(path, given),
+                })
+        })
+}
+
 impl Drop for Run<'_> {
     /// Removes the staging directory of every step still running, as when
     /// the build fails.
@@ -379,7 +403,7 @@ impl Run<'_> {
     fn is_waiting(&self, id: NodeId) -> bool {
         self.graph
             .node(id)
-            .is_some_and(|node| *node.state() == gcsl::eval::graph::NodeState::Waiting)
+            .is_some_and(|node| *node.state() == NodeState::Waiting)
     }
 
     /// Starts every step `demands` need that is ready and not started, and
@@ -394,6 +418,27 @@ impl Run<'_> {
             let Some(node) = self.graph.node(id) else {
                 continue;
             };
+            // What needs a failed result fails with its failure, unrun.
+            let failed =
+                node.data()
+                    .iter()
+                    .find_map(|&edge| match self.graph.node(edge)?.state() {
+                        NodeState::Failed(failure) => Some(failure.clone()),
+                        _ => None,
+                    });
+            if let Some(failure) = failed {
+                let is_step = node.kind() == NodeKind::Deferred;
+                self.graph.resolve(id, Err(failure));
+                if is_step {
+                    let step = self.step_name(id);
+                    self.emit(EventKind::Failed {
+                        step,
+                        retrying: false,
+                    });
+                }
+                started = true;
+                continue;
+            }
             match node.kind() {
                 NodeKind::Deferred => self.start_step(id)?,
                 NodeKind::Effect(_) if node.unit() < STEP_UNITS => {
@@ -708,6 +753,22 @@ impl Run<'_> {
             .workspace
             .to_plain(value)
             .map_err(BuildError::Engine)?;
+        if let Some(path) = foreign_file(&plain, step) {
+            let message = format!(
+                "the step's result names `{path}`, which is neither in its output directory \
+                 `{}` nor given to it: a step's files must be one or the other, so that no \
+                 other step's have its paths",
+                step.sandbox.own()
+            );
+            self.graph
+                .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
+            let step = self.step_name(id);
+            self.emit(EventKind::Failed {
+                step,
+                retrying: false,
+            });
+            return Ok(());
+        }
         let host = |path: &str| step.sandbox.host_path(path).unwrap_or_default();
         // Its files are kept whatever it holds: later steps are given them.
         let kept = match keep_files(&plain, &self.store, &host) {
