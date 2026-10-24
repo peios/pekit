@@ -26,84 +26,71 @@ the language server and Learn follow every syntax change.
    alone is `NAME = NAME`. Positional arguments after named ones stay legal
    (an existing, tested feature); only a variable passed positionally by its
    name alone after a named argument changes meaning.
+4. **Defaults that are expressions** (commit after `d0d3c72`; see below).
 
-## 4. Defaults that are expressions
+## 4. Defaults that are expressions: as built
 
-### Rule
+The rule is as designed. A default may be any expression and is evaluated
+on the caller's side of the call. That happens each time a call leaves the
+parameter out, after the written arguments and before the body. So under
+pekit, `cchain = toolchain.get(Toolchain::C)` is resolved outside a hermetic
+step. A default sees the function's lexical scope and the parameters
+before it, and has the function's effect. Only known callees give defaults.
+Constants keep their old path, and record-field defaults stay constants.
 
-A parameter's default may be any expression, not only a constant. It is
-evaluated **on the caller's side of the call**, each time a call leaves the
-parameter out, before the callee's body starts, so that under pekit a
-default such as `cchain = toolchain.get(Toolchain::C)` is resolved outside
-a hermetic step and arrives as an ordinary argument.
+How it is built, and where it departs from the plan:
 
-- **Scope.** A default sees the function's lexical scope, where the function
-  is written, not the caller's, and the parameters before it.
-  `fn f(a: Int, b: Int = a * 2)` is allowed; a default cannot see its own or
-  later parameters.
-- **Dynamic context** (feature 10) is read at the call, so `^arch` in a
-  default is the caller's.
-- **Effect.** A default may do what its function may do: a pure function's
-  defaults are checked as pure code, and an impure or memoised function's as
-  impure. No new effect inference is needed: a pure caller can call an impure
-  function only where it could anyway.
-- **Order.** The explicit arguments are evaluated first, in source order, as
-  now; then each parameter left out is given its default, in parameter
-  order, each seeing the values of all parameters before it, explicit or
-  defaulted.
-- **Known callees only.** As now, only a call that knows its callee gives
-  defaults. A function's type says nothing of defaults.
-- **Constants stay constants.** A default that is a constant by today's rule
-  keeps today's path, a `Constant` copied in at the call. Record-field
-  defaults stay constants: they are part of a type.
+- **Parser.** `Param::default_fn` holds the *default function*. It is a
+  `FnDecl` with no node of its own: its parameters copy the earlier ones,
+  its return type is the parameter's, its effect is the function's (memo
+  becomes impure), and its body is the default. Its **marker is the
+  function's own**, not the default's span, so every effect error's "this
+  function is pure" label points at the function's `:`. That replaces the
+  planned extra note, which would have had to be added at six error sites.
+  `Param` grows from 24 to 32 bytes, and the size guard is updated.
+- **Checker.** `check_default_fns` checks each default function before
+  the function's own frame is pushed, so its captures come from the defining
+  scope. `ParamDefault::{Constant, Function { capture }}` replaces
+  `Constant` in `FnResolution::defaults`, `KnownParams` and `call_defaults`.
+  The capture index is `captures.len() + k`.
+- **Inference (not in the plan; found while testing).** A pure function's
+  bare parameter is present only if something measures it. Without a fix, a
+  future could reach a default that measures the parameter, leaving a
+  mistyped slot. Now a default function's copied bare parameters are
+  inferred as any pure function's are, and what the default measures, the
+  function measures. So `fn f(a: Int, b: Int = a * 2): {v: Int} { v = b }`
+  takes a present `a`, and the call-site error for a future points at the
+  measuring use in the default.
+- **Settling (found while testing).** `settle_function` finds nested
+  functions by their `Fn` or `Lazy` nodes, so it now also settles each
+  function's default functions' captures.
+- **Top-level copies.** A top-level function's default functions' copies
+  join its own (`DefaultsChecked::copies`), which decide where its closure
+  is made.
+- **Mentions (found while testing).** `Walker::function` walks each default,
+  with the parameters before it in scope. Before this, a top-level field read
+  only in a default was not ordered before its users.
+- **Error wording.** A later or own parameter keeps the general message
+  "undefined variable `b`" (tools match on that prefix). The error adds the
+  label "`b` is a parameter from here on" and the note "a parameter's default
+  sees only the parameters before it", in place of the planned new message.
+- **IR.** The planned new node `IrKind::DefaultArg` became `ArgValue` in
+  `IrKind::Arg { param, value: ArgValue }`, which is `Node(IrId)` or
+  `Default { capture, kind }`. A default can then appear only as an
+  argument, and no evaluator walker needs a new arm. A function's
+  `MakeClosure` gains a `MakeClosure` of each default function after its
+  captures.
+- **Lowering.** Shadowed declarations stub their default functions too.
+- **Evaluator.** `Evaluator::default_arg` calls the closure's capture with
+  the new frame's earlier slots, passing the call's caller and its own
+  depth budget.
+- **Index.** References, rename and hover treat a parameter read in a
+  default as the parameter itself, with no change needed. Completion in a
+  default offers only the parameters before it.
+- **Documentation.** The checker's "Defaults" and "Calls", the parser, the
+  AST, lowering, the IR and the evaluator's "Calls"; Learn's functions page;
+  gcsl(5).
 
-### Implementation
-
-- **Parser.** For each parameter default of a function expression that is
-  not syntactically constant, the parser also makes a *default function*: a
-  `FnDecl` whose parameters are copies of the earlier parameters (names and
-  type expressions), whose return type is the parameter's type expression,
-  whose effect is the function's (`Memo` becomes `Impure`), and whose body is
-  the default expression, as a `lazy`'s body is any expression. `Param`
-  gains `default_fn: Option<FnId>`. There is no expression node of its own:
-  the default expression is the body.
-- **Checker.** `check_fn` checks each default function before pushing the
-  function's own `Function`, as `check_lazy` checks a `lazy`: so the
-  default's captures are computed in the defining scope. Its resolution goes
-  in `fn_resolutions` like any function's. `FnResolution::defaults` becomes
-  per parameter: `Constant(Constant)` or `Function { capture: u32 }`, the
-  index among the closure's captures where the default function's closure
-  is. The function's `captures` list gains, after its own, one entry for
-  each default function, read in the defining frame: the default function's
-  closure. `KnownParams` carries the same, so defaults reach other files and
-  later session inputs.
-- **Lowering.** A function's `MakeClosure` items gain, after its captures, a
-  `MakeClosure` of each default function. A call that leaves a parameter
-  with a default function out lowers an `Arg` whose value is a new node,
-  `IrKind::DefaultArg { param, capture }`, after the explicit arguments, in
-  parameter order.
-- **Evaluator.** In `call`, after the explicit arguments are in the new
-  frame's slots, each `DefaultArg` reads the callee closure's capture
-  `capture`, calls it with the values of the new frame's slots `0..param`,
-  and stores the result in slot `param`. The call's caller and context are
-  the call site's.
-- **Index, mentions, formatter.** The default expression is visited as part
-  of its parameter, as now; the default function adds no syntax.
-
-### Errors
-
-- The "a parameter's default must be a constant" error goes; a default that
-  does not fit its parameter's type is the usual mismatch, at the default.
-- A pure function's default that calls an impure function is the usual
-  error for impure code in a pure function, at the call, with a note that
-  a default runs with its function's effect.
-- A default reading a later parameter, or its own, is "`b` is not in scope
-  here: a default sees only the parameters before it".
-
-### Documentation
-
-`check.rs` "Calls" and "Defaults", `lower.rs` and `ir.rs` on calls, and
-`eval.rs` "Calls"; Learn's functions page; gcsl(5).
 
 ## Later features
 
