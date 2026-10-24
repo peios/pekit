@@ -35,7 +35,7 @@ the language server and Learn follow every syntax change.
 8. **Generics** (`ecbec8a`, `79f5461`, `7180d8a`; see below). Generic
    functions with inferred type parameters, and generic `type`
    declarations.
-9. **Extensible enums, `Partial<T>` and generic def-types** (`c8012a7`,
+9. **Extensible enums, `Partial<T>` and generic def-types** (`c8012a7`, `d17f8ec`,
    `0b68623`; see below).
 10. **Context** (`c2545ce`, `e827138`, `9cabcf6`; see below). 10b is still
     to do.
