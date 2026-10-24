@@ -48,6 +48,7 @@ the language server and Learn follow every syntax change.
     `File` (`9ed5107`), `Dir` (`2333f8f`) and `Sandbox` (`b59cfa8`; see
     below).
 15. **Importing every definition of a def-type** (`b08afbd`; see below).
+16. **The prelude's methods** (`8c68895`; see below).
 
 ## 4. Defaults that are expressions: as built
 
@@ -1542,10 +1543,48 @@ GCSL `b08afbd`, as agreed for example 10 (see `core-model.md`).
   definitions from. Making evaluation units per definition, so that a
   change under `pkgs/` does not re-evaluate an image, is layer B's work.
 
+## 16. The prelude's methods (done)
+
+GCSL `8c68895`.
+
+- **What moved:** the prelude's string and list functions are also methods
+  of the value each takes first: `split`, `starts_with`, `ends_with`,
+  `trim`, `strip_prefix`, `strip_suffix`, `lines`, `fields` and
+  `compare_version` of `String`; `join` and `sort_versions` of
+  `List<String>`; `len` of every list. Each is a `#[track_caller]` `def`
+  method calling its built-in, so a failure is reported at the user's
+  call. The global functions stay: removing them would break every draft
+  and file for no gain, and both forms read well.
+- **New, as methods only:** `s.contains(part)`, byte-wise, for example
+  10's `stdout.contains`; `xs.unique()`, order-preserving; and
+  `xs.contains(x)`.
+- **Equality for a generic method:** `unique` and `contains` compare by
+  total equality, `===`'s, the value's own: every field of a record, and
+  secrets by identity, which tells nothing of a value, so the answers stay
+  plain. Typed equality, `==`'s, needs a static type that a generic
+  built-in lacks. Instead of a constraint on `T`, which GCSL does not
+  have, what has no equality is refused at run time as it is met: an
+  element or `x` holding a function or a future, as the checker refuses to
+  compare one. `unique` groups elements by the memoisation hash first, so
+  it is linear, not quadratic.
+- **Shadowing:** a method of the standard library is set aside whenever
+  any other method applies to the receiver, so a file's own `trim`, or a
+  `def` method it sees, takes the prelude's place, as its own names do.
+  Before, the two were "declared twice".
+
+### Decisions taken without Jack (to surface)
+
+- The global functions stay beside the methods.
+- `unique` and `contains` use `===`, not `==`, and refuse functions and
+  futures at run time.
+- `"6.10".compare_version("6.6")` is the method of `compare_versions`, in
+  the singular, as it compares one version with another.
+- A standard method is shadowed silently, with no warning.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
 generics; 9 extensible enums and `Partial<T>`; 10 context (`context`, `^`,
 `with`); 11 `recover` and `assert`; 12 `Secret<T>`; 13 persistent lists;
 14 `File`, `Dir`, `Sandbox` and `exec` options; 15 wildcard def-type
-imports; 16 the prelude moved to methods.
+imports; 16 the prelude moved to methods. All are done apart from 10b.
