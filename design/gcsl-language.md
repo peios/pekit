@@ -793,6 +793,149 @@ Differences from Rule 9c above, and decisions taken while building it:
 - `Partial<T>` fields are not readable by name, only matched.
 - A generic def-type's type parameters come only from a variant header.
 
+## 10. Context: `context`, `^` and `with`
+
+The agreed design is in `core-model.md` (open question 4, "Agreed
+design: context"). This section makes it precise. It is built in three
+steps, each usable alone: 10a the language and its runtime, 10b the
+checker's inferred requirements, 10c the host's root values.
+
+### Rule (10a: the language)
+
+- **Declarations.** `context NAME: TYPE = DEFAULT` and `context NAME:
+  TYPE` are top-level items. `context` is contextual, as `enum` is: a
+  name, then `:`, must follow it. The type is required: a context is an
+  interface between libraries.
+- **One namespace for the whole workspace.** "A name is declared once":
+  a context is visible in every file of the workspace and the standard
+  library without an import, and a second declaration of a name anywhere
+  is "context `arch` is declared twice", labelled at both. A local or
+  field named `arch` never satisfies `^arch`. In a session, a later
+  input's declaration shadows an earlier one, as variants do, so a
+  mistyped declaration can be fixed. A declaration has a key of its own,
+  `<context NAME@ORIGIN>`, as an enum has, so the memo tables tell a
+  redeclared context from the old one.
+- **Reading.** `^NAME` is an expression of the declared type. An
+  undeclared name is "no context `arch` is declared".
+- **Defaults are pure and evaluated where they are read.** The default
+  is an expression of the declaring file, checked against the type as
+  the body of a hidden pure function of no parameters, `<context NAME>`,
+  a top-level binding of that file, as a method's is. A read that no
+  `with` binds calls it, in the reader's context. So `context platform:
+  Platform = ^host_platform` follows a `with` that sets `host_platform`,
+  as `core-model.md` requires ("it defaults to `host_platform`"). A
+  default must be pure: "the default of a context must be pure", so a
+  read of `^NAME` is always pure. A list of def-type references, such as
+  `[Toolchain::C system_c]`, is pure. A file that reads `^NAME` needs the
+  declaring file, as an import would.
+- **`with`.** `EXPR with { NAME = VALUE; ... }` evaluates the values in
+  the current context, then `EXPR` with those names bound, and everything
+  it calls or awaits sees them. `with` binds as a postfix operator on a
+  call or field chain: `a + f() with {...}` is `a + (f() with {...})`.
+  It must be on the line where `EXPR` ends, as a def-type reference's
+  path must; on the next line it starts a new item. The block form,
+  `with { ... } { BODY }`, binds for a whole block. Each name must be a
+  declared context, and each value must fit its type. The record
+  shorthand `with { arch }` takes a variable of the name.
+- **Dotted keys.** `with { platform.arch = "x86_64" }` binds `platform`
+  to the current value with that field replaced (example 6). The
+  context's type must be a record with the field, and the value must fit
+  the field's type. Two keys of one context in one `with` are merged in
+  order, as a record's dotted fields are.
+- **`with` is contextual**, as `enum` is: the name `with` followed by `{`
+  on its line. It stays an ordinary name everywhere else, so no existing
+  program changes meaning.
+- **Parameter sugar.** `fn f(^arch: String)` is `fn f(arch: String =
+  ^arch)`, and `(^arch)` with no type takes the context's type. Passing
+  the argument explicitly binds the parameter only, not the context.
+- **Dynamic scope, captured by futures.** A call inherits the caller's
+  context. A `lazy` captures the context it is made in, so its body sees
+  that context whoever awaits it, as it already captures the caller.
+  Top-level fields are computed when their file runs, so they see the
+  root context.
+- **Missing values.** Reading a context that has no default and that no
+  `with` sets is the runtime error "context `x` has no value here: no
+  `with` sets it, and it declares no default". It is a check-time error
+  where the checker can see it directly: a read at a file's top level
+  outside any `with`.
+
+### Rule (10a: memoisation stays correct)
+
+A memoised function's result can depend on context it reads. A context
+read is an *ambient input*, as `fileroot.caller` is today.
+
+- A read of `^x` records `x`'s value as a dependency of every running
+  memoised call that shares the reader's binding of `x`, that is, every
+  call started inside the same `with` that set it. A call started
+  outside that `with` does not depend on the read. A read that falls
+  through to the default is recorded as "the default of declaration K",
+  by the declaration's key. The default is pure, so its value depends
+  only on the context it reads, and those reads record their own
+  dependencies as the default runs.
+- An entry is reused only if the new call's context gives every recorded
+  name the same value.
+- Making a future inside a memoised call records every context name the
+  call shares, because the future can read any of them after the call
+  returns. That is conservative, so cache hits are fewer, never wrong.
+  10b can narrow it.
+
+### Rule (10b: inferred requirements)
+
+The agreed design says the checker infers each function's requirements
+and that a function value carries them. 10b adds, to each function type,
+the set of contexts with no default that it may read without a `with`
+around the read. It is inferred for function items and closures, joined
+across calls, including through function values whose types carry it.
+A top-level read, or a call, of a function whose set is not empty,
+outside a `with` that covers it, is then a check-time error. Specified
+in detail before it is built, since it touches function subtyping.
+
+### Rule (10c: the host's root values)
+
+The root of every evaluation has an implicit `with`, with the declared
+defaults. A host can set root values for an evaluation, for example
+pekit setting `host_platform` to the execution platform: a workspace
+API taking names and values, checked against the declared types. The
+values form a root `with` frame with a fresh identity for each
+evaluation, so memoised calls record them by value.
+
+### Implementation (planned, 10a)
+
+- **Lexer and parser.** `^` is a token. Add `ItemKind::Context { name,
+  ty, default }`, `ExprKind::ContextRead(name)`, `ExprKind::With {
+  bindings, body }` and the parameter sugar, which desugars in the
+  parser to an ordinary parameter with a default.
+- **Workspace.** Scan context declarations as enums are: a table of
+  name, type, has-default and declaring file, with types resolved in
+  their files before checking. A default is a hidden binding,
+  `<context NAME>`, read from another file as a foreign method's binding
+  is.
+- **Runtime.** The evaluator keeps a *current context*, a persistent
+  chain of `with` frames, each with an identity and its bindings. A call
+  changes nothing, so an ordinary call costs nothing extra. `with` pushes
+  a frame and pops it after; a future captures the chain and its body
+  runs with it. A read walks the chain to the nearest binding, and
+  otherwise reads the default's cell.
+- **Memoisation.** `Ambient` gains a context dependency (name, and a
+  value or the default). Running memoised calls record their context
+  chain at the start.
+
+### Decisions to confirm with Jack
+
+- One global namespace of context names for the whole workspace, with
+  no imports. This follows "a name is declared once".
+- The declared type is required.
+- Defaults must be pure, and are evaluated at each read that falls
+  through, in the reader's context.
+- `with` is contextual, not a keyword, and must be on the line where its
+  expression ends.
+- In 10a, a missing value with no default is a runtime error, and a
+  check-time error only where it is visible directly. 10b makes it a
+  check-time error everywhere.
+- `with` binds as a postfix operator on a call chain.
+- Top-level fields see the root context, because they are computed when
+  their file runs.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
