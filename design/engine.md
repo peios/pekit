@@ -37,17 +37,17 @@ effects included, to have the cells the body reads; and a step's closure
 cannot cross threads anyway.
 
 GCSL needs, for this (layer B follow-ups, step C1):
-- `Workspace::run_step(graph, node, defers)`: a deferred node's call run as
-  a unit of its own in graph mode, its effects nodes of that unit, nested
-  deferred calls inline;
+- `Workspace::run_step(graph, node, defers, effects)`: a deferred node's
+  call run as a unit of its own in graph mode, numbered from the node, so
+  that it is stable across attempts and apart from files' and prepared
+  calls' numbers; its effects are nodes of that unit, nested deferred calls
+  inline, and its own `#[retry]` and `#[timeout]` not applied (E5);
+- the host's `Effects` for every graph-mode unit (E5's layout), not `Direct`;
 - `EffectJob`: an effect node's built-in and plain arguments, `Send`, whose
-  `run(&dyn Effects)` gives a plain result or a failure on any thread,
-  without the workspace;
+  `run(&(dyn Effects + Sync), deadline)` gives a plain result or a failure
+  on any thread, without the workspace;
 - `Plain::Sandbox`, since a sandbox is a value a step's body passes between
-  its effects;
-- deadlines in graph mode: a step's `#[timeout]` is the engine's to keep,
-  across the step's attempts, since a restart would start GCSL's deadline
-  afresh.
+  its effects.
 
 ### E2. Steps and what is a step
 
@@ -61,14 +61,22 @@ program order, unsandboxed and uncached, as plain GCSL runs them.
 A hermetic step's *receipt* is a SHA-256 over:
 - its code: the sources of `StepInputs::code_files`, by path and content;
 - its arguments, captures and context as plain data, every file and
-  directory by its content's digest rather than its path, so that two
-  identical inputs at different paths key alike and early cutoff follows;
+  directory by its path *and* its content's digest. The path is part of
+  what the step sees (it reaches command lines and names outputs), so it
+  stays in the key, as Bazel keys an action. Early cutoff comes from keying
+  an input by its content, not by the receipt of the step that made it: a
+  rebuilt input with the same bytes at the same path keys the same;
 - the identities of the secrets it is given, never their values;
 - the platform it runs on (E7).
 
 `#[retry]` and `#[timeout]` are not on it. A step's *record*, kept forever,
 is its receipt, its result as plain data with every output file by digest,
 its duration, and the receipts it used. Only successful steps are recorded.
+A result that holds a secret is never recorded, since a secret is never
+stored in any cache (`core-model.md`): such a step runs every time. Its
+output files are not cached either; signing outputs, which are no secret,
+should be returned as files from a step whose result holds no secret.
+Nothing that reaches a record, an event or a log holds a secret's value.
 
 ### E4. The content store
 
@@ -80,12 +88,30 @@ downstream receipt is computable without the bytes.
 
 ### E5. The sandbox
 
+**The logical layout.** Every path a GCSL value holds, everywhere, is in
+one layout, the same on every machine and checkout: the workspace at `/w`,
+outputs at `/pekit-out`. The engine's `Effects` for every unit, the
+target's included, maps that layout to the host (`host_path`) and gives
+`/w/<the target's directory>` as the working directory that `file()`
+resolves against. So `file("hello.c")` in `pekit2/examples/1` is
+`/w/pekit2/examples/1/hello.c` in values, receipts and sandboxes alike. GCSL
+must therefore take the host's `Effects` for graph-mode units too (C1), not
+only for `evaluate`.
+
+**Step paths.** A step's outputs are under
+`/pekit-out/<target>/<step>/`, where `<step>` is the step's function's name
+and its number among the target's steps of that name, in discovery order:
+`compile`, `compile.2`. Output paths reach downstream keys, so the rule
+must give the same path across runs for the same program, which discovery
+order does; editing the program can renumber steps, which only reruns them.
+
 A hermetic step runs under bubblewrap, with:
 - no network, its own user, pid and mount namespaces;
-- workspace files at their workspace paths, read-only, materialised from
-  the store, and outputs of earlier steps at their `pekit-out/` paths;
+- the workspace files it is given at their `/w` paths, read-only, and
+  outputs of earlier steps at their `/pekit-out` paths, materialised from
+  the store;
 - a fresh writable working directory, which is the step's
-  `pekit-out/<target>/<step>/` path;
+  `/pekit-out/<target>/<step>/` path;
 - an empty environment but for what the step's `exec` sets, `PATH` empty.
 
 Its result's files are captured into the store and given back at their
@@ -93,12 +119,22 @@ Its result's files are captured into the store and given back at their
 directory, or that does not exist, is the step's failure. `Dir.sandbox` in
 a step is GCSL's own copy for now; overlay mounts come later.
 
+**Retry and timeout.** A step's `#[retry]` and `#[timeout]` are the
+engine's: a retry reruns the step unit in a fresh sandbox, an
+infrastructure failure (the sandbox, the store, a lost job) retries
+invisibly and never counts, a step that passes only on a retry is reported
+flaky, and a timeout spans the step's attempts, killing its running jobs.
+GCSL runs neither for a step's own call in graph mode; a `#[retry]` on an
+inline call inside a unit retries as plain GCSL would, its failed effects
+failing again.
+
 ### E6. The scheduler
 
 The build graph is the action graph seen through E2: a hermetic step keeps
 its data edges and drops its order edges; anything else keeps both. The
 scheduler repeatedly:
-- advances every unit that can progress (the target's, each step's);
+- advances a unit only once a node it paused on, or a hole it waits on, is
+  resolved: every advance is a rerun from the unit's start;
 - takes the needed nodes that are ready;
 - for a hermetic step: looks up its receipt, and resolves it from the
   record on a hit; else starts its step unit;
@@ -139,7 +175,8 @@ Each leaves pekit2 working, and tested, as far as it goes.
    graph-mode deadlines (E1).
 2. **C2, the crate and loading:** the `pekit2` crate, the workspace loaded
    through `gcsl-disk`, targets found by def-type and path, errors as in
-   example 1's notes.
+   example 1's notes. Until layer D settles where `hermetic`, `build` and
+   `test` are declared (E9), C2's tests declare them in a fixture module.
 3. **C3, the content store and records** (E3, E4), with digests of files
    and trees, and receipts.
 4. **C4, the sandbox** (E5): staging, running, capturing.
@@ -153,7 +190,10 @@ Each leaves pekit2 working, and tested, as far as it goes.
 
 - E1: one GCSL thread and parallel effects, with step bodies as graph-mode
   units, rather than workspaces per thread.
-- E3: files keyed by content digest, not path; the code key is the needed
-  files' sources, coarse but correct.
+- E3: files keyed by path and content digest; the code key is the needed
+  files' sources, coarse but correct; a result holding a secret is never
+  recorded.
+- E5: the logical layout `/w` and `/pekit-out`, and steps named by function
+  and number in discovery order.
 - E5: a step's working directory is its `pekit-out/` path, `PATH` empty.
 - E9: pekit's def-types and attributes from a GCSL standard module.
