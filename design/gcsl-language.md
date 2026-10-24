@@ -623,6 +623,113 @@ checker. So generics come first, and methods are built on them.
   that could see both.
 - The conservative order rule above.
 
+## 9. Extensible enums, `Partial<T>` and generic def-types
+
+Needed by toolchains (example 6, "Consolidated"): `enum Toolchain
+extensible<{ *: File | Dir }>`, `enum Toolchain::C<{...}>`, the generic
+def-type `Toolchain<T>`, `def Toolchain::C gcc_x86_64()`, and
+`toolchain.get(Toolchain::C)`. Built in three steps, each usable alone:
+9a enums, 9b `Partial<T>`, 9c generic def-types.
+
+### The gap in the draft
+
+The draft types `get`'s key as `kind: fn(T): Toolchain`. A function type
+cannot do what `get` needs: GCSL closures can be neither compared nor
+inspected, so `get` could never tell whether a registered toolchain is of
+the variant `kind`, nor take out its payload. Jack's own sketch had
+`class: Empty<Toolchain<T>>`, a key of its own kind. So a variant is a
+value of its own type, `Variant<E, T>`, which can still be called as a
+`fn(T): E`.
+
+### Rule (9a: enums)
+
+- **Declarations.** `enum NAME extensible<BOUND>` declares a nominal type
+  `NAME` in the file's namespace of types, as `type` does, whose values
+  are variants that any module may add. `enum NAME extensible` has no
+  bound. `enum NAME::VARIANT<PAYLOAD>` adds a variant to the enum `NAME`
+  (a name of the file's view of types, or qualified, `t.NAME::V`), whose
+  payload is of type `PAYLOAD`; `enum NAME::VARIANT` has the payload `{}`.
+  The payload must fit the bound: "the payload of `Toolchain::C` must
+  fit `{*: File | Dir}`". Both are top-level items only.
+- **Nominal.** Two enums are different types whatever their bounds, and a
+  value of an enum is of no other type. An enum is not generic.
+- **Visibility of variants.** A variant is visible where a `def` method
+  is: its own file, its directory chain, and every file importing its
+  module. Two visible variants of one enum with one name are an error at
+  any use of the name ("variant `Toolchain::C` is declared in two
+  files").
+- **Variants as values.** `NAME::VARIANT` in an expression is the variant,
+  of type `Variant<NAME, PAYLOAD>`. A `Variant<E, T>` is a subtype of
+  `fn(T): E`, so `Toolchain::C(layout)` makes a value of `Toolchain`, and
+  a variant can be passed where a function is expected.
+- **Inspecting.** `kind.matches(value)` is whether `value`, an `E`, is of
+  the variant `kind`; `kind.payload(value)` is its payload, a `T`, and a
+  runtime error ("`value` is `Toolchain::Rust`, not `Toolchain::C`") if
+  it is another variant's. They are methods of the prelude on
+  `Variant<E, T>`, built in. `value is Toolchain` tests that a value is of
+  the enum.
+- **Equality and display.** Two values of an enum are equal if they are
+  of one variant and their payloads are equal. One shows as
+  `Toolchain::C({...})`.
+
+### Rule (9b: `Partial<T>`)
+
+- `Partial<T>`, for a record type `T` with no rest-field, is the type of
+  records holding any of `T`'s fields, each of its type. `T` and any
+  record type with some of `T`'s fields, of fitting types, fit
+  `Partial<T>`, so `{ arch = "x86_64" }` is a `Partial<Platform>`.
+- A field of a `Partial<T>` cannot be read by name: it may be absent
+  ("field `arch` of `Partial<Platform>` may be absent").
+  `partial.matches(full)`, a built-in method of the prelude, is whether
+  every field `partial` holds equals `full`'s of its name. That is how a
+  toolchain's platforms are matched.
+- `Partial<T>` takes defaults from no field.
+
+### Rule (9c: generic def-types)
+
+- A def-type may be generic, `#[def_type] def Toolchain<T>(name: String,
+  kind: Variant<Toolchain, T>, f: fn(): ToolchainDef<T>): Registered`. Its
+  type parameters are bound by a definition's header: `def Toolchain::C
+  gcc()` passes the variant `Toolchain::C` as the def-type's parameter
+  of type `Variant<E, T>`, binding `T` to its payload, and the body is
+  checked against `f`'s type with `T` bound. A reference,
+  `Toolchain::C gcc`, names the definition the same way.
+- A generic def-type has exactly one `Variant` parameter, the one a header
+  fills. A generic def-type used without `::VARIANT` is "def-type
+  `Toolchain` needs a variant: `def Toolchain::V name()`".
+
+### Implementation (planned)
+
+- **Lexer and parser.** `::` is a token. `enum` and `extensible` are
+  contextual: `enum NAME ...` at an item's start, as `type` is read.
+  `ItemKind::Enum` and `ItemKind::Variant`; `ExprKind::Variant`, the enum
+  a type expression so that the workspace's expansion resolves it;
+  `Variant<E, T>` and `Partial<T>` are built-in applied types.
+- **Types.** `TyKind::Enum { decl }`, nominal by its declaration's number
+  in the type store, shown by its name. `TyKind::Variant { decl, payload
+  }`, whose function type, `fn(payload: T): E`, is what a call of it is
+  checked against. `TyKind::Partial(record)`.
+- **No file order.** A variant is static data: `Toolchain::C` lowers to a
+  constant tag, and its payload type is resolved with the `type` items,
+  before any file is checked. So, unlike a method, using a variant makes
+  a file need nothing, and the conservative order rule of methods does
+  not apply. Enum and variant declarations live in the type store beside
+  `type` declarations; each file has a view of variants, as of methods.
+- **Runtime.** `Value::Tag` (a variant as a value, callable) and
+  `Value::Variant` (a tag and its payload), compared by the variant's
+  number and shown `Toolchain::C(...)`. The built-ins `variant_matches`,
+  `variant_payload` and `partial_matches` have generic signatures, which
+  the prelude's methods `matches` and `payload` call.
+
+### Decisions to confirm with Jack
+
+- A variant is a value of `Variant<E, T>`, a callable subtype of
+  `fn(T): E`, not a plain function, so that `get` can match and unwrap.
+- Only extensible enums for now; closed enums are not needed yet.
+- Variants are visible as `def` methods are.
+- `Partial<T>` fields are not readable by name, only matched.
+- A generic def-type's type parameters come only from a variant header.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
