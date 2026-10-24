@@ -965,6 +965,67 @@ GCSL `c2545ce` and `e827138`. Differences from the plan above:
 - Top-level fields see the root context, because they are computed when
   their file runs.
 
+## 11. Failure: `assert` and `recover`
+
+Agreed in core-model.md (open question 2, "Failure"): a step fails by a
+panic of its own code, a failed `assert` among them. A test's `recover`
+sits outside the step and catches the final failure, after any retries.
+Example 7 writes `assert res.stdout == expected.read()`, and asks for "some
+kind of recover() in the test def_type that just marks the test failed".
+
+### Rule (11a: `assert`)
+
+- `assert COND` and `assert COND, MESSAGE` are statements: the condition
+  is a `Bool`, the message a `String`. When the condition is false, the
+  runtime error is "assertion failed: `res.stdout == expected.read()`",
+  the condition as written, or the message when one is given.
+- For a comparison, `==`, `!=`, `<`, `<=`, `>` or `>=`, the error notes
+  both sides' values, "left: `"hello"`", "right: `"hullo"`", as `show`
+  writes them, each operand evaluated once. That is what makes a failed
+  test readable.
+- `assert` is contextual, as `enum` is: the name `assert` at a
+  statement's start, followed on its line by an expression. `assert = 1`
+  is still a field.
+- `assert` is pure. Its type is `{}`.
+
+### Rule (11b: `recover`)
+
+- `recover { BODY } else { FALLBACK }` and `recover { BODY } else (e) {
+  FALLBACK }` are expressions. If the body fails, the fallback is
+  evaluated instead, with `e`, if named, bound to the failure, `{message:
+  String}`. The type is the join of the two blocks' types, as an `if`'s.
+- **What it catches** is what `#[retry]` retries: any runtime error but a
+  bug in GCSL and the passing of an enclosing call's deadline. A deadline
+  set by a call inside the body is that call's failure, so it is caught.
+  `break`, `continue` and `return` pass through, as they are no failures.
+- Effects of the body are not undone: what it ran stays run, as it does
+  for a retried call.
+- `recover` is pure if its blocks are. A memoised call that failed inside
+  the body has left no entry, so the next call runs again, as it does
+  today.
+- `recover` and `else` are contextual: `recover` at an expression's start
+  followed by `{`.
+
+### Implementation (planned)
+
+- **Parser.** `ItemKind::Assert { cond, message }`, and `ExprKind::Recover
+  { body, fallback }`. A named failure becomes the fallback block's first
+  item, `let e = <the failure>`, an `ExprKind::Recovered` written nowhere,
+  so it is bound as any `let` is.
+- **Checker.** The failure is `{message: String}`. A comparison's operands
+  are recorded for lowering.
+- **IR and runtime.** `IrKind::Assert { cond, message, operands }` and
+  `IrKind::Recover { body, fallback, kind }`, which catches as
+  `guarded_body` decides retryable errors, and keeps the failure for the
+  fallback's `Recovered` on a stack in the run's shared state.
+
+### Decisions to confirm with Jack
+
+- `recover ... else (e) { ... }` as an expression, rather than a
+  `recover(f)` built-in returning a union.
+- What `recover` catches is exactly what `#[retry]` retries.
+- `assert COND, MESSAGE`, with both sides of a failed comparison shown.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
