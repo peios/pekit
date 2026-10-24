@@ -901,8 +901,70 @@ the set of contexts with no default that it may read without a `with`
 around the read. It is inferred for function items and closures, joined
 across calls, including through function values whose types carry it.
 A top-level read, or a call, of a function whose set is not empty,
-outside a `with` that covers it, is then a check-time error. Specified
-in detail before it is built, since it touches function subtyping.
+outside a `with` that covers it, is then a check-time error.
+
+Specified in detail on 2026-10-24, before it was built:
+
+- **The set.** A function type carries its *needs*: a set of contexts,
+  by their declarations' keys, so that a REPL redeclaration is another
+  context, as it is for 10a's frames. Only contexts with no default are
+  ever in it. An empty set is what every function type had before.
+- **Coverage is dynamic.** A call runs in its caller's context, so a
+  function's body is covered only by the `with`s inside it. A `with`
+  around a closure's definition covers nothing in the closure, which can
+  be called anywhere. A `lazy` captures the context it is made in, so it
+  is transparent: what its body needs is needed where it is made, and the
+  `with`s around it there cover it. A `with`'s values, and a dotted key's
+  read of the value it updates, are outside its own bindings.
+- **What a read needs.** `^x` covered by a `with` needs nothing. Otherwise
+  a context with no default needs itself, and one with a default needs
+  what its default needs: `context platform = ^host_platform` makes an
+  uncovered `^platform` need whatever `^host_platform` needs. A default is
+  a hidden function, so its needs are inferred as any function's are.
+- **What a call needs.** A call needs its callee's set, less what covers
+  it, whatever the callee is: a named function, a method, a parameter, a
+  field or any other function value. A parameter's default is evaluated on
+  the caller's side, so its needs are the call's, when the call leaves
+  the parameter out, and nothing otherwise. So `fn f(^arch: String)` needs
+  nothing itself: `f()` needs `arch`, and `f(arch = "x")` does not.
+- **Where needs go.** Each read or call charges what it needs, less what
+  covers it, to the innermost function around it that is not a `lazy`.
+  With none, it is at the top level, where the root context covers only
+  what the host provides (none yet: 10c). There an uncovered need is
+  "context `arch` has no value here", noted with what needs it: the read,
+  or "`f` needs context `arch`", labelled at the read when that is in the
+  file. Awaiting a future needs nothing, as its needs were charged where
+  it was made.
+- **Inferred and declared types.** A function item's, a method's and a
+  closure's set is inferred: its type is its signature's plus its needs.
+  Every written function type needs nothing until a written form exists,
+  and a definition's type is its def-type's `F` exactly, so a definition
+  whose body needs a context is an error at the definition.
+- **Subtyping and joins.** A function type fits another only if its set
+  is a subset of the other's, as a pure function fits where an impure one
+  is expected. A join, of an `if`'s branches or a list's elements, takes
+  the union. Generic instantiation carries the set through.
+- **Written form (to settle with Jack).** Display, and a later written
+  form: the needs after the parameters, `fn(x: Int, ^arch): String`. In a
+  declaration, `^arch: String` is a parameter defaulting from the
+  context; in a type, a bare `^arch` says the function reads it from the
+  context. Until the form is parsed, a closure that needs a context cannot
+  be passed where a written function type is expected; a `with` inside the
+  closure is the remedy.
+- **Mutual recursion.** A group's members see each other's declared types,
+  so their sets come from a fixpoint after the group is checked: each
+  member's set is what it needs itself, joined with what it needs through
+  each call it makes directly, in its own body or a `lazy` of it, of
+  another member, less what covers that call. The fixpoint's result is
+  each member's type. A use of a member that the fixpoint does not cover,
+  a call from a closure or a default inside the group, or the member as a
+  value, has a type fixed before the result is known. It is checked
+  afterwards: one that should have needed a context is an error, "cannot
+  tell that `f` needs context `arch` here: it is called inside its own
+  recursive group", never a silently dropped need.
+- **Not changed.** The runtime and IR are untouched, and 10a's runtime
+  error stays as the last defence. The memo narrowing 10a deferred is a
+  follow-up.
 
 ### Rule (10c: the host's root values)
 
@@ -933,6 +995,27 @@ evaluation, so memoised calls record them by value.
 - **Memoisation.** `Ambient` gains a context dependency (name, and a
   value or the default). Running memoised calls record their context
   chain at the start.
+
+### Implementation (planned, 10b)
+
+- **Types.** `FnTy` gains `needs: Box<[Name]>`, sorted context keys,
+  interned with the rest. `fits` compares sets as it compares effects;
+  joins take the union; generic substitution and display carry them.
+- **Checker.** Each `Function` frame records the depth of `with_bound` at
+  its entry and collects its needs, each with the span of its first
+  origin. A read and a call compute what they need from `with_bound`
+  past the depth of the innermost non-`lazy` frame, and charge it there,
+  or report it at the top level, where a root set from the workspace
+  (empty until 10c) covers too. A closure's needs join its type when its
+  body is checked. Per-parameter needs of defaults are kept with what a
+  known call needs of its callee's parameters, for the parameters a call
+  leaves out, and for other files' functions and methods with their
+  checked types. Context defaults' needs are their functions' types'.
+- **Groups.** In-group uses are recorded with their coverage. After a
+  group is checked, a fixpoint gives each member its set, its type is
+  rebuilt with it, and the uses the fixpoint did not cover are checked.
+- **Definitions.** A definition's body is checked against `F`'s set, so
+  needing more is an error at the definition.
 
 ### As built (10a)
 
