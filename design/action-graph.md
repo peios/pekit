@@ -299,3 +299,50 @@ Each step leaves plain GCSL unchanged and fully tested.
   performs an effect itself.
 - A node's context keys on the whole bound context (D3).
 - Code identity by needed source files at first (D6).
+
+## As built (2026-10-24)
+
+GCSL `b6c4d3d` (B1), `f880d38` (B2), `83c29af` (B3 and B4), `03bbef1`
+(B5), `53c3183` (B6) and `63ec533` (B7); fixes found along the way in
+`b9e197a` (a malformed attribute commented out its line) and `35a2866`
+(a method on a receiver whose elements may be futures).
+
+- **D1.** As specified. A deferring function's result keeps the either
+  shape because `check_fn` skips the narrowing it gives other impure
+  functions; a present result type, or a pure function, is an error.
+- **D2.** The stop is an error marked `Mark::PENDING`, not a new
+  `Unwind` variant: every catcher already ignores marked errors (`recover`,
+  `#[retry]`, secret masking), and every cleanup path is an error's. The
+  node waited on is the run's, not the diagnostic's.
+- **D3.** Effects are found by *position*, not by key and occurrence: a
+  scope's path and the number of nodes met in it, where a memoised call's
+  body and a `lazy`'s are scopes keyed by their code, captures and
+  arguments. Every node met is recorded at its position with its key, and
+  another key there is "evaluation did not converge". This replaced the
+  attempt-count guard, which a key that changed every attempt would not
+  have tripped.
+- **D4.** `file()` and `dir()` are not effect nodes: they only read the
+  working directory, fixed for an evaluation. Every other impure built-in
+  is one.
+- **Discovery.** An impure function's bare parameters take futures, so in
+  `link([compile("a"), compile("b")])` one attempt finds all three steps:
+  the link's data edges are the compiles, and nothing stops.
+- **D5.** `Workspace::evaluate` runs a node with plain GCSL's evaluator
+  through the host's `Effects`, in the node's recorded context and caller;
+  a deferred node's callee is called with its arguments in its parameter
+  slots, `#[retry]` and `#[timeout]` applying.
+- **D6.** Code identity is material, not a hash: the file numbers whose
+  sources make a step's code (`StepInputs::code_files`), for the host to
+  hash, since a stable cryptographic hash is the host's business.
+  `StepInputs` also gives the callee's captures, which its code reads.
+- **D7.** A prepared call's checker counts the contexts its root frame
+  binds as met at its top level. Definitions keep the rule that they need
+  no context; contexts a host provides should have defaults, so that plain
+  GCSL runs the same libraries.
+- **Units.** Files, and prepared calls (`prepare_call`, `run_prepared`),
+  which are lowered once and numbered after every file, so that every
+  attempt runs the same code.
+
+Still to do, not ruled out: units of single cells, demand-driven; a
+node's context narrowed to what it reads; a finer code identity; and
+asynchronous `Effects`.
