@@ -65,6 +65,18 @@ is never recorded, so it runs every time.
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
+## Fetching files
+
+`fetch(url, sha256)` is the only part of a build that uses the network.
+Pekit keeps every file it has by its SHA-256 digest, so a pinned file it
+already has is never downloaded again, on any machine that shares the
+store. Otherwise pekit downloads it and keeps it only if its digest
+matches. Leave the digest out, and the build fails with the one it
+found, ready to paste in.
+
+A step can't fetch, since it has no network. Fetch in the code that calls
+the step, and pass it the file.
+
 ## Where results go
 
 Pekit copies the files the target gives to `pekit-out/` at the root of

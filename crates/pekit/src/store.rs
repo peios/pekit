@@ -240,7 +240,16 @@ impl Store {
     /// That it cannot be read, or the store written.
     pub fn put_file(&self, path: &Path) -> io::Result<FileEntry> {
         let executable = fs::metadata(path)?.permissions().mode() & 0o111 != 0;
-        let mut source = File::open(path)?;
+        self.put_reader(&mut File::open(path)?, executable)
+    }
+
+    /// Puts what `source` reads into the store as a blob, executable if
+    /// `executable` says, hashing it as it goes: what it keeps of it.
+    ///
+    /// # Errors
+    ///
+    /// That `source` cannot be read or the store written.
+    pub fn put_reader(&self, source: &mut dyn Read, executable: bool) -> io::Result<FileEntry> {
         let temp = self.temp_path();
         let mut hasher = Sha256::new();
         let mut size = 0u64;
@@ -265,6 +274,18 @@ impl Store {
             digest,
             size,
             executable,
+        })
+    }
+
+    /// What the store keeps of the blob `digest`, not executable, if it holds
+    /// it: what a file of those contents is, without reading it again.
+    #[must_use]
+    pub fn entry(&self, digest: &Digest) -> Option<FileEntry> {
+        let meta = fs::metadata(self.blob_path(digest, false)).ok()?;
+        Some(FileEntry {
+            digest: *digest,
+            size: meta.len(),
+            executable: false,
         })
     }
 

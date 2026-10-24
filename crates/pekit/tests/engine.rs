@@ -1,6 +1,8 @@
 //! Tests of building targets: steps run in their sandboxes, recorded, and
 //! found in the store again.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -498,4 +500,42 @@ fn a_sandbox_of_what_the_step_changes_is_a_copy() {
     };
     let out = dir.path().join(path.trim_start_matches('/'));
     assert_eq!(fs::read_to_string(out).unwrap(), "copied\n");
+}
+
+#[test]
+fn a_fetched_file_is_given_to_steps_and_fetched_once() {
+    let (url, served) = support::serve(b"fetched\n", "name.txt");
+    let pin = pekit::store::Digest::of(b"fetched\n").hex();
+    let text = format!(
+        "{SHOUT}def build hello() {{ out = shout(fetch(\"{url}\", sha256 = \"{pin}\")) }}\n"
+    );
+    let dir = workspace(&text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!(built.ran, 1);
+    let out = dir.path().join("pekit-out/app/hello/shout/out.txt");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "FETCHED\n");
+    // Again: the fetch from the store, the step from its record.
+    let again = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((again.ran, again.cached), (0, 1));
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_hermetic_step_cannot_fetch() {
+    let (url, served) = support::serve(b"x", "x");
+    let text = format!(
+        "#[hermetic] fn get() -> File {{ fetch(\"{url}\", sha256 = \"{}\") }}\n\
+         def build hello() {{ out = get() }}\n",
+        "0".repeat(64)
+    );
+    let dir = workspace(&text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let error = build_in(dir.path(), state.path(), "hello").unwrap_err();
+    assert!(
+        error.starts_with("error: `fetch` runs outside hermetic steps"),
+        "{error}"
+    );
+    assert!(error.contains("app/build.gcsl:1:"), "{error}");
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

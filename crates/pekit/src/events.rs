@@ -16,6 +16,8 @@
 
 use std::time::Duration;
 
+use gcsl::check::Builtin;
+use gcsl::eval::fetched_name;
 use gcsl::eval::graph::EffectJob;
 use gcsl::eval::plain::Plain;
 
@@ -88,10 +90,16 @@ pub enum EventKind {
 
 /// What the effect `job` runs, as an event names it: its built-in, and the
 /// program it runs if it runs one, `exec cc`, a program named by a secret
-/// `<secret>` (see [Events](#events)).
+/// `<secret>`, or the file a fetch fetches, `fetch zlib-1.3.1.tar.gz` (see
+/// [Events](#events)).
 #[must_use]
 pub fn effect_label(job: &EffectJob) -> String {
     let builtin = job.builtin().name();
+    if job.builtin() == Builtin::Fetch
+        && let Some(Plain::Str(url)) = job.args().first()
+    {
+        return format!("{builtin} {}", fetched_name(url));
+    }
     let program = job.args().first().and_then(|argv| match argv {
         Plain::List(words) => words.first(),
         _ => None,

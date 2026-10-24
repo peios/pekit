@@ -9,10 +9,12 @@
 pub mod cli;
 pub mod engine;
 pub mod events;
+pub mod fetch;
 pub mod host;
 pub mod layers;
 pub mod load;
 pub mod platform;
+pub mod pool;
 pub mod receipt;
 pub mod record;
 pub mod sandbox;

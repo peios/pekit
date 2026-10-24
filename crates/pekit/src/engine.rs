@@ -30,18 +30,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::thread;
 use std::time::Instant;
 
-use gcsl::check::{Attribute, Constant, retry_of, timeout_of};
+use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
-use gcsl::eval::graph::{EffectJob, Graph, GraphHost, NodeId, NodeKind, NodeState, STEP_UNITS};
+use gcsl::eval::graph::{Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
 use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
+use crate::fetch::IN_A_STEP;
+use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
@@ -471,14 +471,45 @@ impl Run<'_> {
             step: step.map(|step| self.step_name(step)),
             effect: effect_label(&job),
         };
+        // A fetch is pekit's to answer, and never a step's.
+        let work = if job.builtin() == Builtin::Fetch {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            if step.is_some() {
+                self.finish_now(id, Err(Diagnostic::error(IN_A_STEP, span)));
+                return Ok(());
+            }
+            let text = |at: usize| match job.args().get(at) {
+                Some(Plain::Str(text)) => text.clone(),
+                _ => String::new(),
+            };
+            Work::Fetch {
+                url: text(0),
+                sha256: text(1),
+                store: self.store.clone(),
+                span,
+            }
+        } else {
+            Work::Effect(job, effects)
+        };
         self.emit(EventKind::EffectQueued {
             node: id.number(),
             step: running.step.clone(),
             effect: running.effect.clone(),
         });
-        self.pool.send(id, job, effects, deadline);
+        self.pool.send(id, work, deadline);
         self.in_flight.insert(id, running);
         Ok(())
+    }
+
+    /// Gives the node `id` `outcome` at once, the step that waits on it able
+    /// to run again.
+    fn finish_now(&mut self, id: NodeId, outcome: Result<Value, Diagnostic>) {
+        self.graph.resolve(id, outcome);
+        for step in self.steps.values_mut() {
+            if step.waiting == Some(id) {
+                step.waiting = None;
+            }
+        }
     }
 
     /// Tells the event `kind`, now.
@@ -883,15 +914,13 @@ impl Run<'_> {
                 },
             });
         }
+        for (path, kept) in ran.kept {
+            self.outputs.insert(path, kept);
+        }
         let value = ran
             .outcome
             .map(|plain| self.loaded.workspace.from_plain(&plain));
-        self.graph.resolve(node, value);
-        for step in self.steps.values_mut() {
-            if step.waiting == Some(node) {
-                step.waiting = None;
-            }
-        }
+        self.finish_now(node, value);
     }
 
     /// Copies every output under `/pekit-out` that `value` names out to the
@@ -919,89 +948,6 @@ impl Run<'_> {
             copied.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))?;
         }
         Ok(())
-    }
-}
-
-/// A job of the pool: an effect to run, under its effect context, until its
-/// deadline.
-type PoolJob = (
-    NodeId,
-    EffectJob,
-    Arc<dyn Effects + Send + Sync>,
-    Option<Instant>,
-);
-
-/// An effect a pool's thread ran.
-struct Ran {
-    /// Its node.
-    node: NodeId,
-    /// The thread that ran it, from 0.
-    worker: usize,
-    /// When it began.
-    began: Instant,
-    /// When it ended.
-    ended: Instant,
-    /// What it came to.
-    outcome: Result<Plain, Diagnostic>,
-}
-
-/// The threads effects run on (see [Building](#building)).
-struct Pool {
-    /// Where jobs go.
-    jobs: Sender<PoolJob>,
-    /// Where what they came to comes back.
-    done: Receiver<Ran>,
-}
-
-impl Pool {
-    /// A pool of `size` threads.
-    fn new(size: usize) -> Self {
-        let (jobs, queue) = channel::<PoolJob>();
-        let (report, done) = channel();
-        let queue = Arc::new(std::sync::Mutex::new(queue));
-        for worker in 0..size {
-            let queue = Arc::clone(&queue);
-            let report = report.clone();
-            thread::spawn(move || {
-                loop {
-                    let next = queue.lock().ok().and_then(|queue| queue.recv().ok());
-                    let Some((node, job, effects, deadline)) = next else {
-                        return;
-                    };
-                    let began = Instant::now();
-                    let outcome = job.run(&*effects, deadline);
-                    let ran = Ran {
-                        node,
-                        worker,
-                        began,
-                        ended: Instant::now(),
-                        outcome,
-                    };
-                    if report.send(ran).is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-        Self { jobs, done }
-    }
-
-    /// Sends the effect `node`'s `job` to run under `effects` until
-    /// `deadline`.
-    fn send(
-        &self,
-        node: NodeId,
-        job: EffectJob,
-        effects: Arc<dyn Effects + Send + Sync>,
-        deadline: Option<Instant>,
-    ) {
-        let _ = self.jobs.send((node, job, effects, deadline));
-    }
-
-    /// The next job's outcome, waiting for one: none if every thread of the
-    /// pool has stopped.
-    fn next(&self) -> Option<Ran> {
-        self.done.recv().ok()
     }
 }
 
