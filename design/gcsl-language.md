@@ -1230,6 +1230,23 @@ equality, display and memo keys.
 - Dropping stays iterative for elements nested as deeply as a program
   runs; the rope's own depth is logarithmic.
 
+### As built (13)
+
+GCSL `6fe5bfc`. As planned, with these details:
+
+- **Short lists.** Two lists of 32 elements or fewer join into one leaf.
+  Otherwise the join is an AVL join: a walk down the taller list, rotating
+  where needed.
+- **Plain constructors.** `from_vec` and `from_exact` still make a single
+  leaf of any length, so a list that is never joined stays one slice.
+  The first index update of a long leaf splits it into balanced 32-element
+  leaves.
+- **A slice read** flattens a join once and keeps the slice in the node.
+  `len` is stored; an index walks the tree.
+- **Size.** A list is now one word, not two.
+- **Measured.** 80,000 one-at-a-time spreads take 0.06 s. Before, each
+  spread copied the whole list, so the cost was quadratic.
+
 ### Decisions to confirm with Jack
 
 - `unique()`, order-preserving, moves to feature 16 with the other list
