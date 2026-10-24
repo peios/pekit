@@ -501,6 +501,101 @@ checker. So generics come first, and methods are built on them.
 - Spreading a type parameter in a generic type is an error, since the
   definition is merged before its arguments are known.
 
+## 7. Receiver methods
+
+### Rule
+
+- **Declaration.** `fn (RECV: TYPE) NAME<T, ...>(PARAMS) MARKER RET { BODY }`
+  and the same with `def`. The receiver is the method's first parameter,
+  with every rule a parameter has (bareness included). Type parameters
+  are declared after the name, as for any generic function, and are in
+  scope in the receiver: `def (xs: List<T>) unique<T>(): List<T>`. A method
+  is a top-level item only: "a method is declared only at the top level of
+  a file" elsewhere.
+- **Visibility.** A method binds no name: it is in no namespace of
+  variables, fields or types, so `files.file(...)` never collides with the
+  global `file(...)`. A `fn` method is visible in its own file only. A
+  `def` method is visible where a `def` of its file would be seen: in its
+  own file, in every file of its directory and of the directories below,
+  and in every file that imports its module in any form (whole, member or
+  `*`, of its file or of its directory), as extension methods are.
+- **Calls.** `VALUE.NAME(ARGS)`, where `VALUE` is a value (not a module or
+  a reference to a top-level field) and its static type has no field
+  `NAME`, calls a method. A method *applies* when the value's static type,
+  its lazy layers stripped, fits its receiver type, binding the method's
+  type parameters the receiver mentions as a call binds them (feature 8).
+  Of the methods that apply, the one whose receiver type fits every
+  other's is called: `List<File>.flatten()` is chosen over
+  `List<T>.flatten()` for a `List<File>`. None applying is "no method
+  `NAME` for type T", noting the receivers of the visible methods of the
+  name, or "no field or method `NAME` in T" with no visible method of the
+  name. Several applying with no most specific one is "method `NAME` is
+  ambiguous for type T", labelling each.
+- **Calling.** The receiver is the first argument, then the call's
+  arguments bind as they do for any call, defaults included: a method
+  call is a call by the function's own name. The method's effect applies
+  as a function's does.
+- **Conflicts.** Two methods of one name whose receiver types are the same
+  type are an error: in one file at the second, and at any call that sees
+  both ("method `NAME` is declared twice for type T"). A value whose static
+  type has a field `NAME` that a visible method `NAME` also applies to is
+  "`NAME` is both a field of T and a method", at the call. A method whose
+  receiver is a record type with a field of its name is an error at the
+  declaration.
+- **A method is no value.** `xs.unique` without a call reads a field, as
+  today; a method is never read as a value.
+
+### Implementation
+
+- **Parser and tree.** `fn (` or `def (` at the top level starts a method.
+  A new `ItemKind::Method { name, name_span, function, public }`; the
+  function is an ordinary `FnDecl` whose first parameter is the receiver,
+  with `receiver: true` on it. Generics are recorded with a type range
+  that starts before the receiver, so a parameter is in scope there.
+- **Mentions.** Each file records its methods (name, item, public) and the
+  names of its method-shaped calls, `VALUE.NAME(...)`: the call of a field
+  on anything other than a reference into the top-level tree or an import.
+- **Order (the cost).** Which method a call means depends on the
+  receiver's static type, which the scan, ordering files before any is
+  typed, does not have. So a method-shaped call of `NAME` makes its file
+  need every file that declares a `def` method `NAME` visible to it. That
+  is conservative: a file that calls a record field `get(...)` needs a
+  file that declares a visible method `get`, and if that file needs it
+  back, the two are "files that need each other". Only `def` methods in
+  directories above or imported modules can cause this. The alternatives,
+  typing receivers in the scan or checking files in an order found while
+  checking, are much larger changes.
+- **Workspace.** Methods stay out of the field trees, as types do: each
+  file has a flat method view, name to declarations, merged from its own
+  file, its directory chain's files and every imported module, and a
+  session's earlier inputs for an input. Each method has a cell of its own
+  after the merged nodes, as a value file has, holding its closure once
+  its file runs. The context gives the checker the candidates of a name:
+  their cells, checked function types and what a call needs of their
+  parameters, as for an imported `def`.
+- **Checker.** In `check_call`, a callee `Field { expr, name }` that is no
+  reference has its receiver checked first. Then field or method is
+  decided by the rules above. A method call binds the receiver against
+  parameter 0 (for a generic method, binding first) and then the call's
+  arguments against the rest. The call records its target for lowering,
+  and argument positions are offset by one.
+- **Lowering.** A method call is an ordinary `IrKind::Call` of the
+  method's cell or closure, with the receiver as the first argument.
+- **Index.** A method's name at a call links to its declaration, for
+  go-to-definition and hover. Completion after `.` needs the static type
+  at the cursor and comes with the language server's completion work.
+
+### Decisions to confirm with Jack
+
+- Type parameters are declared explicitly, `unique<T>()`. An implicit `T`
+  would change meaning silently when a `type T` is in scope.
+- `fn` methods are private to their file and `def` methods visible, as for
+  functions.
+- Methods are top-level only.
+- Duplicates are reported in one file and at calls, not for every view
+  that could see both.
+- The conservative order rule above.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
