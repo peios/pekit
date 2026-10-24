@@ -189,6 +189,22 @@ pub struct Outcomes {
     pub cached: usize,
     /// The steps that passed only on a retry, by name.
     pub flaky: Vec<String>,
+    /// What became of each step that was found in the store or passed.
+    pub steps: Vec<StepReport>,
+}
+
+/// What became of one step of a build that was found in the store or
+/// passed (see [Building](#building)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepReport {
+    /// The target it was of, by its place among the targets given.
+    pub target: usize,
+    /// Its name, as its directory under its target's has it.
+    pub name: String,
+    /// Whether it was found in the store.
+    pub cached: bool,
+    /// Whether it passed only on a retry.
+    pub flaky: bool,
 }
 
 /// Why a build failed.
@@ -321,6 +337,7 @@ pub fn build_all_observed(
         ran: 0,
         cached: 0,
         flaky: Vec::new(),
+        reports: Vec::new(),
     };
     run.drive()?;
     let mut outcomes = Vec::with_capacity(run.roots.len());
@@ -343,6 +360,7 @@ pub fn build_all_observed(
         ran: run.ran,
         cached: run.cached,
         flaky: std::mem::take(&mut run.flaky),
+        steps: std::mem::take(&mut run.reports),
     })
 }
 
@@ -541,6 +559,8 @@ struct Run<'a> {
     cached: usize,
     /// The steps that passed only on a retry, by name.
     flaky: Vec<String>,
+    /// What became of each step that was found in the store or passed.
+    reports: Vec<StepReport>,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -738,6 +758,17 @@ impl Run<'_> {
             }
         }
         demands
+    }
+
+    /// Reports the step `id` as found in the store or passed, whether it was
+    /// found, and whether it passed only on a retry, as `(cached, flaky)`.
+    fn report(&mut self, id: NodeId, (cached, flaky): (bool, bool)) {
+        self.reports.push(StepReport {
+            target: self.step_roots.get(&id).copied().unwrap_or(0),
+            name: self.step_name(id),
+            cached,
+            flaky,
+        });
     }
 
     /// The target the unit `unit` is of, by its number among the roots: a
@@ -1201,6 +1232,7 @@ impl Run<'_> {
             let value = self.loaded.workspace.from_plain(&record.result.plain());
             self.graph.resolve(id, Ok(value));
             self.cached += 1;
+            self.report(id, (true, false));
             self.emit(EventKind::Cached { step: name });
             return Ok(());
         }
@@ -1472,6 +1504,7 @@ impl Run<'_> {
             let name = self.step_names.get(&id).cloned().unwrap_or_default();
             self.flaky.push(name);
         }
+        self.report(id, (false, step.failed_once));
         self.ran += 1;
         self.graph.resolve(id, Ok(value.clone()));
         let step = self.step_name(id);

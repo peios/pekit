@@ -34,7 +34,7 @@ use gcsl::Diagnostic;
 
 /// The def-types GCSL's prelude declares for pekit, which a workspace has
 /// whether or not it defines anything with them.
-const PRELUDE_DEF_TYPES: [&str; 2] = ["build", "package"];
+const PRELUDE_DEF_TYPES: [&str; 3] = ["build", "package", "test"];
 
 /// A definition someone named (see [Targets](#targets)).
 #[derive(Clone, Debug, PartialEq, Eq)]

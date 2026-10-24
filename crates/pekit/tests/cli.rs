@@ -227,3 +227,37 @@ fn several_targets_are_built_and_shown_each() {
         "{err}"
     );
 }
+
+#[test]
+fn tests_report_each_and_one_that_is_no_step_runs_every_time() {
+    let dir = workspace();
+    write(
+        dir.path(),
+        &[(
+            "app/tests.gcsl",
+            "def test kept(out: File = build hello().out) { assert out.read() == \"WORLD\\n\" }\n\
+             #[hermetic(false)] def test live() { assert 1 == 1 }\n\
+             def test wrong() { assert 1 == 2 }\n",
+        )],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let first = pekit(dir.path(), cache.path(), &["test"]);
+    let (out, _) = printed(&first);
+    assert_eq!(first.status.code(), Some(1));
+    assert_eq!(
+        out,
+        "passed           app/kept\npassed           app/live\nFAILED           app/wrong\n    \
+         assertion failed: `1 == 2`\n2 passed, 1 failed\n"
+    );
+    // Named alone, the step found in the store, but the one that is none.
+    let again = pekit(dir.path(), cache.path(), &["test", "kept", "live"]);
+    let (out, _) = printed(&again);
+    assert!(again.status.success(), "{out}");
+    assert_eq!(
+        out,
+        "passed (cached)  app/kept\npassed           app/live\n2 passed, 0 failed\n"
+    );
+    let none = pekit(dir.path(), cache.path(), &["test", "nowhere/**"]);
+    let (_, err) = printed(&none);
+    assert_eq!(err, "error: no `test` is selected by `nowhere/**`\n");
+}

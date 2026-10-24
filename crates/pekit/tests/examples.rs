@@ -476,3 +476,73 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
         "Hello from a file that was turned into code during the build.\n"
     );
 }
+
+/// `pekit` run with `args` in the workspace `dir`, its cache and state in
+/// `cache`: what it printed, and whether it succeeded.
+fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> (String, bool) {
+    let ran = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(args)
+        .current_dir(dir)
+        .env("PEKIT_CACHE_DIR", cache)
+        .env("PEKIT_STATE_DIR", cache.join("state"))
+        .output()
+        .unwrap();
+    (String::from_utf8(ran.stdout).unwrap(), ran.status.success())
+}
+
+#[test]
+fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
+    let dir = example(7, "");
+    let cache = tempfile::tempdir().unwrap();
+    let tests_print = |expected: &str, passes: bool| {
+        let (out, success) = pekit(dir.path(), cache.path(), &["test"]);
+        assert_eq!(out, expected);
+        assert_eq!(success, passes, "{out}");
+    };
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = dir.path().join("example").join(path);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{text}");
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    tests_print(
+        "passed           example/greeting\npassed           example/output\n2 passed, 0 failed\n",
+        true,
+    );
+    // Nothing changed: both found in the store.
+    tests_print(
+        "passed (cached)  example/greeting\npassed (cached)  example/output\n2 passed, 0 failed\n",
+        true,
+    );
+    // The program: the golden test, not the unit test.
+    edit("main.c", "\"pekit2\"", "\"you\"");
+    edit("test/expected_output.txt", "pekit2", "you");
+    tests_print(
+        "passed (cached)  example/greeting\npassed           example/output\n2 passed, 0 failed\n",
+        true,
+    );
+    // What the golden test expects: it alone, and it fails.
+    edit("test/expected_output.txt", "Hello", "Hi");
+    tests_print(
+        "passed (cached)  example/greeting\nFAILED           example/output\n    assertion \
+         failed: `ran.stdout == expected.read()`\n1 passed, 1 failed\n",
+        false,
+    );
+    edit("test/expected_output.txt", "Hi", "Hello");
+    // A comment in `main.c`, the same program: the golden test is found.
+    edit("main.c", "int main", "/* a comment */\nint main");
+    tests_print(
+        "passed (cached)  example/greeting\npassed (cached)  example/output\n2 passed, 0 failed\n",
+        true,
+    );
+    // The library: both tests run, the unit test failing as its program
+    // does, the golden test passing with what it now expects.
+    edit("lib/internal.h", "\"Hello\"", "\"Hi\"");
+    edit("test/expected_output.txt", "Hello", "Hi");
+    tests_print(
+        "FAILED           example/greeting\n    \
+         `/pekit-out/example/greeting/link/greeting_test` exited with status 1\npassed           \
+         example/output\n1 passed, 1 failed\n",
+        false,
+    );
+}

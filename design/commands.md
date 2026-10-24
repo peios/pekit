@@ -182,3 +182,18 @@ its own piece of work, after layer E.
   checked through GCSL's needs; GCSL gains written needs for it.
 - M5: `publish` runs in program order outside any step, with `--to`.
 - M6: `pekit clean` leaves the store unless `--cache`.
+
+## As built
+
+- E0: several targets are one `Run`, each a root of its own unit; a step
+  is the root's whose unit met it, recorded by unit, so a step met in a
+  step's unit is of that step's target. Outcomes come in `select`'s
+  order, by qualified name. A glob `dir/*` is the directories below
+  `dir`, `dir/**` `dir` and everything below.
+- E1: the prelude's `test` awaits its definition under `recover`; a
+  definition's function is named by its path's last segment, so a test's
+  step is named after it, which is how `pekit test` finds whether it was
+  found in the store. A test whose program fails to build fails, with
+  the build's error, since its parameters' defaults run inside the
+  `recover`. A failure shows its message alone; the values an `assert`
+  labels its sides with are a follow-up.

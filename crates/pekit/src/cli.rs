@@ -7,7 +7,11 @@
 //! [Targets](crate::target#targets) says, from the workspace the current
 //! directory is in, as one build ([`build_all_observed`]). It shows the files
 //! each target gave, and how many steps ran and how many were found in the
-//! store; a target that fails, its error.
+//! store; a target that fails, its error. `pekit test [TEST...]` runs the
+//! definitions of the def-type `test` it names or selects, every one below
+//! the current directory by default, as one build, and reports each:
+//! `passed`, `passed (cached)` if its step was found in the store, `flaky`
+//! if it passed only on a retry, or `FAILED` with its failure's message.
 //! `--jobs N` runs at most `N` programs at once, by default as many as the
 //! machine has processors, `--profile NAME` uses the keychain's secrets of
 //! the profile `NAME`, `dev` by default ([Secrets](crate::keychain#secrets)),
@@ -25,8 +29,8 @@
 //! `~/.local/state/pekit`. Outputs are copied to `pekit-out/` at the
 //! workspace's root.
 //!
-//! It exits with 0 once every target is built, 1 if one could not be, and
-//! 2 for a command it does not understand.
+//! It exits with 0 once every target is built or every test passed, 1 if
+//! one was not, and 2 for a command it does not understand.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -35,6 +39,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use gcsl::eval::plain::Plain;
 
 use crate::engine::{BuildError, Outcomes, Settings, build_all_observed};
 use crate::events::{Event, EventKind};
@@ -56,8 +61,22 @@ struct Cli {
 /// A command (see [Commands](#commands)).
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Build a target.
+    /// Build targets.
     Build(BuildArgs),
+    /// Run tests.
+    Test(TestArgs),
+}
+
+/// `pekit test`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct TestArgs {
+    /// The tests, named or selected as targets are; every test below this
+    /// directory, `**`, if none is given.
+    #[arg(value_name = "TEST")]
+    tests: Vec<String>,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
 }
 
 /// `pekit build`'s arguments (see [Commands](#commands)).
@@ -130,6 +149,7 @@ pub fn run(
     };
     match cli.command {
         Command::Build(args) => build_command(&args, cwd, terminal),
+        Command::Test(args) => test_command(&args, cwd, terminal),
     }
 }
 
@@ -202,6 +222,101 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `pekit test [TEST...]` (see [Commands](#commands)).
+fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let mut loaded = match load(cwd) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut names: Vec<&str> = args.tests.iter().map(String::as_str).collect();
+    if names.is_empty() {
+        names.push("**");
+    }
+    let tests = match select(&loaded.workspace, "test", &names, &loaded.here) {
+        Ok(tests) if tests.is_empty() => {
+            let _ = writeln!(
+                terminal.err,
+                "error: no `test` is selected by {}",
+                quoted(&names)
+            );
+            return ExitCode::FAILURE;
+        }
+        Ok(tests) => tests,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{}", error.message());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let outcomes = match build_targets(&mut loaded, &tests, &settings, &args.shared, terminal) {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            return ExitCode::FAILURE;
+        }
+    };
+    let (mut passed, mut failed) = (0, 0);
+    for (index, (test, outcome)) in tests.iter().zip(&outcomes.targets).enumerate() {
+        let name = test.definition.path.rsplit('.').next().unwrap_or_default();
+        let step = outcomes
+            .steps
+            .iter()
+            .find(|report| report.target == index && report.name == name);
+        let shown = test.qualified();
+        let message = match outcome {
+            Ok(result) => match test_result(result) {
+                Some((true, _)) => {
+                    passed += 1;
+                    let label = match step {
+                        Some(report) if report.flaky => "flaky",
+                        Some(report) if report.cached => "passed (cached)",
+                        _ => "passed",
+                    };
+                    let _ = writeln!(terminal.out, "{label:<16} {shown}");
+                    continue;
+                }
+                Some((false, message)) => message.to_owned(),
+                None => format!("a test that gave no result, but {result:?}"),
+            },
+            Err(error) => error.render(&loaded),
+        };
+        failed += 1;
+        let _ = writeln!(terminal.out, "{:<16} {shown}", "FAILED");
+        for line in message.lines() {
+            let _ = writeln!(terminal.out, "    {line}");
+        }
+    }
+    let _ = writeln!(terminal.out, "{passed} passed, {failed} failed");
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Whether the test whose result is `result`, a `TestResult`, passed, and
+/// its failure's message; `None` for a value of another shape.
+fn test_result(result: &Plain) -> Option<(bool, &str)> {
+    let Plain::Record(fields) = result else {
+        return None;
+    };
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    };
+    match (field("passed"), field("message")) {
+        (Some(Plain::Bool(passed)), Some(Plain::Str(message))) => Some((*passed, message)),
+        _ => None,
     }
 }
 

@@ -1,0 +1,34 @@
+# Example 7, runnable: tests as cached steps.
+#
+# A unit test, which links the library and checks one function, and a
+# golden test, which runs the program and compares what it prints. Each is
+# given what it tests by its parameters' defaults, so it runs again only
+# when that changes.
+import "github.com/gcslib/gcc"
+
+def build greet() {
+    let obj = gcc.compile(file("lib/greet.c"), headers = [file("lib/greet.h"), file("lib/internal.h")])
+    archive = gcc.archive([obj], output = "libgreet.a")
+    headers = [file("lib/greet.h")]
+}
+
+def build app() {
+    let g = build greet()
+    let obj = gcc.compile(file("main.c"), headers = g.headers)
+    = gcc.link([obj], libraries = [g.archive], output = "app")
+}
+
+def build greeting_test() {
+    let g = build greet()
+    let obj = gcc.compile(file("test/greeting_test.c"), headers = g.headers)
+    = gcc.link([obj], libraries = [g.archive], output = "greeting_test")
+}
+
+def test greeting(prog: File = build greeting_test()) {
+    let ran = exec([prog.path])
+}
+
+def test output(prog: File = build app(), expected: File = file("test/expected_output.txt")) {
+    let ran = exec([prog.path])
+    assert ran.stdout == expected.read()
+}
