@@ -10,6 +10,7 @@
 //! Each reports what it came to, a [`Ran`], with the thread that ran it and
 //! when, for the build's events, and the files it kept in the store.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,7 +23,8 @@ use gcsl::{Diagnostic, Span};
 
 use crate::fetch::{fetch, fetched_path};
 use crate::record::Kept;
-use crate::store::Store;
+use crate::store::{FileEntry, Store};
+use crate::unpack::{unpack, unpack_key, unpacked_path};
 
 /// What a thread of the pool does (see [The pool](#the-pool)).
 pub enum Work {
@@ -37,6 +39,22 @@ pub enum Work {
         sha256: String,
         /// The store.
         store: Store,
+        /// Where its call is.
+        span: Span,
+    },
+    /// Unpacks an archive into the store (see
+    /// [Unpacking](crate::unpack#unpacking)).
+    Unpack {
+        /// The archive, as the store keeps it.
+        archive: FileEntry,
+        /// It, as GCSL code names it.
+        shown: String,
+        /// How many components of each path to leave off.
+        strip: u32,
+        /// The store.
+        store: Store,
+        /// Where to unpack it before it is stored.
+        scratch: PathBuf,
         /// Where its call is.
         span: Span,
     },
@@ -98,6 +116,24 @@ fn perform(
                 }
                 (Err(error), Vec::new())
             }
+        },
+        Work::Unpack {
+            archive,
+            shown,
+            strip,
+            store,
+            scratch,
+            span,
+        } => match unpack(&store, (&archive, &shown), strip, &scratch) {
+            Ok(tree) => {
+                let path = unpacked_path(&unpack_key(&archive.digest, strip));
+                let dir = Plain::Dir {
+                    path: path.clone(),
+                    identity: None,
+                };
+                (Ok(dir), vec![(path, Kept::Dir(tree))])
+            }
+            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new()),
         },
     }
 }

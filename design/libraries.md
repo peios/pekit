@@ -71,8 +71,11 @@ A new standard module, `archive`, binds `unpack(archive: File, strip: Int =
 directory. Pekit answers it natively (`tar`, with gzip, xz, bzip2 and zstd),
 since the build environment that would provide `tar` is itself an archive.
 It refuses entries that would leave the directory (absolute paths, `..`, or
-links that point out), turns hard links into copies, keeps symbolic links,
-and keeps only the executable bit of each mode. The tree is stored, and the
+a path through a symbolic link the archive made), turns hard links into
+copies, keeps symbolic links as written, which a sandbox resolves inside
+itself, and keeps only the executable bit of each mode. As built, it is
+answered in a step too, deterministic as it is, and what a step unpacks is
+staged into its own sandbox. The tree is stored, and the
 unpacking recorded under a key of the archive's digest and `strip`, so a
 second unpack of the same archive reads the record. Its path is
 `/pekit-out/.unpack/<key>/`.

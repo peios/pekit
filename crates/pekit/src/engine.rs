@@ -28,13 +28,14 @@
 //! copied out to the output directory, each a copy of its own.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
-use gcsl::eval::graph::{Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
+use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
 use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
@@ -48,7 +49,7 @@ use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
-use crate::store::{Digest, Store};
+use crate::store::{Digest, Store, TreeEntry};
 use crate::target::Target;
 
 /// How a build runs.
@@ -296,12 +297,19 @@ fn foreign_file<'a>(plain: &'a Plain, step: &StepRun) -> Option<&'a str> {
                 .strip_prefix(dir)
                 .is_some_and(|rest| rest.starts_with('/'))
     };
+    // A fetched file and an unpacked directory are named by their contents.
+    let shared = |path: &str| {
+        [".fetch", ".unpack"]
+            .iter()
+            .any(|kind| within(path, &format!("{OUTPUTS}/{kind}")))
+    };
     plain
         .files()
         .into_iter()
         .map(|(path, _)| path)
         .find(|path| {
             !within(path, own)
+                && !shared(path)
                 && !step.given.iter().any(|(given, kept)| match kept {
                     Kept::File(_) => path == given,
                     Kept::Dir(_) => within(path, given),
@@ -321,6 +329,8 @@ impl Drop for Run<'_> {
 
 /// An effect running, as events name it.
 struct InFlight {
+    /// The step it is of, by node, or none for the target's own.
+    of: Option<NodeId>,
     /// The step it is of, or none for the target's own.
     step: Option<String>,
     /// What it runs ([`effect_label`]).
@@ -468,6 +478,7 @@ impl Run<'_> {
             .effect_job(&self.graph, id)
             .map_err(BuildError::Engine)?;
         let running = InFlight {
+            of: step,
             step: step.map(|step| self.step_name(step)),
             effect: effect_label(&job),
         };
@@ -488,6 +499,15 @@ impl Run<'_> {
                 store: self.store.clone(),
                 span,
             }
+        } else if job.builtin() == Builtin::ArchiveUnpack {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            match self.unpack_work(&job, span) {
+                Ok(work) => work,
+                Err(message) => {
+                    self.finish_now(id, Err(Diagnostic::error(message, span)));
+                    return Ok(());
+                }
+            }
         } else {
             Work::Effect(job, effects)
         };
@@ -499,6 +519,96 @@ impl Run<'_> {
         self.pool.send(id, work, deadline);
         self.in_flight.insert(id, running);
         Ok(())
+    }
+
+    /// The work of the `archive.unpack` `job`, its call at `span`: its archive
+    /// as the store keeps it, a workspace file's or an output's.
+    ///
+    /// # Errors
+    ///
+    /// GCSL's own error of a `strip` below 0, or that the archive cannot be
+    /// read.
+    fn unpack_work(&mut self, job: &EffectJob, span: Span) -> Result<Work, String> {
+        let (Some(Plain::File { path, .. }), Some(&Plain::Int(strip))) =
+            (job.args().first(), job.args().get(1))
+        else {
+            return Err("`archive.unpack` was given what is no archive".to_owned());
+        };
+        let Ok(strip) = u32::try_from(strip) else {
+            return Err(format!(
+                "`archive.unpack` of `{path}` cannot leave off {strip} components: `strip` is 0 \
+                 or more"
+            ));
+        };
+        let Kept::File(archive) = self.input(path, false)? else {
+            return Err(format!("`archive.unpack` of `{path}`: it is no file"));
+        };
+        Ok(Work::Unpack {
+            archive,
+            shown: path.clone(),
+            strip,
+            store: self.store.clone(),
+            scratch: self.settings.scratch.clone(),
+            span,
+        })
+    }
+
+    /// What the store keeps of `path` if it is inside a directory an output
+    /// of this build is, a file a step listed of another's output, say: found
+    /// through the directory's tree.
+    fn inside_output(&self, path: &str) -> Option<Kept> {
+        let (top, tree) = self
+            .outputs
+            .iter()
+            .filter_map(|(at, kept)| match kept {
+                Kept::Dir(tree) => Some((at, *tree)),
+                Kept::File(_) => None,
+            })
+            .filter(|(at, _)| {
+                path.strip_prefix(at.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by_key(|(at, _)| at.len())?;
+        let mut kept = Kept::Dir(tree);
+        for part in path[top.len()..].split('/').filter(|part| !part.is_empty()) {
+            let Kept::Dir(tree) = kept else {
+                return None;
+            };
+            kept = self
+                .store
+                .read_tree(&tree)
+                .ok()?
+                .entries
+                .into_iter()
+                .find_map(|entry| match entry {
+                    TreeEntry::File { name, file } if name == part => Some(Kept::File(file)),
+                    TreeEntry::Dir { name, tree } if name == part => Some(Kept::Dir(tree)),
+                    _ => None,
+                })?;
+        }
+        Some(kept)
+    }
+
+    /// Puts what the store keeps of the output `path` under the output
+    /// directory, hard-linked and read-only, in place of what an earlier
+    /// build left there, so that what is not hermetic reads it mid-build, as
+    /// the target's own `dir.files()` does.
+    fn expose(&self, path: &str, kept: Kept) -> Result<(), BuildError> {
+        let Some(at) = output_path(&self.settings.outputs, path) else {
+            return Ok(());
+        };
+        let placed = (|| {
+            if fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_dir()) {
+                remove_tree(&at)?;
+            } else if fs::symlink_metadata(&at).is_ok() {
+                fs::remove_file(&at)?;
+            }
+            match kept {
+                Kept::File(entry) => self.store.materialise_file(&entry, &at),
+                Kept::Dir(tree) => self.store.materialise_tree(&tree, &at),
+            }
+        })();
+        placed.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))
     }
 
     /// Gives the node `id` `outcome` at once, the step that waits on it able
@@ -697,6 +807,10 @@ impl Run<'_> {
         if let Some(kept) = self.outputs.get(path) {
             return Ok(*kept);
         }
+        if let Some(kept) = self.inside_output(path) {
+            self.outputs.insert(path.to_owned(), kept);
+            return Ok(kept);
+        }
         let Some(rest) = path
             .strip_prefix(WORKSPACE)
             .and_then(|rest| rest.strip_prefix('/'))
@@ -821,6 +935,7 @@ impl Run<'_> {
         };
         for (path, entry) in &kept {
             self.outputs.insert(path.clone(), *entry);
+            self.expose(path, *entry)?;
         }
         match stored(&plain, &kept) {
             Ok(result) => {
@@ -900,6 +1015,7 @@ impl Run<'_> {
     /// on it able to run again.
     fn finished_effect(&mut self, ran: Ran) {
         let node = ran.node;
+        let of = self.in_flight.get(&node).and_then(|running| running.of);
         if let Some(running) = self.in_flight.remove(&node) {
             let at = ran.ended.saturating_duration_since(self.began);
             (self.events)(&Event {
@@ -914,12 +1030,23 @@ impl Run<'_> {
                 },
             });
         }
+        let mut outcome = ran.outcome;
         for (path, kept) in ran.kept {
+            // What a step unpacked is in its own sandbox; what the target
+            // fetched or unpacked is under the output directory.
+            let placed = match of.and_then(|step| self.steps.get(&step)) {
+                Some(step) => step
+                    .sandbox
+                    .stage(&self.store, &path, kept)
+                    .map_err(|error| engine(&error)),
+                None => self.expose(&path, kept),
+            };
+            if let Err(BuildError::Engine(message)) = placed {
+                outcome = Err(Diagnostic::error(message, Span::new(0, 0)));
+            }
             self.outputs.insert(path, kept);
         }
-        let value = ran
-            .outcome
-            .map(|plain| self.loaded.workspace.from_plain(&plain));
+        let value = outcome.map(|plain| self.loaded.workspace.from_plain(&plain));
         self.finish_now(node, value);
     }
 

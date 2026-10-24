@@ -539,3 +539,78 @@ fn a_hermetic_step_cannot_fetch() {
     assert!(error.contains("app/build.gcsl:1:"), "{error}");
     assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// A gzipped tar archive of `top/x.txt`, holding `text`.
+fn archive_holding(text: &str) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(text.len() as u64);
+    header.set_mode(0o644);
+    builder
+        .append_data(&mut header, "top/x.txt", text.as_bytes())
+        .unwrap();
+    let tar = builder.into_inner().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut encoder, &tar).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn an_archive_is_unpacked_for_a_step_or_by_one() {
+    let text = "import archive\n\
+                #[hermetic] fn read(d: Dir) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {d.path}/x.txt > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                #[hermetic] fn inner(a: File) -> File {\n\
+                \x20   let d = archive.unpack(a, strip = 1)\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {d.path}/x.txt {d.path}/x.txt > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() {\n\
+                \x20   out = [read(archive.unpack(file(\"src.tar.gz\"), strip = 1)), inner(file(\"src.tar.gz\"))]\n\
+                }\n";
+    let dir = workspace(text, &[]);
+    fs::write(
+        dir.path().join("app/src.tar.gz"),
+        archive_holding("inside\n"),
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built =
+        build_in(dir.path(), state.path(), "hello").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(built.ran, 2);
+    let read = dir.path().join("pekit-out/app/hello/read/out.txt");
+    assert_eq!(fs::read_to_string(read).unwrap(), "inside\n");
+    let inner = dir.path().join("pekit-out/app/hello/inner/out.txt");
+    assert_eq!(fs::read_to_string(inner).unwrap(), "inside\ninside\n");
+}
+
+#[test]
+fn the_target_reads_a_step_s_outputs_as_the_build_goes() {
+    // Example 9's dynamic step: what the target does next depends on what
+    // a step made, which it lists mid-build.
+    let text = "#[hermetic] fn gen() -> Dir {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"mkdir out && echo 1 > out/a.c && echo 2 > out/b.c\"])\n\
+                \x20   dir(\"out\")\n\
+                }\n\
+                #[hermetic] fn twice(f: File) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {f.path} {f.path} > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() {\n\
+                \x20   out = for f in gen().files() { twice(f) }\n\
+                }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let built =
+        build_in(dir.path(), state.path(), "hello").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(built.ran, 3);
+    let outputs: Vec<String> = built
+        .value
+        .files()
+        .iter()
+        .map(|(path, _)| fs::read_to_string(dir.path().join(path.trim_start_matches('/'))).unwrap())
+        .collect();
+    assert_eq!(outputs, ["1\n1\n", "2\n2\n"]);
+}

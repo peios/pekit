@@ -224,6 +224,12 @@ Each leaves pekit2 working, and tested, as far as it goes.
   inside it, since Ubuntu's AppArmor profile for bubblewrap forbids a
   bubblewrap inside another. A step that needs a failed step's result fails
   with that failure, unrun.
+- As built in D3: every output a step, a fetch or an unpacking keeps is
+  hard-linked, read-only, into `pekit-out/` as soon as it is kept, as
+  Bazel's `bazel-out/` holds every output, since the target's own code,
+  which is not hermetic, reads `/pekit-out` there mid-build (example 9's
+  `out.files()`); a path inside an output directory is found through its
+  tree. The target's named results are then made writable copies.
 - As built in C5: the cache directory is `$PEKIT_CACHE_DIR`, else
   `$XDG_CACHE_HOME/pekit`, else `~/.cache/pekit`, holding the store and the
   staging directories (never `/tmp`, which is often memory).

@@ -77,6 +77,10 @@ found, ready to paste in.
 A step can't fetch, since it has no network. Fetch in the code that calls
 the step, and pass it the file.
 
+`archive.unpack` works in a target or in a step. Pekit unpacks archives
+itself, so a step needs no `tar`, and keeps what it unpacked, so each
+archive is unpacked only once.
+
 ## Where results go
 
 Pekit copies the files the target gives to `pekit-out/` at the root of
@@ -86,6 +90,11 @@ A target that calls a function twice has steps `cc` and `cc.2`.
 
 The copies are your own: you can change or delete them, and the next
 build puts them back.
+
+As the build goes, `pekit-out/` also holds every step's outputs, so a
+target can read what a step made and decide what to do next, such as
+compiling each file a generator wrote. These intermediate files are
+read-only.
 
 ## Failures, retries, and timeouts
 

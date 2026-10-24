@@ -21,3 +21,4 @@ pub mod sandbox;
 pub mod store;
 pub mod target;
 pub mod trace;
+pub mod unpack;
