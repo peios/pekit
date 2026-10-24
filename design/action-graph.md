@@ -50,6 +50,22 @@ pure function's calls are never nodes.
   type-checks identically under every host. This is the constraint from
   example 6.
 
+The either shape is on the **function's result type**, as if it were
+declared `-> File | Future<File>`, not on the call expression. So
+`let g = compile; g(x)` awaits too, and a function value carries it.
+Checked 2026-10-24: an either-shaped value is awaited implicitly wherever a
+present value is needed, a pure function's argument, a typed `let`, a
+record field or an operand, so libraries that hand a result to a pure
+helper keep working. The sites that build a function's result type must
+all honour it: the signature's type, `inferred_result`, callback
+narrowing, and a def-type reference's type.
+
+**Def-types.** For `#[def_type] #[hermetic] def build(...)`, the step is the
+*invocation*, `build main(...)`: a call of the def-type, which carries the
+attribute, so its result is either-shaped. A definition inherits the
+attribute as a default, but its own type stays its def-type's `F` exactly:
+inheriting a deferring attribute does not change a definition's type.
+
 Rejected: making every impure call's result either-shaped. That changes
 typing everywhere for every program. Also rejected: detecting the use of a
 stand-in in every typed walker at run time. That would touch every place
@@ -84,8 +100,17 @@ invocations today, and later can be single cells (see Later).
 
 A new `Unwind::Pending(node)` carries the stop. Nothing catches it but the
 unit's root: not `recover`, not `#[retry]`, not a loop or a function
-boundary. A `#[timeout]` running in a unit measures an attempt, not time
-spent waiting on nodes.
+boundary. It takes every cleanup path an error takes (memo running-call
+records, `with` frames, deadlines, a `lazy`'s running flag), which tests
+cover. A `#[timeout]` running in a unit measures an attempt, not time spent
+waiting on nodes.
+
+**Restart terminates only if every key is reproducible across attempts.**
+This is an invariant, guarded: a unit whose attempts outnumber the nodes it
+has made, plus one, is the internal error "evaluation did not converge",
+never a loop. Key equality is reflexive: floats compare by their bits, with
+`-0.0` as `0.0`, so a `NaN` argument still finds its node. Nothing in a key
+reads a `with` frame's identity, which is new each time a `with` runs.
 
 ### D3. Nodes and their identity
 
@@ -93,9 +118,11 @@ A *node* is one call instance the host must deal with. There are two kinds:
 
 - **Deferred call:** a call of a closure that carries a deferring
   attribute, its arguments, and the context it was made in.
-- **Effect:** a call of an effectful built-in (`exec` and its kin, `fs.*`,
-  `file`, `dir`, `Dir.sandbox`, `Sandbox.exec` and so on) made by
-  graph-mode code (D4).
+- **Effect:** a call of an effectful built-in made by graph-mode code
+  (D4): `exec` and its kin, and reads as well as writes, `fs.*`,
+  `File.read`, `Dir.files`, `Dir.sandbox`, `Sandbox.exec`, `Sandbox.file`
+  and the like. A read is an effect too: the host must see what
+  non-hermetic code reads, and a restart must not read again.
 
 A node's arguments may hold futures the host has not resolved yet: the
 *holes* of the value. Holes are found by a deep walk through records,
@@ -110,10 +137,14 @@ values each time, and memoised calls may hit on one attempt and miss on
 another. So:
 
 - A **deferred call**'s key is structural: its function's code (IR and
-  function number) and captures, its arguments, and its context, with
-  closures compared by code and captures, and holes by the node they stand
-  for. Two calls with equal keys in one evaluation are one node. A deferred
-  call is meant to depend only on its key, and the host caches by it anyway.
+  function number) and captures, its arguments, and its context. Closures
+  compare by code and captures; GCSL's own futures by code and captures
+  while unrun, and by value once run; holes by the node they stand for. Two
+  calls with equal keys in one evaluation are one node. A deferred call is
+  meant to depend only on its key, and the host caches by it anyway. Only
+  calls the host accepts as nodes dedupe: one it runs inline
+  (`hermetic(false)`) runs each time, and the host must answer the same for
+  a key throughout an evaluation.
 - An **effect**'s key is its built-in, arguments and context, plus its
   occurrence: the *k*th effect of that key within its *scope*. A scope is
   the unit, or a memoised call inside it, by that call's key. A memo hit
@@ -156,8 +187,10 @@ is today's behaviour. Pekit's routes `exec` into a node's bubblewrap
 sandbox and roots `fs` there. GCSL never needs to know what a sandbox is.
 
 A node fails with a diagnostic. An await of a failed node raises that
-failure where the await is, so `recover` around it catches it and an
-enclosing `#[retry]` retries it, as with any failure there.
+failure where the await is, so `recover` around it catches it. A `#[retry]`
+around the await re-raises the same failure: it never re-runs the node.
+Retrying a step is the business of `#[retry]` on the deferred function
+itself, which applies while the node is evaluated.
 
 ### D6. Plain values, files and code identity
 
@@ -166,8 +199,10 @@ The host needs to stage inputs, compute keys and store results:
 - **Plain values:** a `Send` form of a value: scalars, quantities,
   strings, lists, records by field name, variants by key, files and
   directories by path, and secrets with their identity, which is all a
-  hermetic step can return. `Value` converts to it, failing for functions
-  and futures, and back through the workspace's layouts and tags.
+  hermetic step can return. `Value` converts to it, and back through the
+  workspace's layouts and tags. A node result holding a function or an unrun
+  future is the runtime error "a step's result must be plain data" at the
+  node, not a check-time rule.
 - **Files of a value:** every `File` and `Dir` a node's arguments hold, for
   staging and content hashing.
 - **Code identity:** a stable hash of what a node's function can run. The
@@ -183,6 +218,19 @@ counts them as bound at the top level *and* in definitions (see
 `gcsl-language.md`, 10c). A root value is checked against its context's
 type.
 
+## Demand
+
+Calling creates a step; needing it runs it. The host runs only *needed*
+nodes, never every ready one, so `let compiler = build toolchain()` at a
+file's top level costs nothing unless something needs `compiler`:
+
+- A unit *demands* the node it paused on.
+- A unit that finishes demands the holes left in its value. It is *done*
+  only once its value has no holes; until then the host sees the holes it
+  waits on.
+- `needed(unit)` is the transitive closure of a unit's demands over data
+  edges, and the host may run a needed node once its own holes are filled.
+
 ## The embedding API (sketch)
 
 ```rust
@@ -194,7 +242,7 @@ loop {
     match graph.advance()? {          // runs every unit that can progress
         Advance::Done(unit, value) => ...,
         Advance::Waiting => {
-            for node in graph.ready() {           // nodes whose holes are filled
+            for node in graph.ready() {           // needed nodes whose holes are filled
                 match host_cache.get(graph.key(node)) {
                     Some(plain) => graph.resolve(node, Ok(graph.value_from_plain(&plain)?)),
                     None => {
