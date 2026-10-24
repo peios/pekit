@@ -1199,6 +1199,43 @@ GCSL `6761d60` and `d192a4d`. Differences from the plan above:
 - `secret(value, identity)` is available to plain code.
 - `exec`'s `argv` accepts `Revealed<String>` elements.
 
+## 13. Persistent lists
+
+Agreed in core-model.md (methods, example 8): all GCSL lists become
+persistent internally, so concatenation is cheap for transitive data of
+any kind, such as a package's files and those of its dependencies. Nothing
+a program writes changes: a list is still its elements, in order, for
+equality, display and memo keys.
+
+### Rule
+
+- **Concatenation shares.** A list literal with spreads, `[...a, ...b,
+  x]`, shares the elements of the lists it spreads rather than copying
+  them, at a cost logarithmic in their lengths. Building a file set from
+  those of its dependencies, a chain of packages deep, is linear in all,
+  not quadratic.
+- **Reading.** `len` is constant time and an index logarithmic; iterating
+  is linear, with no copy made per iteration.
+- **Updating.** An index update, `xs[i] = v`, copies the path to the
+  element and shares the rest.
+
+### Implementation (planned)
+
+- `List` becomes a balanced rope: leaves of at most 32 elements, and
+  concatenation nodes balanced by height, as an AVL tree is, so a list's
+  depth is logarithmic in its length. Joining two is an AVL join; two
+  short lists join into one leaf.
+- What reads a list as a slice flattens it once and caches the slice in
+  the node; the hot reads (length, index, iteration) walk the tree instead.
+- Dropping stays iterative for elements nested as deeply as a program
+  runs; the rope's own depth is logarithmic.
+
+### Decisions to confirm with Jack
+
+- `unique()`, order-preserving, moves to feature 16 with the other list
+  methods: it needs the elements' equality, which a generic method cannot
+  require yet.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
