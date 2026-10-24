@@ -337,6 +337,47 @@ declaring the record type of its arguments, marked as an attribute:
 - `retry` and `timeout` built in, not declared in the prelude.
 - A positional argument only for a one-field attribute.
 
+## 6b. Retry and timeout in plain GCSL
+
+### Rule
+
+- **`#[retry(times)]`.** When a call of the function fails with a runtime
+  error, its body runs again with the same arguments, up to `times` more
+  times. A runtime error is a panic, a failed `exec` and any other error the
+  program's run raises. A bug in GCSL itself, an internal error, is never
+  retried. The arguments, defaults included, are not computed again, and the
+  body starts afresh each time. If every attempt fails, the error is the
+  last attempt's, noted "`f` was tried 3 times". Retrying repeats a
+  function's effects: the attribute is the author's statement that doing so
+  is safe. On a pure function, retrying cannot change the result, so it is
+  a warning: "retrying a pure function cannot change its result". `times`
+  must not be negative.
+- **`#[timeout(limit)]`.** A call that runs for longer than `limit`, from its
+  body's start, fails: "`f` timed out after 30s", at the call. A program
+  `exec` is running when the time runs out is killed (the program itself,
+  not its own children). An enclosing call's earlier deadline still applies
+  inside, and a timeout of an enclosing call is no error of an inner call,
+  so an inner `#[retry]` never retries it. A function's own timeout is
+  retried by its own `#[retry]`, each attempt timed afresh. `limit` must be
+  positive.
+- **Memoised functions.** Retry and timeout wrap the body's run inside the
+  memoised call. Only a success is recorded, as now.
+
+### Implementation
+
+- **Lowering.** `FnCode` gains `retry: u32` and `timeout: Option<Duration>`,
+  read from the function's built-in attributes.
+- **Evaluator.** A call of a function with either takes a guarded path
+  (`Evaluator::guarded_body`), charged one more level against the depth
+  budget. The unguarded path is unchanged. Deadlines are kept in a stack in
+  the run's shared state, each its effective instant, the minimum of its
+  own and its enclosing ones. Loop iterations, calls and `exec` check it,
+  but only while it is non-empty. When a deadline passes, the evaluator
+  raises `Unwind::Timeout { depth }` for the outermost expired deadline,
+  and the frame that pushed that deadline turns it into the error. `exec`
+  under a deadline spawns the program and polls it, killing it at the
+  deadline.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
