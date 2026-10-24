@@ -68,6 +68,10 @@ it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 `--rebuild` runs every step again, reusing nothing from the store, and
 records each as it goes.
 
+`pekit clean` removes `pekit-out/`. `pekit clean --cache` removes the
+store too, so the next build runs every step. Neither removes the state
+directory, which holds this machine's keychain key.
+
 ## Toolchains
 
 A library asks GCSL's `toolchain` module for a compiler, as

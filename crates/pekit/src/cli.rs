@@ -12,6 +12,9 @@
 //! the current directory by default, as one build, and reports each:
 //! `passed`, `passed (cached)` if its step was found in the store, `flaky`
 //! if it passed only on a retry, or `FAILED` with its failure's message.
+//! `pekit clean` removes the workspace's `pekit-out/`, and `pekit clean
+//! --cache` the store and the staging directory under the cache directory
+//! too, so that every step runs again; neither removes the state directory.
 //! `--jobs N` runs at most `N` programs at once, by default as many as the
 //! machine has processors, `--profile NAME` uses the keychain's secrets of
 //! the profile `NAME`, `dev` by default ([Secrets](crate::keychain#secrets)),
@@ -45,6 +48,7 @@ use crate::engine::{BuildError, Outcomes, Settings, build_all_observed};
 use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
+use crate::layers::remove_tree;
 use crate::load::{Loaded, load};
 use crate::target::{Target, select};
 use crate::trace::Trace;
@@ -65,6 +69,17 @@ enum Command {
     Build(BuildArgs),
     /// Run tests.
     Test(TestArgs),
+    /// Remove what builds left: `pekit-out/`, and with `--cache` the store.
+    Clean(CleanArgs),
+}
+
+/// `pekit clean`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct CleanArgs {
+    /// Remove the store and the staging directories too, so that every step
+    /// runs again.
+    #[arg(long)]
+    cache: bool,
 }
 
 /// `pekit test`'s arguments (see [Commands](#commands)).
@@ -150,6 +165,7 @@ pub fn run(
     match cli.command {
         Command::Build(args) => build_command(&args, cwd, terminal),
         Command::Test(args) => test_command(&args, cwd, terminal),
+        Command::Clean(args) => clean_command(&args, cwd, terminal),
     }
 }
 
@@ -296,6 +312,55 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
     }
     let _ = writeln!(terminal.out, "{passed} passed, {failed} failed");
     if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `pekit clean [--cache]` (see [Commands](#commands)): removes the
+/// workspace's `pekit-out/`, and with `--cache` the store and the staging
+/// directory under the cache directory, never the cache directory itself,
+/// which can be anywhere, nor the state directory.
+fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let Some(root) = cwd
+        .canonicalize()
+        .ok()
+        .and_then(|dir| gcsl_disk::find_root(&dir).map(Path::to_path_buf))
+    else {
+        let _ = writeln!(
+            terminal.err,
+            "error: no workspace here: neither {} nor any directory above it holds a \
+             workspace.gcsl",
+            cwd.display()
+        );
+        return ExitCode::FAILURE;
+    };
+    let mut doomed = vec![root.join("pekit-out")];
+    if args.cache {
+        let cache = cache_dir();
+        doomed.extend([cache.join("store"), cache.join("scratch")]);
+    }
+    let mut failed = false;
+    for path in doomed {
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        match remove_tree(&path) {
+            Ok(()) => {
+                let _ = writeln!(terminal.out, "removed {}", path.display());
+            }
+            Err(error) => {
+                failed = true;
+                let _ = writeln!(
+                    terminal.err,
+                    "error: cannot remove {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

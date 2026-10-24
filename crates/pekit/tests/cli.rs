@@ -261,3 +261,40 @@ fn tests_report_each_and_one_that_is_no_step_runs_every_time() {
     let (_, err) = printed(&none);
     assert_eq!(err, "error: no `test` is selected by `nowhere/**`\n");
 }
+
+#[test]
+fn clean_removes_the_outputs_and_with_cache_the_store() {
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let built = pekit(dir.path(), cache.path(), &["build", "hello"]);
+    assert!(built.status.success());
+    assert!(dir.path().join("pekit-out").is_dir());
+    // `pekit-out/` alone: the step is found in the store again.
+    let cleaned = pekit(&dir.path().join("app"), cache.path(), &["clean"]);
+    let (out, _) = printed(&cleaned);
+    assert!(cleaned.status.success());
+    assert!(out.starts_with("removed "), "{out}");
+    assert!(!dir.path().join("pekit-out").exists());
+    let again = pekit(dir.path(), cache.path(), &["build", "hello"]);
+    assert!(
+        printed(&again)
+            .0
+            .starts_with("built app/hello: 0 steps run, 1 found")
+    );
+    // And the store: it runs again. The state directory stays.
+    let cleaned = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
+    assert!(cleaned.status.success());
+    assert!(!cache.path().join("store").exists());
+    assert!(cache.path().join("state").exists());
+    let again = pekit(dir.path(), cache.path(), &["build", "hello"]);
+    assert!(
+        printed(&again)
+            .0
+            .starts_with("built app/hello: 1 step run, 0 found")
+    );
+    // Cleaning what is clean removes nothing and succeeds.
+    fs::remove_dir_all(dir.path().join("pekit-out")).unwrap();
+    let nothing = pekit(dir.path(), cache.path(), &["clean"]);
+    assert!(nothing.status.success());
+    assert_eq!(printed(&nothing).0, "");
+}
