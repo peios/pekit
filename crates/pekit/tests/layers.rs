@@ -92,6 +92,13 @@ fn a_composition_links_what_nothing_changes_and_is_sealed() {
         fs::metadata(&staged).unwrap().ino(),
         fs::metadata(at.join("x")).unwrap().ino()
     );
+    // The same file twice is one link and one copy, two files of their own.
+    sandbox.place_file(&staged, &at.join("again")).unwrap();
+    assert_ne!(
+        fs::metadata(&staged).unwrap().ino(),
+        fs::metadata(at.join("again")).unwrap().ino()
+    );
+    assert_eq!(fs::read_to_string(at.join("again")).unwrap(), "x");
     // What the step made is copied.
     let made = sandbox.host_path("/pekit-out/t/s/made").unwrap();
     fs::write(&made, "m").unwrap();
@@ -100,9 +107,12 @@ fn a_composition_links_what_nothing_changes_and_is_sealed() {
         fs::metadata(&made).unwrap().ino(),
         fs::metadata(at.join("made")).unwrap().ino()
     );
-    // Sealed: nothing can be added to it, and a sandbox of it is an overlay.
+    // Sealed: none of its files can be changed, the linked blob least of
+    // all, and a sandbox of it is an overlay.
     sandbox.composed(&composed);
-    assert!(fs::write(at.join("new"), "n").is_err());
+    assert!(fs::write(at.join("x"), "changed").is_err());
+    assert!(fs::write(at.join("made"), "changed").is_err());
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "x");
     let root = sandbox.temp_dir().unwrap().unwrap();
     assert_eq!(sandbox.make_sandbox(&composed, &root), Some(Ok(())));
     // Its staging directory can still be removed.

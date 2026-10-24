@@ -9,9 +9,13 @@
 //!
 //! - **A composition** hard-links each file it places that nothing can
 //!   change, a staged input's or another composition's, and copies any other
-//!   ([`Layers::place_file`]). Once it is done it is *sealed*: made read-only
-//!   on the host and bound read-only to every command, so that no program
-//!   and no GCSL code can change it, nor through it a store's blob.
+//!   ([`Layers::place_file`]). Once it is done it is *sealed*: its files made
+//!   read-only on the host, and it bound read-only to every command, so that
+//!   no program can change it, and nothing a store's blob through it. Its
+//!   directories keep their modes, since a sandbox's merged directories show
+//!   their lower's mode, and a read-only one would refuse every write, even
+//!   into the sandbox's own upper layer: a build in a sandbox of the
+//!   composition writes beside its source.
 //! - **A sandbox** of a directory that nothing can change is an overlay
 //!   ([`Layers::make_sandbox`]): its commands see the directory as their
 //!   `/`, their writes kept in the sandbox's own directory, the *upper*
@@ -27,6 +31,7 @@
 //!   sandbox's own root is its upper layer, which is where GCSL itself writes
 //!   into it, such as the working directory it makes.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -57,6 +62,10 @@ struct Known {
     /// The number of the next overlay's work directory, and of the next
     /// merged directory.
     next: u32,
+    /// The files, by device and inode, that the composition being made has
+    /// a link to: GCSL makes one composition at a time, and ends each by
+    /// sealing it.
+    placing: HashSet<(u64, u64)>,
 }
 
 /// A step's compositions and sandboxes (see [Compositions and
@@ -104,7 +113,10 @@ fn is_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-/// Makes every directory under `path`, and it, and every file, read-only.
+/// Makes every file under `path`, or it if it is one, read-only. Its
+/// directories keep their modes, which a sandbox of it shows its commands:
+/// read-only, a command could write nothing in it, even into the sandbox's
+/// own upper layer.
 fn seal(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
@@ -114,6 +126,7 @@ fn seal(path: &Path) -> io::Result<()> {
         for entry in fs::read_dir(path)? {
             seal(&entry?.path())?;
         }
+        return Ok(());
     }
     let mode = meta.permissions().mode();
     fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o222))
@@ -177,15 +190,22 @@ impl Layers {
     }
 
     /// Places the file at `source` at `target`, both on the host, for a
-    /// composition: a hard link if nothing can change it and it is on the
-    /// same file system, else a copy of its own.
+    /// composition: a hard link if nothing can change it, it is on the same
+    /// file system and the composition has no other link to it, else a copy
+    /// of its own. So two files of a composition are never one, whatever
+    /// the store shares between them, as two of a tree it stages are not
+    /// ([`crate::store::Store::materialise_tree`]).
     ///
     /// # Errors
     ///
     /// That it could not be placed.
     pub fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {
-        if self.is_unchanging(source) && fs::hard_link(source, target).is_ok() {
-            return Ok(());
+        if self.is_unchanging(source) {
+            let meta = fs::metadata(source)?;
+            let first = self.known().placing.insert((meta.dev(), meta.ino()));
+            if first && fs::hard_link(source, target).is_ok() {
+                return Ok(());
+            }
         }
         fs::copy(source, target).map(|_| ())
     }
@@ -197,6 +217,8 @@ impl Layers {
     ///
     /// That it could not be made read-only.
     pub fn composed(&self, root: &str, host: &Path) -> io::Result<()> {
+        // The next composition links each file anew.
+        self.known().placing.clear();
         seal(host)?;
         self.known()
             .sealed

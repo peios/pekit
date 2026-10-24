@@ -26,6 +26,7 @@
 //! and taken out by a hard link to its blob, or a copy where a link cannot
 //! be made, as across file systems ([`Store::materialise_file`]).
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -349,11 +350,18 @@ impl Store {
     ///
     /// That the store does not hold it, or `at` cannot be written.
     pub fn materialise_file(&self, entry: &FileEntry, at: &Path) -> io::Result<()> {
+        self.materialise_as(entry, at, true)
+    }
+
+    /// Makes the file `entry` at `at`, a path that does not exist: a hard
+    /// link to its blob if `link` and one can be made, else a read-only copy
+    /// of its own.
+    fn materialise_as(&self, entry: &FileEntry, at: &Path, link: bool) -> io::Result<()> {
         let blob = self.blob_of_mode(entry)?;
         if let Some(parent) = at.parent() {
             fs::create_dir_all(parent)?;
         }
-        if fs::hard_link(&blob, at).is_ok() {
+        if link && fs::hard_link(&blob, at).is_ok() {
             return Ok(());
         }
         fs::copy(&blob, at)?;
@@ -454,17 +462,38 @@ impl Store {
     }
 
     /// Makes the directory of the tree `digest` at `at`, a path that does
-    /// not exist, every file materialised ([`Store::materialise_file`]).
+    /// not exist, every file materialised ([`Store::materialise_file`]), but
+    /// that each of its files is a file of its own, as in the tree it was
+    /// made from: the first file of a blob is a link to it, and any other of
+    /// the same contents and mode a read-only copy. Two identical files of
+    /// the tree are never one file, which `cp` refuses to copy between and
+    /// `tar` would archive as a hard link.
     ///
     /// # Errors
     ///
     /// That the store does not hold it, or `at` cannot be written.
     pub fn materialise_tree(&self, digest: &Digest, at: &Path) -> io::Result<()> {
+        self.materialise_tree_into(digest, at, &mut HashSet::new())
+    }
+
+    /// [`Store::materialise_tree`], `linked` the blobs, by digest and mode,
+    /// that a file of the tree is a link to already.
+    fn materialise_tree_into(
+        &self,
+        digest: &Digest,
+        at: &Path,
+        linked: &mut HashSet<(Digest, bool)>,
+    ) -> io::Result<()> {
         fs::create_dir_all(at)?;
         for entry in self.read_tree(digest)?.entries {
             match entry {
-                TreeEntry::File { name, file } => self.materialise_file(&file, &at.join(name))?,
-                TreeEntry::Dir { name, tree } => self.materialise_tree(&tree, &at.join(name))?,
+                TreeEntry::File { name, file } => {
+                    let first = linked.insert((file.digest, file.executable));
+                    self.materialise_as(&file, &at.join(name), first)?;
+                }
+                TreeEntry::Dir { name, tree } => {
+                    self.materialise_tree_into(&tree, &at.join(name), linked)?;
+                }
                 TreeEntry::Link { name, target } => symlink(target, at.join(name))?,
             }
         }

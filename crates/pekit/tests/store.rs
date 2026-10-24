@@ -69,6 +69,30 @@ fn a_directory_is_a_tree_whose_digest_is_its_whole_content_s() {
     );
 }
 
+#[test]
+fn a_tree_s_identical_files_are_materialised_as_files_of_their_own() {
+    use std::os::unix::fs::MetadataExt;
+    let (store, dir) = store();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    for path in ["a", "b", "sub/c"] {
+        fs::write(tree.join(path), "same").unwrap();
+    }
+    let digest = store.put_tree(&tree).unwrap();
+    let back = dir.path().join("back");
+    store.materialise_tree(&digest, &back).unwrap();
+    let inode = |path: &str| fs::metadata(back.join(path)).unwrap().ino();
+    // One blob, three files, each its own and read-only.
+    assert_ne!(inode("a"), inode("b"));
+    assert_ne!(inode("b"), inode("sub/c"));
+    assert_ne!(inode("a"), inode("sub/c"));
+    for path in ["a", "b", "sub/c"] {
+        assert_eq!(fs::read_to_string(back.join(path)).unwrap(), "same");
+        let mode = fs::metadata(back.join(path)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o222, 0, "{path}");
+    }
+}
+
 /// The receipt of a step given `args`, its files' contents those of the
 /// digests of `contents`, by path.
 fn receipt_of(args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
