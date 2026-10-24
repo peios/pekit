@@ -47,6 +47,12 @@ use crate::fetch::IN_A_STEP;
 use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::load::Loaded;
+use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
+use crate::receipt::{ReceiptOf, receipt};
+use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
+use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
+use crate::store::{Digest, Store, TreeEntry};
+use crate::target::Target;
 
 /// The workspace's root file, whose `pekitconf` registers its toolchains.
 const WORKSPACE_FILE: &str = "workspace.gcsl";
@@ -57,12 +63,49 @@ const PEKITCONF: &str = "pekitconf";
 
 /// The context the `toolchain` module registers toolchains in.
 const TOOLCHAINS: &str = "toolchains";
-use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
-use crate::receipt::{ReceiptOf, receipt};
-use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
-use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
-use crate::store::{Digest, Store, TreeEntry};
-use crate::target::Target;
+
+/// How many symbolic links a path is followed through, as Linux follows
+/// them, before it is refused.
+const MAX_LINKS: u32 = 40;
+
+/// What a path inside an output directory is (see [`Run::inside_output`]).
+enum Inside {
+    /// What the store keeps of it.
+    Kept(Kept),
+    /// The path a symbolic link on the way leads to, the rest of the path
+    /// after it.
+    Link(String),
+}
+
+/// Whether the path `path` is under the directory `dir`.
+fn within_dir(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/') || dir == "/")
+}
+
+/// The components of the path `path`, last first, so that the next is
+/// popped.
+fn components(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .rev()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The path `base` followed by the components `pending`, last first.
+fn rejoined(base: &str, pending: Vec<String>) -> String {
+    let mut path = base.trim_end_matches('/').to_owned();
+    for part in pending.into_iter().rev() {
+        path.push('/');
+        path.push_str(&part);
+    }
+    if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    }
+}
 
 /// How a build runs.
 #[derive(Clone, Debug)]
@@ -609,8 +652,13 @@ impl Run<'_> {
 
     /// What the store keeps of `path` if it is inside a directory an output
     /// of this build is, a file a step listed of another's output, say: found
-    /// through the directory's tree.
-    fn inside_output(&self, path: &str) -> Option<Kept> {
+    /// through the directory's tree, a component at a time, so that a
+    /// symbolic link on the way is followed from the directory it is in, as
+    /// the system follows it, and `..` leaves the directory reached. A link
+    /// whose target is absolute, or a `..` out of the output, leads to a path
+    /// of its own, which [`Run::input`] looks up afresh. `None` if `path` is
+    /// in no output, or is not in its tree.
+    fn inside_output(&self, path: &str) -> Option<Inside> {
         let (top, tree) = self
             .outputs
             .iter()
@@ -623,24 +671,54 @@ impl Run<'_> {
                     .is_some_and(|rest| rest.starts_with('/'))
             })
             .max_by_key(|(at, _)| at.len())?;
-        let mut kept = Kept::Dir(tree);
-        for part in path[top.len()..].split('/').filter(|part| !part.is_empty()) {
-            let Kept::Dir(tree) = kept else {
-                return None;
-            };
-            kept = self
+        // The components still to follow, the next last; the trees from the
+        // output's down to the directory reached.
+        let mut pending = components(&path[top.len()..]);
+        let mut trees = vec![tree];
+        let mut links = 0;
+        while let Some(part) = pending.pop() {
+            match part.as_str() {
+                "." => continue,
+                ".." if trees.len() == 1 => {
+                    let above = top.rsplit_once('/').map_or("", |(above, _)| above);
+                    return Some(Inside::Link(rejoined(above, pending)));
+                }
+                ".." => {
+                    trees.pop();
+                    continue;
+                }
+                _ => {}
+            }
+            let current = *trees.last()?;
+            let entry = self
                 .store
-                .read_tree(&tree)
+                .read_tree(&current)
                 .ok()?
                 .entries
                 .into_iter()
-                .find_map(|entry| match entry {
-                    TreeEntry::File { name, file } if name == part => Some(Kept::File(file)),
-                    TreeEntry::Dir { name, tree } if name == part => Some(Kept::Dir(tree)),
-                    _ => None,
+                .find(|entry| match entry {
+                    TreeEntry::File { name, .. }
+                    | TreeEntry::Dir { name, .. }
+                    | TreeEntry::Link { name, .. } => *name == part,
                 })?;
+            match entry {
+                TreeEntry::Dir { tree, .. } => trees.push(tree),
+                TreeEntry::File { file, .. } => {
+                    return pending.is_empty().then_some(Inside::Kept(Kept::File(file)));
+                }
+                TreeEntry::Link { target, .. } => {
+                    links += 1;
+                    if links > MAX_LINKS {
+                        return None;
+                    }
+                    if target.starts_with('/') {
+                        return Some(Inside::Link(rejoined(&target, pending)));
+                    }
+                    pending.extend(components(&target));
+                }
+            }
         }
-        Some(kept)
+        Some(Inside::Kept(Kept::Dir(*trees.last()?)))
     }
 
     /// Puts what the store keeps of the output `path` under the output
@@ -825,10 +903,22 @@ impl Run<'_> {
             let sandbox = StepSandbox::new(&stage, own)
                 .map_err(|error| engine(&error))?
                 .with_host(&self.settings.host_tools);
-            for (path, kept) in given {
+            // Each directory before what is in it, which it stages: so a
+            // file of a staged directory is as the directory's tree has it, a
+            // symbolic link a link, not the file it leads to.
+            let mut ordered: Vec<&(String, Kept)> = given.iter().collect();
+            ordered.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut dirs: Vec<&str> = Vec::new();
+            for (path, kept) in ordered {
+                if dirs.iter().any(|dir| within_dir(path, dir)) {
+                    continue;
+                }
                 sandbox
                     .stage(&self.store, path, *kept)
                     .map_err(|error| engine(&format!("cannot stage `{path}`: {error}")))?;
+                if matches!(kept, Kept::Dir(_)) {
+                    dirs.push(path);
+                }
             }
             Ok(Arc::new(sandbox))
         })();
@@ -862,12 +952,33 @@ impl Run<'_> {
     /// put into the store. Never what an earlier build left in the output
     /// directory, which might be stale.
     fn input(&mut self, path: &str, dir: bool) -> Result<Kept, String> {
+        self.input_through(path, dir, 0)
+    }
+
+    /// As [`Run::input`], `path` reached through `links` symbolic links that
+    /// led to paths of their own.
+    fn input_through(&mut self, path: &str, dir: bool, links: u32) -> Result<Kept, String> {
         if let Some(kept) = self.outputs.get(path) {
             return Ok(*kept);
         }
-        if let Some(kept) = self.inside_output(path) {
-            self.outputs.insert(path.to_owned(), kept);
-            return Ok(kept);
+        match self.inside_output(path) {
+            Some(Inside::Kept(kept)) => {
+                self.outputs.insert(path.to_owned(), kept);
+                return Ok(kept);
+            }
+            Some(Inside::Link(to)) if links < MAX_LINKS => {
+                let kept = self
+                    .input_through(&to, dir, links + 1)
+                    .map_err(|error| format!("`{path}` is a symbolic link to `{to}`: {error}"))?;
+                self.outputs.insert(path.to_owned(), kept);
+                return Ok(kept);
+            }
+            Some(Inside::Link(_)) => {
+                return Err(format!(
+                    "`{path}` is reached through too many symbolic links"
+                ));
+            }
+            None => {}
         }
         let Some(rest) = path
             .strip_prefix(WORKSPACE)
