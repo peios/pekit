@@ -170,6 +170,88 @@ fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
     assert_eq!((again.ran, again.cached), (2, 1));
 }
 
+/// The workspace configuration of example 5: the host's C toolchain and
+/// the ppk tool at `tools/ppk`.
+const PPK: &str = "import * from \"github.com/gcslib/ppk\"\n\
+                   import * from toolchain\n\
+                   import fileroot\n\
+                   import path\n\
+                   def Toolchain::Ppk workspace_ppk() {\n\
+                   \x20   let tools = dir(path.join(fileroot.this, \"tools\"))\n\
+                   \x20   host_platform = ^host_platform\n\
+                   \x20   platform = {}\n\
+                   \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
+                   }\n\
+                   pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk \
+                   workspace_ppk]}\n";
+
+/// The `ppk` on this process's `PATH`, if there is one.
+fn ppk_tool() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("ppk"))
+        .find(|candidate| candidate.is_file())
+}
+
+#[test]
+fn example_5_packs_two_packages_and_repacks_what_a_change_reaches() {
+    let Some(tool) = ppk_tool() else {
+        eprintln!("skipped: no `ppk` on PATH");
+        return;
+    };
+    let dir = example(5, PPK);
+    fs::create_dir_all(dir.path().join("tools")).unwrap();
+    fs::copy(tool, dir.path().join("tools/ppk")).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "packages").unwrap();
+    // The library's compile and archive, the program's compile and link,
+    // and the two packs.
+    assert_eq!((built.ran, built.cached), (6, 0));
+    let greet = built_file(dir.path(), file_of_dir(&built.value, "greet"));
+    // The identity packing by hand gives, as example 5 records it.
+    assert!(
+        greet
+            .join(
+                "manifests/sha256/7b27eb467e0a79eb6d231a9464bb6f627f8352e8a35ea78fc432c63d213fdeca"
+            )
+            .is_file()
+    );
+    assert!(greet.join("refs/dev.example.greet/1.0-1/x86_64").is_file());
+    let dev = built_file(dir.path(), file_of_dir(&built.value, "greet_dev"));
+    assert!(
+        dev.join("refs/dev.example.greet-dev/1.0-1/x86_64")
+            .is_file()
+    );
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = dir.path().join("example").join(path);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{text}");
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    // `main.c`: the program's compile and link, and its pack; not the
+    // library's steps, nor the developers' package's pack.
+    edit("main.c", "\"pekit2\"", "\"you\"");
+    let again = build_in(dir.path(), state.path(), "packages").unwrap();
+    assert_eq!((again.ran, again.cached), (3, 3));
+    // The version alone: both packs, and nothing else.
+    edit("package.gcsl", "\"1.0-1\"", "\"1.0-2\"");
+    let again = build_in(dir.path(), state.path(), "packages").unwrap();
+    assert_eq!((again.ran, again.cached), (2, 4));
+    let greet = built_file(dir.path(), file_of_dir(&again.value, "greet"));
+    assert!(greet.join("refs/dev.example.greet/1.0-2/x86_64").is_file());
+}
+
+/// The path of the directory `value`'s field `field` is.
+fn file_of_dir<'a>(value: &'a Plain, field: &str) -> &'a str {
+    let Plain::Record(fields) = value else {
+        panic!("not a record: {value:?}");
+    };
+    match fields.iter().find(|(name, _)| name == field) {
+        Some((_, Plain::Dir { path, .. })) => path,
+        _ => panic!("no directory `{field}` in {value:?}"),
+    }
+}
+
 /// What the Python archive at the logical path `path` of a build of the
 /// workspace `root` prints, run by the host's `python3`.
 fn run_python(root: &Path, path: &str) -> String {

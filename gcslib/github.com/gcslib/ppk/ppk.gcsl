@@ -1,0 +1,44 @@
+# The ppk library: packing `package` definitions as ppk packages.
+#
+# - `Toolchain::Ppk`: the ppk tool, a `PpkToolchain`: `root`, its install;
+#   `runtime`, a root it runs on, `/` for the host's; and `ppk`, the
+#   program. A workspace registers one in `pekitconf`, as it does a
+#   compiler: ppk is not published, so the library pins none.
+# - `pack(pkg)`: the artifact directory of the package `pkg`, a `Package`,
+#   packed for `^platform`'s architecture, as `ppk pack` makes it in a new,
+#   empty directory: a hermetic step, so the same files and version give
+#   the same directory, and a package whose files did not change is not
+#   packed again. Copying it into an artifact store, which ppk refuses for
+#   a version whose content changed, is publishing, which is no step.
+import fs
+import toolchain
+import Toolchain from toolchain
+
+type PpkToolchain = {root: Dir, runtime: Dir, ppk: File}
+
+enum Toolchain::Ppk<PpkToolchain>
+
+#[hermetic]
+def pack(
+    pkg: Package,
+    arch: String = this_arch(),
+    tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
+) -> Dir {
+    if tool.runtime.path != "/" {
+        panic("the ppk library runs ppk on the host's runtime alone, not `{tool.runtime.path}`")
+    }
+    let files = fs.compose_dir(pkg.files)
+    let out = dir("artifacts")
+    let ran = exec([
+        tool.ppk.path,
+        "pack",
+        "{pkg.name}@{pkg.version}?arch={arch}",
+        files.path,
+        "--artifact-dir",
+        out.path,
+    ])
+    = out
+}
+
+# The architecture packages are built for: `^platform`'s.
+fn this_arch(^platform) -> String { platform.arch }

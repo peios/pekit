@@ -346,3 +346,24 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
     The bundle writes its own zip, entries sorted and dated 1980, since
     `zipapp` dates them by the files' times, which the store does not keep;
     the host's Python and the pinned one give the same bytes.
+- As built in D10, `gcslib/ppk`:
+  - The prelude declares `package` beside `build`: `PackageDef` is a
+    version and files, a record of `/usr` paths as `fs.compose_dir` takes
+    it, and `package NAME()` a `Package` of the name, the definition's
+    path, too.
+  - `ppk.pack(pkg)` is a hermetic step that packs into a new, empty
+    artifact directory of its own and gives it. The program's package
+    packs to `sha256:7b27eb46...`, the identity packing by hand gave, so
+    pekit adds nothing to ppk's own determinism. Packages are packed by a
+    `build` target for now; `pekit package`, and publishing, come with the
+    commands (layer E).
+  - ppk is not published, so the library pins no ppk: `Toolchain::Ppk` is
+    a kind a workspace registers, here the tool it holds at `tools/ppk`.
+    Its binary is the host's build, so it runs on the host's runtime
+    alone, and the library refuses another. Fetching or building ppk
+    waits for its publication.
+- Found in D10: a definition's relative paths resolve against the
+  directory of the code that runs it, not its own file's, as any call's
+  do, so a toolchain definition in `workspace.gcsl` names its files with
+  `fileroot.this`. Documented; whether definitions should resolve against
+  their own directory is a question for Jack.

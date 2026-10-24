@@ -1,0 +1,24 @@
+# Example 5, runnable: shipping the outputs as ppk packages.
+#
+# Two packages of one build: the program, and the library for developers.
+# The `packages` target packs both, each a step of its own, so a package
+# whose files did not change is not packed again.
+import "github.com/gcslib/ppk"
+
+let version = "1.0-1"
+
+def package dev.example.greet() {
+    version = version
+    files = {"bin/greet" = build app()}
+}
+
+def package dev.example.greet-dev() {
+    let g = build greet()
+    version = version
+    files = {"include" = g.headers; "lib/libgreet.a" = g.archive}
+}
+
+def build packages() {
+    greet = ppk.pack(package dev.example.greet())
+    greet_dev = ppk.pack(package dev.example.greet-dev())
+}
