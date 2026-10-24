@@ -387,6 +387,72 @@ declaring the record type of its arguments, marked as an attribute:
   under a deadline spawns the program and polls it, killing it at the
   deadline.
 
+## Order: generics (8) before methods (7)
+
+Methods with generic receivers (`def (xs: List<T>) unique(): List<T>`), and
+moving the prelude to methods, need type parameters. Methods also need new
+workspace machinery for their visibility, while generics stay inside the
+checker. So generics come first, and methods are built on them.
+
+## 8. Generics
+
+### Rule
+
+- **Generic functions.** `fn NAME<T, U>(PARAMS) MARKER RET { BODY }`, and
+  the same for `def`, so `def get<T>(kind: fn(T): Toolchain): T`. A type
+  parameter is a name in the function's signature and body, written where
+  a type is, and it shadows a declared type of its name there. One
+  parameter written twice is "type parameter `T` is declared twice".
+- **Calls infer.** Type arguments are never written at a call. Each type
+  parameter is bound by matching the arguments' types against the
+  parameters' types, structurally (`List<T>` against `List<Int>` binds
+  `T = Int`). A parameter bound more than once takes the join of its
+  bindings. Every argument is then checked against the parameter types
+  with the bindings substituted, by the ordinary rules, so `id("a")` is a
+  `String`. A type parameter that nothing binds is "cannot infer `T` for
+  this call of `f`", noted "`T` appears in no parameter's type given an
+  argument here". An argument whose type mentions `T` is checked bottom
+  up, with no expected type, so that it can bind `T`.
+- **Bodies are checked once, for every `T`.** Inside the body a value of
+  type `T` is opaque. It can be passed, returned, stored in records and
+  lists, and compared with `===`, but not measured: no operator, field,
+  index, call, interpolation or equality. A `T` is a subtype only of itself
+  and of the either shape and `{}`-free supertypes that contain it. A
+  `T` may be bound to any type, a lazy one included: it is
+  laziness-transparent, so bareness never wraps a `T` and a pure
+  function's `T` parameter is not inferred.
+- **Generic types.** `type NAME<T, ...> = TYPE`, used as
+  `NAME<Int, ...>`, its parameters substituted into its definition when
+  the tree is expanded. The wrong number of arguments is "type `Pair`
+  takes 2 type arguments, given 1"; a generic type used bare is
+  "type `Pair` needs its type arguments".
+- **Values.** A generic function used as a value, rather than called, is
+  "a generic function must be called" for now. Instantiating one at an
+  expected function type comes later, with methods if they need it.
+- **Generic def-types** (`def Toolchain<T>(...)`) come with feature 9,
+  where the definition's header binds `T`.
+
+### Implementation
+
+- **Parser.** Type parameters after a function item's name or a `type`
+  item's name, and the type arguments of a named type, which the parser
+  reads already (`TypeExprKind::Applied`). `FnDecl` gains its type
+  parameters.
+- **Types.** `FnTy` gains `generics: u8`. `TyKind::Param(u8)` stands for
+  the n-th type parameter of the function type it occurs in; the
+  generic function types themselves are never nested. A substitution maps
+  `Param`s to types (`TypeTable::substitute`), and matching
+  (`TypeTable::bind`) binds them from an argument's type.
+- **Checker.** Resolving a function's signature declares its type
+  parameters, `Param(i)`, in a scope of type names. Calls of a generic
+  signature infer, then substitute.
+- **Lowering.** A node whose type is or holds a `Param` at the top lowers
+  with kind `Deferred`, which the general walker evaluates and which may
+  hold any value. A call's result is lowered with the caller's substituted
+  kind.
+- **Workspace.** A generic `type` declaration is expanded per use, its
+  parameters substituted.
+
 ## Later features
 
 Specified in detail when their turn comes: 7 receiver methods; 8
