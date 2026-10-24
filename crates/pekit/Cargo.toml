@@ -11,6 +11,9 @@ license.workspace = true
 # GCSL's branch for PEI-1595, until it is merged into GCSL's main.
 gcsl = { path = "../../../local/worktrees/gcsl-1595/crates/gcsl" }
 gcsl-disk = { path = "../../../local/worktrees/gcsl-1595/crates/gcsl-disk" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3.27"
