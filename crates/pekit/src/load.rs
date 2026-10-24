@@ -7,7 +7,9 @@
 //! directory by its nearest ancestor that holds one ([`gcsl_disk::find_root`]).
 //! Its files are read as `gcsl-disk` reads them for the `gcsl` command
 //! ([`gcsl_disk::read_workspace`]), every nested workspace left out, and
-//! checked beside GCSL's standard library ([`gcsl::workspace::check_with_standard`]).
+//! checked beside GCSL's standard library ([`gcsl::workspace::check_with_standard`]),
+//! rooted at `/w`, the workspace's place in the logical layout, so that
+//! `fileroot.workspace` is `/w` and `fileroot.this` `/w/<directory>`.
 //! The sources are kept, the standard files first, so that a diagnostic,
 //! which names its file by input number, is shown against its file
 //! ([`Loaded::render`], [`LoadError::render`]).
@@ -16,6 +18,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use gcsl::workspace::{self, Workspace};
+
+use crate::sandbox::WORKSPACE;
 use gcsl::diagnostic::Renderer;
 use gcsl::{Diagnostic, SourceFile};
 
@@ -107,8 +111,11 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     let read = gcsl_disk::read_workspace(&root, None).map_err(LoadError::Read)?;
+    // Rooted at `/w`, as every path in a build is (see [The logical
+    // layout](crate::sandbox#the-logical-layout)): so `fileroot` names the
+    // workspace's directories as steps see them, on every machine.
     let (standard, checked) =
-        workspace::check_with_standard(&read.relative, &read.nested, &root.to_string_lossy());
+        workspace::check_with_standard(&read.relative, &read.nested, WORKSPACE);
     let mut names: Vec<String> = standard
         .iter()
         .map(|source| source.name().to_owned())

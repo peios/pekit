@@ -85,6 +85,7 @@ fn receipt_in(own: &str, args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
         captures: &[],
         context: &[],
         own,
+        code_of: &|_| None,
         platform: "x86_64-linux",
     };
     let mut lookup = |path: &str, _dir: bool| {

@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,6 +38,7 @@ use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
 use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
+use gcsl::workspace::graph::RootField;
 use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
 
@@ -45,6 +47,16 @@ use crate::fetch::IN_A_STEP;
 use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::load::Loaded;
+
+/// The workspace's root file, whose `pekitconf` registers its toolchains.
+const WORKSPACE_FILE: &str = "workspace.gcsl";
+
+/// The field of the workspace's root file pekit reads its configuration
+/// from.
+const PEKITCONF: &str = "pekitconf";
+
+/// The context the `toolchain` module registers toolchains in.
+const TOOLCHAINS: &str = "toolchains";
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
@@ -162,10 +174,35 @@ pub fn build_observed(
         let platform = loaded.workspace.from_plain(&settings.execution.plain());
         contexts.push((HOST_PLATFORM.to_owned(), platform));
     }
+    // The workspace's toolchains, from `workspace.gcsl`'s `pekitconf`, where
+    // the `toolchain` module is loaded and the field is there.
+    let mut fields = Vec::new();
+    if loaded.workspace.declares_context(TOOLCHAINS)
+        && let Some(file) = loaded.workspace.file(WORKSPACE_FILE)
+        && loaded.workspace.top_level(file, PEKITCONF).is_some()
+    {
+        fields.push(RootField {
+            context: TOOLCHAINS,
+            file,
+            field: PEKITCONF,
+            path: &["toolchains"],
+        });
+    }
     let call = loaded
         .workspace
-        .prepare_call((&target.def_type, &target.qualified()), &[], &contexts)
+        .prepare_call_with(
+            (&target.def_type, &target.qualified()),
+            &[],
+            &contexts,
+            &fields,
+        )
         .map_err(BuildError::Invoke)?;
+    let code_table: Rc<[(String, Digest)]> = loaded
+        .names
+        .iter()
+        .zip(&loaded.sources)
+        .map(|(name, source)| (name.clone(), Digest::of(source.text().as_bytes())))
+        .collect();
     let mut run = Run {
         loaded,
         store,
@@ -181,6 +218,7 @@ pub fn build_observed(
         in_flight: HashMap::new(),
         events,
         began: Instant::now(),
+        code_table,
         target_dir: target.qualified().trim_start_matches('/').to_owned(),
         ran: 0,
         cached: 0,
@@ -276,6 +314,9 @@ struct Run<'a> {
     events: &'a mut dyn FnMut(&Event),
     /// When the build began.
     began: Instant,
+    /// Each source's name and contents' digest, by input number: what a
+    /// step's code and the functions it reads are keyed by.
+    code_table: Rc<[(String, Digest)]>,
     /// The target's directory under `/pekit-out`, its qualified name.
     target_dir: String,
     /// How many steps ran.
@@ -553,6 +594,19 @@ impl Run<'_> {
         })
     }
 
+    /// Whether `path` is the host snapshot's (see [The host
+    /// snapshot](crate::host#the-host-snapshot)): `/` or under a directory it
+    /// binds, when steps borrow it; a step's input that is not staged, since
+    /// every step binds it already, the receipt's platform naming the
+    /// snapshot's fingerprint.
+    fn is_host_path(&self, path: &str) -> bool {
+        let bound = &self.settings.host_tools.bind;
+        !bound.is_empty()
+            && !path.starts_with(&format!("{WORKSPACE}/"))
+            && !path.starts_with(&format!("{OUTPUTS}/"))
+            && (path == "/" || bound.iter().any(|dir| Path::new(path).starts_with(dir)))
+    }
+
     /// What the store keeps of `path` if it is inside a directory an output
     /// of this build is, a file a step listed of another's output, say: found
     /// through the directory's tree.
@@ -679,26 +733,30 @@ impl Run<'_> {
         let code: Vec<(String, Digest)> = inputs
             .code_files
             .iter()
-            .filter_map(|&file| {
-                let source = self.loaded.sources.get(file as usize)?;
-                let name = self.loaded.names.get(file as usize)?;
-                Some((name.clone(), Digest::of(source.text().as_bytes())))
-            })
+            .filter_map(|&file| self.code_table.get(file as usize).cloned())
             .collect();
         let name = self.step_name(id);
         let own = format!("{}/{name}", self.target_dir);
         let own_path = format!("{OUTPUTS}/{own}");
         let mut given: Vec<(String, Kept)> = Vec::new();
+        let table = Rc::clone(&self.code_table);
+        let code_of = move |input: u32| table.get(input as usize).cloned();
         let of = ReceiptOf {
             code: &code,
             args: &inputs.args,
             captures: &inputs.captures,
             context: &inputs.context,
             own: &own_path,
+            code_of: &code_of,
             platform: &self.settings.platform,
         };
         let receipt = {
             let mut contents = |path: &str, dir: bool| -> Result<Digest, String> {
+                // The host snapshot's own, which every step binds already,
+                // keyed by its path on top of the snapshot's fingerprint.
+                if self.is_host_path(path) {
+                    return Ok(Digest::of(format!("host-snapshot:{path}").as_bytes()));
+                }
                 let kept = self.input(path, dir)?;
                 given.push((path.to_owned(), kept));
                 Ok(match kept {

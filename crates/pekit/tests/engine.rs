@@ -4,7 +4,7 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pekit::engine::{BuildError, Built, Settings, build_observed};
 use pekit::events::{Event, EventKind};
@@ -22,16 +22,10 @@ fn write(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
-/// The host tools a test's shell needs, which a real step never borrows.
+/// The host tools steps borrow until a pinned build environment is given:
+/// the host snapshot's, as `pekit build` gives them.
 fn host_tools() -> HostTools {
-    HostTools {
-        bind: ["/usr", "/bin", "/lib", "/lib64"]
-            .iter()
-            .map(PathBuf::from)
-            .filter(|dir| dir.exists())
-            .collect(),
-        ..HostTools::default()
-    }
+    pekit::host::HostSnapshot::of_host().tools()
 }
 
 /// A workspace whose `app` has `build.gcsl` of `text` and the files `files`.
@@ -613,4 +607,97 @@ fn the_target_reads_a_step_s_outputs_as_the_build_goes() {
         .map(|(path, _)| fs::read_to_string(dir.path().join(path.trim_start_matches('/'))).unwrap())
         .collect();
     assert_eq!(outputs, ["1\n1\n", "2\n2\n"]);
+}
+
+#[test]
+fn a_step_is_given_the_toolchain_the_workspace_registers() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "workspace.gcsl",
+                "import fileroot\n\
+                 import Toolchain from toolchain\n\
+                 def Toolchain::C fake() {\n\
+                 \x20   let tc = \"{fileroot.this}/tc\"\n\
+                 \x20   host_platform = {}\n\
+                 \x20   platform = {}\n\
+                 \x20   provides = {root = dir(tc); runtime = dir(\"/\"); cc = file(\"{tc}/cc\"); \
+                 ar = file(\"{tc}/cc\"); ld = file(\"{tc}/cc\"); sysroot = dir(tc)}\n\
+                 }\n\
+                 pekitconf = {toolchains = [Toolchain::C fake]}\n",
+            ),
+            (
+                "tc/cc",
+                "#!/bin/sh\necho \"compiled by fake: $(cat $1)\" > out.o\n",
+            ),
+            (
+                "app/build.gcsl",
+                "import toolchain\n\
+                 import Toolchain from toolchain\n\
+                 #[hermetic] fn compile(src: File, cchain: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
+                 \x20   let r = exec([\"/bin/sh\", cchain.cc.path, src.path])\n\
+                 \x20   file(\"out.o\")\n\
+                 }\n\
+                 def build hello() { out = compile(file(\"main.c\")) }\n",
+            ),
+            ("app/main.c", "int main;\n"),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    let built =
+        build_in(dir.path(), state.path(), "hello").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(built.ran, 1);
+    let out = dir.path().join("pekit-out/app/hello/compile/out.o");
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        "compiled by fake: int main;\n"
+    );
+    // The toolchain is an input: a new compiler, a new step.
+    fs::write(
+        dir.path().join("tc/cc"),
+        "#!/bin/sh\necho \"compiled again: $(cat $1)\" > out.o\n",
+    )
+    .unwrap();
+    let again = build_in(dir.path(), state.path(), "hello").unwrap();
+    assert_eq!((again.ran, again.cached), (1, 0));
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        "compiled again: int main;\n"
+    );
+}
+
+#[test]
+fn with_no_toolchain_registered_a_step_compiles_with_the_host_s() {
+    let has_cc = std::process::Command::new("cc")
+        .arg("--version")
+        .output()
+        .is_ok();
+    if !has_cc {
+        eprintln!("skipped: no cc on this host");
+        return;
+    }
+    let text = "import toolchain\n\
+                import Toolchain from toolchain\n\
+                #[hermetic] fn compile(src: File, cchain: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
+                \x20   let r = exec([cchain.cc.path, \"-o\", \"hello\", src.path])\n\
+                \x20   file(\"hello\")\n\
+                }\n\
+                def build hello() { out = compile(file(\"hello.c\")) }\n";
+    let dir = workspace(
+        text,
+        &[(
+            "hello.c",
+            "#include <stdio.h>\nint main(void) { puts(\"hi\"); return 0; }\n",
+        )],
+    );
+    let state = tempfile::tempdir().unwrap();
+    // The host's own tools, as a host snapshot gives them.
+    let built =
+        build_in(dir.path(), state.path(), "hello").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(built.ran, 1);
+    let binary = dir.path().join("pekit-out/app/hello/compile/hello");
+    let run = std::process::Command::new(binary).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "hi\n");
 }

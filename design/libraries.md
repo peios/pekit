@@ -93,11 +93,14 @@ system_c]`, the host's tools by `PATH`, through a new impure built-in,
 
 ### L5. The workspace's configuration sets the registry
 
-`workspace.gcsl` may give `pekitconf: PekitConfig`, whose `toolchains`
-pekit sets as `^toolchains` at the root of every target, as it sets
-`host_platform`. `PekitConfig` is declared in a standard module `pekit`
-(`import pekit`), since it names `Registered` and the prelude cannot import
-`toolchain`.
+`workspace.gcsl` may give `pekitconf`, whose `toolchains` pekit sets as
+`^toolchains` at the root of every target, as it sets `host_platform`. As
+built, there is no `PekitConfig` type, nor a standard module `pekit` to
+declare one: a standard module's name is reserved at every workspace's
+root, and Peios's workspace has a `pekit/` there. The field is untyped;
+the `with` pekit's call is wrapped in checks `toolchains`'s value against
+its declared type, `List<fn() ->> Registered>`, a list of definitions, so
+that a toolchain's body runs only when `get` reaches it.
 
 The value is computed in the target's own evaluation, so a registered
 toolchain's `fetch` is a node of the target's graph, run only if the target
@@ -134,7 +137,8 @@ copying as the default.
 ### L6. The host snapshot answers for the host's own tools
 
 A workspace that registers no toolchain gets `system_c`, whose files are
-host paths such as `/usr/bin/cc`. A hermetic step given one would fail:
+host paths such as `/usr/bin/cc`: its `root` is `dir("/usr")` and its
+`runtime` `dir("/")` under either host, as built. A hermetic step given one would fail:
 it is outside the workspace. Under pekit, a host path under the host
 snapshot (C5) is a valid input that is not staged, since every step binds
 the snapshot already, and it is keyed by the snapshot's fingerprint and its
@@ -228,8 +232,14 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
 - L2, L3: plain GCSL's `fetch` and `unpack` run `curl`, `sha256sum` and
   `tar`, so GCSL gains no network, hashing or archive dependency; pekit
   implements both natively.
-- L5: `PekitConfig` in a standard module `pekit`, and root contexts given as
-  a file's field.
+- L5: no `PekitConfig` type or `pekit` module, an untyped `pekitconf`,
+  root contexts given as a file's field, and the registry a list of
+  definitions, run lazily.
+- As built in D5: a step's context and captures are keyed with functions
+  by their code (GCSL's `Plain::Closure`), every bound context kept, since
+  GCSL's needs leave out contexts with defaults that a step still reads;
+  and pekit checks the workspace rooted at `/w`, so `fileroot` names
+  directories as steps see them.
 - L6: under pekit, `system_c` names the host snapshot's `/usr`, and host
   snapshot paths are inputs keyed by the fingerprint.
 - L6a: a toolchain's own runtime, `Toolchain::C`'s `runtime: Dir`, and

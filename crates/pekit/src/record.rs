@@ -76,6 +76,8 @@ pub enum StoreError {
     Secret,
     /// A file or directory it names was not kept ([`keep_files`]).
     Unkept(String),
+    /// It holds a function, which is no data.
+    NotData,
     /// A file or directory it names could not be put into the store.
     Io {
         /// The path, as GCSL code names it.
@@ -169,6 +171,7 @@ pub fn stored<S: BuildHasher>(
             },
         ),
         Plain::Secret { .. } => return Err(StoreError::Secret),
+        Plain::Closure { .. } => return Err(StoreError::NotData),
         Plain::File { path, identity } => match of(path)? {
             Kept::File(entry) => Stored::File(path.clone(), identity.clone(), entry),
             Kept::Dir(_) => return Err(StoreError::Unkept(path.clone())),

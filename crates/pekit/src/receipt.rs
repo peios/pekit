@@ -17,6 +17,10 @@
 //!   input with the same bytes at the same path keys the same;
 //! - each secret by its identity and whether it is revealed, never by its
 //!   value;
+//! - each function in its captures or context, a registered toolchain's
+//!   definition say, by the name and contents of its code's file, its number
+//!   in that code, and its captures, as GCSL keys it
+//!   ([`Plain::Closure`]);
 //! - its own output directory, `/pekit-out/<target>/<step>`, which names
 //!   the files it makes;
 //! - the platform it runs on.
@@ -31,7 +35,7 @@ use crate::store::Digest;
 
 /// What a receipt is made of, but its files' contents, which [`receipt`]
 /// asks for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ReceiptOf<'a> {
     /// The path and contents' digest of each file whose source makes the
     /// step's code, in order.
@@ -44,6 +48,9 @@ pub struct ReceiptOf<'a> {
     pub context: &'a [(String, Plain)],
     /// Its own output directory, logically.
     pub own: &'a str,
+    /// The name and contents' digest of the file of each input number, by
+    /// which a function in its captures or context is keyed.
+    pub code_of: &'a dyn Fn(u32) -> Option<(String, Digest)>,
     /// The platform it runs on, as pekit describes it.
     pub platform: &'a str,
 }
@@ -64,6 +71,7 @@ pub fn receipt(
     let mut out = Encoder {
         hasher: &mut hasher,
         contents,
+        code_of: of.code_of,
     };
     out.text("pekit-receipt-2");
     out.count(of.code.len());
@@ -93,6 +101,8 @@ struct Encoder<'a> {
     hasher: &'a mut Sha256,
     /// The digests of the files given, by path.
     contents: &'a mut dyn FnMut(&str, bool) -> Result<Digest, String>,
+    /// The name and contents' digest of the file of each input number.
+    code_of: &'a dyn Fn(u32) -> Option<(String, Digest)>,
 }
 
 impl Encoder<'_> {
@@ -110,6 +120,34 @@ impl Encoder<'_> {
     fn text(&mut self, text: &str) {
         self.count(text.len());
         self.bytes(text.as_bytes());
+    }
+
+    /// Writes the file, or the directory if `dir`, at `path` of the identity
+    /// `identity`: by its path and its contents' digest.
+    fn file(&mut self, path: &str, identity: Option<&str>, dir: bool) -> Result<(), String> {
+        self.bytes(if dir { b"D" } else { b"F" });
+        self.text(path);
+        self.text(identity.unwrap_or(""));
+        let digest = (self.contents)(path, dir)?;
+        self.bytes(digest.bytes());
+        Ok(())
+    }
+
+    /// Writes the function `function` of the code of input `input`, which
+    /// captures `captures`: by its file's name and contents, its number, and
+    /// its captures.
+    fn closure(&mut self, input: u32, function: u32, captures: &[Plain]) -> Result<(), String> {
+        let (name, digest) = (self.code_of)(input)
+            .ok_or_else(|| format!("a function of no file the build has, {input}"))?;
+        self.bytes(b"c");
+        self.text(&name);
+        self.bytes(digest.bytes());
+        self.bytes(&function.to_le_bytes());
+        self.count(captures.len());
+        for capture in captures {
+            self.plain(capture)?;
+        }
+        Ok(())
     }
 
     /// Writes `plain`, canonically (see [Receipts](#receipts)).
@@ -177,20 +215,13 @@ impl Encoder<'_> {
                 self.bytes(if *revealed { b"r" } else { b"h" });
                 self.text(identity);
             }
-            Plain::File { path, identity } => {
-                self.bytes(b"F");
-                self.text(path);
-                self.text(identity.as_deref().unwrap_or(""));
-                let digest = (self.contents)(path, false)?;
-                self.bytes(digest.bytes());
-            }
-            Plain::Dir { path, identity } => {
-                self.bytes(b"D");
-                self.text(path);
-                self.text(identity.as_deref().unwrap_or(""));
-                let digest = (self.contents)(path, true)?;
-                self.bytes(digest.bytes());
-            }
+            Plain::File { path, identity } => self.file(path, identity.as_deref(), false)?,
+            Plain::Dir { path, identity } => self.file(path, identity.as_deref(), true)?,
+            Plain::Closure {
+                input,
+                function,
+                captures,
+            } => self.closure(*input, *function, captures)?,
             Plain::Sandbox { root, cwd, env } => {
                 self.bytes(b"x");
                 self.text(root);

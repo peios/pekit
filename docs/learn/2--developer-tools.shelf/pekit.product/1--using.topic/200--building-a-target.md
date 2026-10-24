@@ -65,6 +65,32 @@ is never recorded, so it runs every time.
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
+## Toolchains
+
+A library asks GCSL's `toolchain` module for a compiler, as
+`toolchain.get(Toolchain::C)`, rather than naming one. With nothing
+registered, the answer is the host's own `cc`, found on `PATH`. To build
+with toolchains of your own, register them in `workspace.gcsl`:
+
+```text
+import Toolchain from toolchain
+
+def Toolchain::C gcc_x86_64() {
+    let files = archive.unpack(fetch("https://example.org/gcc.tar.xz", sha256 = "..."))
+    host_platform = {arch = "x86_64"}
+    platform = {arch = "x86_64"}
+    provides = {root = files; runtime = files.dir("sysroot"); cc = files.file("bin/gcc")
+                ar = files.file("bin/ar"); ld = files.file("bin/ld"); sysroot = files.dir("sysroot")}
+}
+
+pekitconf = {toolchains = [Toolchain::C gcc_x86_64]}
+```
+
+Pekit sets the `toolchains` context from `pekitconf.toolchains` for every
+target it builds, and the first registered toolchain that fits the
+platforms is used. A step is given its toolchain as an argument, so a
+changed compiler rebuilds exactly the steps that use it.
+
 ## Libraries
 
 A build file imports a library by its path, such as
