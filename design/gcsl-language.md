@@ -1116,8 +1116,52 @@ identities for hosts' receipts.
   unwrapped, the typed operation, and the result wrapped, its identity
   derived from the operands'.
 
+### As built (12a)
+
+GCSL `73e0562` and `84c63ce`. Differences from the plan above:
+
+- **Making and taking.** `secret(value, identity)` and `.unsafe_value()`
+  are prelude functions over two built-ins, `secret` and `secret_value`.
+  A secret of a secret is the inner value with the new identity.
+- **Operations.** The checker records each operation on secrets and its
+  operands. Lowering wraps the operation in `SecretWrap`, and each
+  operand in `SecretValue`, which unwraps a secret and leaves a plain
+  value as it is. A field of a secret that is itself a secret merges
+  into one secret, so a secret's value is never a secret.
+- **Identities.** A derived secret's identity is the identities of the
+  secrets it computed on, in order, joined by ` + `: `"{u}:{s}"` is
+  `user + password`. 12c can still change the format.
+- **Comparisons of values holding secrets** unwrap every secret in them
+  deeply, through fields, elements and enum payloads, and compare the
+  plain values into a `Secret<Bool>`.
+- **`===` is total equality in GCSL, not identity.** It compares fields a
+  value's type doesn't name, which can hold secrets the checker can't
+  see. So a secret is equal to another of its identity whatever their
+  values, and a memoised call's arguments hash it by identity alone.
+  Otherwise `===` of two `{x: Int}` records with hidden secret fields, or
+  a memo cache hit, told whether two secrets' values were equal. Where
+  the types hold a secret, `===` is a `Secret<Bool>`, like `==`.
+- **Redaction** isn't a flag over error labels. A failure of the
+  operation itself (a division, an overflow, an index past the end) is
+  replaced by "an operation on a secret failed", with no labels or
+  notes, marked `SECRET` so that neither `recover` nor `#[retry]`
+  handles it. A failure of an operand is the operand's: `SecretValue`
+  flags it, so `s + exec(...)` fails as `exec` does and stays
+  recoverable. An enclosing call's timeout and a bug in GCSL pass
+  through.
+- **Branching refusals.** `and`, `or`, `is` and `as` say "a secret cannot
+  decide what runs". `if`, `assert`, `for` and an index refuse a secret
+  through their types, `Bool`, a list and `Int`, with a note pointing to
+  `.unsafe_value()` on a mismatch.
+- **Spreading a secret record** is refused ("not a record"), as planned.
+- **Errors of a refused operation** name the types as written, "cannot
+  add `Secret<String>` and Int".
+
 ### Decisions to confirm with Jack
 
+- A secret compares and hashes by identity alone outside a secret
+  comparison, so two secrets of one identity are one to `===` and to
+  memoisation. Identities must name their values, as fingerprints do.
 - No branching on a secret: `if`, `for`, `&&`, `||`, indexes, `is`,
   `as`, `assert`'s condition.
 - A record or list holding a secret is not itself a secret, but comparing
