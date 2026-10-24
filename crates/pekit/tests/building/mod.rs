@@ -16,25 +16,40 @@ pub fn host_tools() -> HostTools {
     pekit::host::HostSnapshot::of_host().tools()
 }
 
+/// How a test builds: on the execution platform's architecture `arch`,
+/// with the keychain's profile `profile`.
+#[derive(Clone, Copy, Debug)]
+pub struct Options<'a> {
+    /// The execution platform's architecture.
+    pub arch: &'a str,
+    /// The keychain's profile.
+    pub profile: &'a str,
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Self {
+            arch: "x86_64",
+            profile: "dev",
+        }
+    }
+}
+
 /// Builds `build <name>` of the workspace at `root`, its store and scratch
 /// beside it in `state`: what it came to, or its error as shown.
 pub fn build_in(root: &Path, state: &Path, name: &str) -> Result<Built, String> {
-    observed_in(root, state, name).0
+    observed_with(root, state, name, Options::default()).0
 }
 
-/// [`build_in`], with the events the build told.
-pub fn observed_in(root: &Path, state: &Path, name: &str) -> (Result<Built, String>, Vec<Event>) {
-    observed_on(root, state, name, "x86_64")
-}
-
-/// [`observed_in`], the execution platform's architecture `arch`.
-pub fn observed_on(
+/// [`build_in`] as `options` say, with the events the build told.
+pub fn observed_with(
     root: &Path,
     state: &Path,
     name: &str,
-    arch: &str,
+    Options { arch, profile }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
     let arch = arch.to_owned();
+    let profile = profile.to_owned();
     let root = root.to_path_buf();
     let state = state.to_path_buf();
     let name = name.to_owned();
@@ -62,6 +77,8 @@ pub fn observed_on(
                 },
                 host_tools: host_tools(),
                 reuse: true,
+                profile,
+                state: state.join("state"),
             };
             let built = build_observed(&mut loaded, &target, &settings, &mut |event| {
                 events.push(event.clone());

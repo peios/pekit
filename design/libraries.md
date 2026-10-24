@@ -306,3 +306,25 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
   pinned toolchains and environment is still noted as not hermetic; a
   workspace should be able to say that steps borrow nothing. And `make -j`
   inside a step waits for a jobserver shared between steps.
+- As built in D8, `keychain`:
+  - GCSL's `keychain` module reads its configuration from the contexts
+    `keychain_keys` and `keychain_profile`, so plain GCSL and pekit find a
+    secret the same way, and a host answers a hook, `Effects::keychain`,
+    for its identity and a file's path. Where nothing is configured, the
+    environment gives it, under pekit too, as CI delivers secrets.
+  - Pekit's identity is `profile/name#` and 16 bytes of HMAC-SHA-256 of
+    the contents under a random key of the machine's, in a new state
+    directory, `~/.local/state/pekit`, apart from the cache, since the
+    store is what can be shared. A changed key is a new identity; the
+    identity is no digest anyone can test guesses against; and two
+    machines identify one secret differently, so a step given a secret is
+    never found in a store another machine filled.
+  - A secret file is bound read-only at `/pekit-secrets/<profile>/<name>`
+    into each step given it, found in its arguments, captures and context
+    at any depth, and never staged, since staging stores. A step asking
+    the keychain itself is refused, as a fetch is.
+  - GCSL gains `Workspace::top_level_has`, so that a root context is set
+    from `pekitconf` only where the field is there: a `pekitconf` without
+    `toolchains` failed before.
+- Follow-up from D8: a developer's test key, generated rather than
+  configured, as the core model has it, waits for a generator.

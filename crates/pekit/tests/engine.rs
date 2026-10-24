@@ -9,7 +9,7 @@ use std::path::Path;
 
 use pekit::events::{Event, EventKind};
 
-use building::{build_in, observed_in, observed_on};
+use building::{Options, build_in, observed_with};
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -197,7 +197,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     );
     let dir = workspace(&text, &[("name.txt", "hi\n")]);
     let state = tempfile::tempdir().unwrap();
-    let (built, events) = observed_in(dir.path(), state.path(), "hello");
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
     built.unwrap();
     assert_eq!(
         kinds(&events),
@@ -222,7 +222,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
         }
     }
     // Again: each found in the store.
-    let (again, events) = observed_in(dir.path(), state.path(), "hello");
+    let (again, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
     again.unwrap();
     assert_eq!(
         kinds(&events),
@@ -245,15 +245,31 @@ fn a_target_is_evaluated_on_its_execution_platform() {
                 def build hello() { out = arch(\"{^host_platform.arch} for {^platform.arch}\") }\n";
     let dir = workspace(text, &[]);
     let state = tempfile::tempdir().unwrap();
-    observed_on(dir.path(), state.path(), "hello", "aarch64")
-        .0
-        .unwrap();
+    observed_with(
+        dir.path(),
+        state.path(),
+        "hello",
+        Options {
+            arch: "aarch64",
+            ..Options::default()
+        },
+    )
+    .0
+    .unwrap();
     let out = dir.path().join("pekit-out/app/hello/arch/out.txt");
     assert_eq!(fs::read_to_string(&out).unwrap(), "aarch64 for aarch64\n");
     // On another, another step.
-    let other = observed_on(dir.path(), state.path(), "hello", "riscv64")
-        .0
-        .unwrap();
+    let other = observed_with(
+        dir.path(),
+        state.path(),
+        "hello",
+        Options {
+            arch: "riscv64",
+            ..Options::default()
+        },
+    )
+    .0
+    .unwrap();
     assert_eq!((other.ran, other.cached), (1, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "riscv64 for riscv64\n");
 }
@@ -322,7 +338,7 @@ fn a_step_that_needs_a_failed_step_s_result_fails_with_its_error_unrun() {
     );
     let dir = workspace(&text, &[("name.txt", "n\n")]);
     let state = tempfile::tempdir().unwrap();
-    let (built, events) = observed_in(dir.path(), state.path(), "hello");
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
     let error = built.unwrap_err();
     assert!(
         error.starts_with("error: `/bin/sh` exited with status 4"),

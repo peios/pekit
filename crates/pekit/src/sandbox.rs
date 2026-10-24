@@ -25,7 +25,10 @@
 //!   no path of its: "it is outside the step". The temporary directories
 //!   GCSL makes for it, a `Dir.sandbox`'s copy among them, are in its own
 //!   output directory, `.pekit-tmp-<n>`, so that the files it gives from one
-//!   have paths no other step's have.
+//!   have paths no other step's have. A secret file it is given is at its
+//!   path under `/pekit-secrets`, bound read-only from where the keychain
+//!   found it, never staged (see [Secrets](crate::keychain#secrets)); the
+//!   keychain itself it cannot ask.
 //!
 //! A `Dir.sandbox`'s commands are run by each with the sandbox's copy as
 //! their `/`, in a bubblewrap of their own beside the step's, never inside
@@ -40,12 +43,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gcsl::eval::Effects;
+use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 
 use crate::layers::{Layers, Overlay};
 use crate::record::Kept;
+use crate::keychain::{IN_A_STEP, Keychain};
 use crate::store::Store;
 
 /// The workspace's root in the logical layout.
@@ -53,6 +59,9 @@ pub const WORKSPACE: &str = "/w";
 
 /// The outputs' root in the logical layout.
 pub const OUTPUTS: &str = "/pekit-out";
+
+/// The root of the secret files steps are given, in the logical layout.
+pub const SECRETS: &str = "/pekit-secrets";
 
 /// `path` under the logical root `root`, if it is it or under it: the rest,
 /// relative, `""` for the root itself.
@@ -168,6 +177,8 @@ pub struct HostView {
     temp: PathBuf,
     /// The number of the next temporary directory.
     temps: AtomicU32,
+    /// The keychain that answers for the build's secrets, if it has one.
+    keychain: Option<Arc<Keychain>>,
 }
 
 impl HostView {
@@ -182,7 +193,16 @@ impl HostView {
             here: here.to_owned(),
             temp: temp.to_path_buf(),
             temps: AtomicU32::new(0),
+            keychain: None,
         }
+    }
+
+    /// The view whose secrets `keychain` answers for (see
+    /// [Secrets](crate::keychain#secrets)).
+    #[must_use]
+    pub fn with_keychain(mut self, keychain: Arc<Keychain>) -> Self {
+        self.keychain = Some(keychain);
+        self
     }
 }
 
@@ -246,6 +266,15 @@ impl Effects for HostView {
         Ok(Path::new(WORKSPACE).join(&self.here))
     }
 
+    fn keychain(&self, secret: &KeychainSecret<'_>) -> Option<Result<KeychainAnswer, String>> {
+        let keychain = self.keychain.as_ref()?;
+        let host = match secret.file.map(|file| self.host_path(file)).transpose() {
+            Ok(host) => host,
+            Err(reason) => return Some(Err(reason)),
+        };
+        Some(keychain.answer(secret, host))
+    }
+
     fn temp_dir(&self) -> Option<Result<String, String>> {
         let number = self.temps.fetch_add(1, Ordering::Relaxed);
         let dir = self
@@ -289,6 +318,9 @@ pub struct StepSandbox {
     temps: AtomicU32,
     /// Its compositions and sandboxes.
     layers: Layers,
+    /// The secret files it is given, each its path as it sees it and where
+    /// it is on the host.
+    secrets: Vec<(String, PathBuf)>,
 }
 
 impl StepSandbox {
@@ -319,7 +351,16 @@ impl StepSandbox {
             host: HostTools::default(),
             temps: AtomicU32::new(0),
             layers,
+            secrets: Vec::new(),
         })
+    }
+
+    /// The sandbox given the secret files `secrets`, each its path as the
+    /// step sees it and where it is on the host, bound read-only.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: Vec<(String, PathBuf)>) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     /// The sandbox borrowing the host tools `tools`, which makes the step
@@ -378,6 +419,9 @@ impl Effects for StepSandbox {
         wrapped.arg("--bind").arg(own).arg(&self.own);
         // Its compositions, which nothing may change.
         for (path, host) in self.layers.sealed() {
+            wrapped.arg("--ro-bind").arg(host).arg(path);
+        }
+        for (path, host) in &self.secrets {
             wrapped.arg("--ro-bind").arg(host).arg(path);
         }
         wrapped
@@ -454,7 +498,15 @@ impl Effects for StepSandbox {
         if let Some(rest) = under(path, "/tmp") {
             return Ok(self.stage.join("tmp").join(rest));
         }
+        if let Some((_, host)) = self.secrets.iter().find(|(given, _)| given == path) {
+            return Ok(host.clone());
+        }
         Err("it is outside the step".to_owned())
+    }
+
+    fn keychain(&self, secret: &KeychainSecret<'_>) -> Option<Result<KeychainAnswer, String>> {
+        let _ = secret;
+        Some(Err(IN_A_STEP.to_owned()))
     }
 
     fn working_dir(&self) -> Result<PathBuf, String> {

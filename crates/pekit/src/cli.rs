@@ -7,14 +7,19 @@
 //! workspace the current directory is in. It shows the files the target
 //! gave, and how many steps ran and how many were found in the store.
 //! `--jobs N` runs at most `N` programs at once, by default as many as the
-//! machine has processors, and `--trace FILE` writes a Chrome trace of the
-//! build ([The trace](crate::trace#the-trace)). On a terminal, a line shows
-//! the steps running as it goes.
+//! machine has processors, `--profile NAME` uses the keychain's secrets of
+//! the profile `NAME`, `dev` by default ([Secrets](crate::keychain#secrets)),
+//! and `--trace FILE` writes a Chrome trace of the build ([The
+//! trace](crate::trace#the-trace)). On a terminal, a line shows the steps
+//! running as it goes.
 //!
 //! The store and the directories steps are staged in are under the cache
 //! directory: `$PEKIT_CACHE_DIR` if it is set, else `pekit` under
-//! `$XDG_CACHE_HOME`, else `~/.cache/pekit`. Outputs are copied to
-//! `pekit-out/` at the workspace's root.
+//! `$XDG_CACHE_HOME`, else `~/.cache/pekit`. What is this machine's alone,
+//! the key secrets' identities are hashed with, is in the state directory:
+//! `$PEKIT_STATE_DIR`, else `pekit` under `$XDG_STATE_HOME`, else
+//! `~/.local/state/pekit`. Outputs are copied to `pekit-out/` at the
+//! workspace's root.
 //!
 //! It exits with 0 once the target is built, 1 if it could not be, and 2
 //! for a command it does not understand.
@@ -62,6 +67,9 @@ struct BuildArgs {
     /// Write a Chrome trace of the build to this file.
     #[arg(long, value_name = "FILE")]
     trace: Option<PathBuf>,
+    /// The keychain's profile, whose secrets the build uses.
+    #[arg(long, default_value = "dev")]
+    profile: String,
 }
 
 /// Where the command writes: what it shows, its warnings and errors, and
@@ -139,6 +147,8 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         execution,
         reuse: host.fingerprint.is_some(),
         host_tools: host.tools(),
+        profile: args.profile.clone(),
+        state: state_dir(),
     };
     let mut trace = Trace::new();
     let mut progress = Progress::default();
@@ -266,6 +276,19 @@ fn cache_dir() -> PathBuf {
     }
     let home = var("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     home.join(".cache/pekit")
+}
+
+/// The state directory (see [Commands](#commands)).
+fn state_dir() -> PathBuf {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if let Some(dir) = var("PEKIT_STATE_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = var("XDG_STATE_HOME") {
+        return PathBuf::from(dir).join("pekit");
+    }
+    let home = var("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    home.join(".local/state/pekit")
 }
 
 /// The logical path `path` as someone at `cwd` finds it: on the host, under

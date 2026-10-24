@@ -11,6 +11,7 @@ pub mod engine;
 pub mod events;
 pub mod fetch;
 pub mod host;
+pub mod keychain;
 pub mod layers;
 pub mod load;
 pub mod platform;

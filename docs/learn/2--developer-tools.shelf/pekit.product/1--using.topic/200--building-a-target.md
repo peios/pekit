@@ -94,6 +94,41 @@ changed compiler rebuilds exactly the steps that use it. A pinned
 toolchain's programs run on its own runtime, never on the host's
 libraries. See ~pekit/building-c for the gcc library itself.
 
+## Secrets
+
+A build asks GCSL's `keychain` module for its secrets by name, such as
+`keychain.file("module-signing")`, in a parameter default, so that the
+step is given the secret. Say where each one is in `pekitconf`, for each
+profile:
+
+```text
+import keychain
+
+pekitconf = {keychain = [
+    {profile = "dev"; name = "module-signing"; file = "keys/test.pem"},
+    {profile = "release"; name = "module-signing"; file = "/run/secrets/module-signing.pem"},
+]}
+```
+
+A relative path is relative to the workspace's root. `pekit build
+--profile release` uses the `release` entries; the profile is `dev`
+otherwise. A secret with no entry comes from the environment, as in plain
+GCSL: `$GCSL_SECRET_FILE_MODULE_SIGNING` names its file.
+
+A step given a secret file finds it at `/pekit-secrets/<profile>/<name>`,
+read-only, the same path on every machine. No other step sees it, and
+pekit never copies it into the store. What the step makes with it, such
+as a signed file, is kept as any output is. A step can't ask the keychain
+itself: give it the secret instead.
+
+Pekit identifies a secret by its profile, its name, and a hash of its
+contents keyed by this machine's own key, kept in the state directory,
+`~/.local/state/pekit` unless `$PEKIT_STATE_DIR` or `$XDG_STATE_HOME`
+says otherwise. A changed key is a new identity, so nothing made with the
+old one is reused, and the identity tells nothing about the key itself.
+Two machines identify the same secret differently, so a step given a
+secret runs on each machine that builds it.
+
 ## Libraries
 
 A build file imports a library by its path, such as

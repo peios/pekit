@@ -39,13 +39,14 @@ use gcsl::eval::Effects;
 use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
 use gcsl::workspace::graph::RootField;
-use gcsl::workspace::{InvokeError, Progress};
+use gcsl::workspace::{InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
 use crate::fetch::IN_A_STEP;
 use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
+use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
@@ -63,6 +64,12 @@ const PEKITCONF: &str = "pekitconf";
 
 /// The context the `toolchain` module registers toolchains in.
 const TOOLCHAINS: &str = "toolchains";
+
+/// The context of the `keychain` module's profile.
+const KEYCHAIN_PROFILE: &str = "keychain_profile";
+
+/// The context of the `keychain` module's configuration.
+const KEYCHAIN_KEYS: &str = "keychain_keys";
 
 /// How many symbolic links a path is followed through, as Linux follows
 /// them, before it is refused.
@@ -133,6 +140,12 @@ pub struct Settings {
     /// [The host snapshot](crate::host#the-host-snapshot)). Every step that
     /// succeeds is recorded either way.
     pub reuse: bool,
+    /// The keychain's profile, set as `^keychain_profile` where the
+    /// workspace declares it (see [Secrets](crate::keychain#secrets)).
+    pub profile: String,
+    /// This machine's own state, never shared as a store can be: the key
+    /// secrets' identities are hashed with.
+    pub state: PathBuf,
 }
 
 /// What building a target came to.
@@ -206,30 +219,50 @@ pub fn build_observed(
 ) -> Result<Built, BuildError> {
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
-    let host = Arc::new(HostView::new(
-        &loaded.root,
-        &settings.outputs,
-        &target.definition.dir,
-        &settings.scratch,
-    ));
+    let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
+        engine(&format!(
+            "cannot open the keychain's key in `{}`: {error}",
+            settings.state.display()
+        ))
+    })?);
+    let host = Arc::new(
+        HostView::new(
+            &loaded.root,
+            &settings.outputs,
+            &target.definition.dir,
+            &settings.scratch,
+        )
+        .with_keychain(Arc::clone(&keychain)),
+    );
     let mut contexts = Vec::new();
     if loaded.workspace.declares_context(HOST_PLATFORM) {
         let platform = loaded.workspace.from_plain(&settings.execution.plain());
         contexts.push((HOST_PLATFORM.to_owned(), platform));
     }
-    // The workspace's toolchains, from `workspace.gcsl`'s `pekitconf`, where
-    // the `toolchain` module is loaded and the field is there.
+    if loaded.workspace.declares_context(KEYCHAIN_PROFILE) {
+        let profile = Value::Str(Rc::from(settings.profile.as_str()));
+        contexts.push((KEYCHAIN_PROFILE.to_owned(), profile));
+    }
+    // The workspace's toolchains and keychain, from `workspace.gcsl`'s
+    // `pekitconf`, where the module that declares each context is loaded
+    // and the field is there.
     let mut fields = Vec::new();
-    if loaded.workspace.declares_context(TOOLCHAINS)
-        && let Some(file) = loaded.workspace.file(WORKSPACE_FILE)
-        && loaded.workspace.top_level(file, PEKITCONF).is_some()
-    {
-        fields.push(RootField {
-            context: TOOLCHAINS,
-            file,
-            field: PEKITCONF,
-            path: &["toolchains"],
-        });
+    if let Some(file) = loaded.workspace.file(WORKSPACE_FILE) {
+        for (context, path) in [
+            (TOOLCHAINS, &["toolchains"] as &[&str]),
+            (KEYCHAIN_KEYS, &["keychain"]),
+        ] {
+            if loaded.workspace.declares_context(context)
+                && loaded.workspace.top_level_has(file, PEKITCONF, path)
+            {
+                fields.push(RootField {
+                    context,
+                    file,
+                    field: PEKITCONF,
+                    path,
+                });
+            }
+        }
     }
     let call = loaded
         .workspace
@@ -261,6 +294,7 @@ pub fn build_observed(
         in_flight: HashMap::new(),
         events,
         began: Instant::now(),
+        keychain,
         code_table,
         target_dir: target.qualified().trim_start_matches('/').to_owned(),
         ran: 0,
@@ -304,12 +338,19 @@ fn inline(_: &[Attribute]) -> bool {
     false
 }
 
+/// A secret file a step is given: its path as the step sees it, and where
+/// it is on the host (see [Secrets](crate::keychain#secrets)).
+type SecretFile = (String, PathBuf);
+
 /// A step the engine is running (see [Building](#building)).
 struct StepRun {
     /// Its sandbox.
     sandbox: Arc<StepSandbox>,
     /// What it is given, by logical path, which each attempt is staged with.
     given: Vec<(String, Kept)>,
+    /// The secret files it is given, by logical path, and where each is on
+    /// the host, which each attempt has bound.
+    secrets: Vec<SecretFile>,
     /// Its attempt's number, from 0.
     attempt: u32,
     /// Its receipt.
@@ -357,6 +398,8 @@ struct Run<'a> {
     events: &'a mut dyn FnMut(&Event),
     /// When the build began.
     began: Instant,
+    /// The keychain, which knows where each secret file given is.
+    keychain: Arc<Keychain>,
     /// Each source's name and contents' digest, by input number: what a
     /// step's code and the functions it reads are keyed by.
     code_table: Rc<[(String, Digest)]>,
@@ -566,6 +609,17 @@ impl Run<'_> {
             step: step.map(|step| self.step_name(step)),
             effect: effect_label(&job),
         };
+        // A step is given its secrets, and never asks the keychain itself.
+        if step.is_some()
+            && matches!(
+                job.builtin(),
+                Builtin::KeychainString | Builtin::KeychainFile
+            )
+        {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            self.finish_now(id, Err(Diagnostic::error(keychain::IN_A_STEP, span)));
+            return Ok(());
+        }
         // A fetch is pekit's to answer, and never a step's.
         let work = if job.builtin() == Builtin::Fetch {
             let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
@@ -800,6 +854,73 @@ impl Run<'_> {
             .unwrap_or_else(|| format!("step-{}", id.number()))
     }
 
+    /// The secret files `inputs` hold, in their arguments, captures or
+    /// context, at any depth, each by its path as a step sees it and where
+    /// it is on the host: bound into the step's sandbox, never staged, since
+    /// staging stores (see [Secrets](crate::keychain#secrets)). A
+    /// keychain's file is where the keychain found it, and a workspace
+    /// file where it is in the workspace.
+    ///
+    /// # Errors
+    ///
+    /// A secret's file that is neither.
+    fn secret_files(&self, inputs: &StepInputs) -> Result<Vec<SecretFile>, String> {
+        let mut found: Vec<SecretFile> = Vec::new();
+        let mut pending: Vec<&Plain> = inputs
+            .args
+            .iter()
+            .chain(&inputs.captures)
+            .chain(inputs.context.iter().map(|(_, value)| value))
+            .collect();
+        while let Some(plain) = pending.pop() {
+            let value = match plain {
+                Plain::Secret { value, .. } => value,
+                Plain::Record(fields) => {
+                    pending.extend(fields.iter().map(|(_, value)| value));
+                    continue;
+                }
+                Plain::List(items) => {
+                    pending.extend(items);
+                    continue;
+                }
+                Plain::Variant {
+                    payload: Some(payload),
+                    ..
+                } => {
+                    pending.push(payload);
+                    continue;
+                }
+                Plain::Closure { captures, .. } => {
+                    pending.extend(captures);
+                    continue;
+                }
+                _ => continue,
+            };
+            for (path, _) in value.files() {
+                if found.iter().any(|(known, _)| known == path) {
+                    continue;
+                }
+                let host = match self.keychain.host_file(path) {
+                    Some(host) => host,
+                    None => match path
+                        .strip_prefix(WORKSPACE)
+                        .and_then(|rest| rest.strip_prefix('/'))
+                    {
+                        Some(rest) => self.loaded.root.join(rest),
+                        None => {
+                            return Err(format!(
+                                "`{path}` is a secret's file a step cannot be given: only the \
+                                 keychain's and the workspace's are"
+                            ));
+                        }
+                    },
+                };
+                found.push((path.to_owned(), host));
+            }
+        }
+        Ok(found)
+    }
+
     /// Starts the step `id`: from its record if the store has one for its
     /// receipt, else in a sandbox of its own, its inputs staged.
     fn start_step(&mut self, id: NodeId) -> Result<(), BuildError> {
@@ -862,13 +983,15 @@ impl Run<'_> {
             return Ok(());
         }
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
-        let sandbox = self.fresh_sandbox(id, &own, 0, &given)?;
+        let secrets = self.secret_files(&inputs).map_err(BuildError::Engine)?;
+        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets))?;
         let started = Instant::now();
         self.steps.insert(
             id,
             StepRun {
                 sandbox,
                 given,
+                secrets,
                 attempt: 0,
                 receipt,
                 started,
@@ -893,7 +1016,7 @@ impl Run<'_> {
         id: NodeId,
         own: &str,
         attempt: u32,
-        given: &[(String, Kept)],
+        (given, secrets): (&[(String, Kept)], &[SecretFile]),
     ) -> Result<Arc<StepSandbox>, BuildError> {
         let stage = self.stage_dir(id, attempt);
         if stage.exists() {
@@ -902,7 +1025,8 @@ impl Run<'_> {
         let staged = (|| {
             let sandbox = StepSandbox::new(&stage, own)
                 .map_err(|error| engine(&error))?
-                .with_host(&self.settings.host_tools);
+                .with_host(&self.settings.host_tools)
+                .with_secrets(secrets.to_vec());
             // Each directory before what is in it, which it stages: so a
             // file of a staged directory is as the directory's tree has it, a
             // symbolic link a link, not the file it leads to.
@@ -1160,7 +1284,7 @@ impl Run<'_> {
         self.unstage(id, &step)?;
         let own = format!("{}/{name}", self.target_dir);
         let attempt = step.attempt + 1;
-        let sandbox = self.fresh_sandbox(id, &own, attempt, &step.given)?;
+        let sandbox = self.fresh_sandbox(id, &own, attempt, (&step.given, &step.secrets))?;
         self.graph.forget_unit(STEP_UNITS + id.number());
         self.steps.insert(
             id,
