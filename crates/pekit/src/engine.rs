@@ -42,6 +42,7 @@ use gcsl::workspace::{InvokeError, Progress};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
+use crate::layers::remove_tree;
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
@@ -313,7 +314,7 @@ impl Drop for Run<'_> {
     /// the build fails.
     fn drop(&mut self) {
         for (&id, step) in &self.steps {
-            let _ = std::fs::remove_dir_all(self.stage_dir(id, step.attempt));
+            let _ = remove_tree(&self.stage_dir(id, step.attempt));
         }
     }
 }
@@ -619,7 +620,7 @@ impl Run<'_> {
     ) -> Result<Arc<StepSandbox>, BuildError> {
         let stage = self.stage_dir(id, attempt);
         if stage.exists() {
-            std::fs::remove_dir_all(&stage).map_err(|error| engine(&error))?;
+            remove_tree(&stage).map_err(|error| engine(&error))?;
         }
         let staged = (|| {
             let sandbox = StepSandbox::new(&stage, own)
@@ -633,7 +634,7 @@ impl Run<'_> {
             Ok(Arc::new(sandbox))
         })();
         if staged.is_err() {
-            let _ = std::fs::remove_dir_all(&stage);
+            let _ = remove_tree(&stage);
         }
         staged
     }
@@ -652,7 +653,7 @@ impl Run<'_> {
     fn unstage(&self, id: NodeId, step: &StepRun) -> Result<(), BuildError> {
         let stage = self.stage_dir(id, step.attempt);
         if stage.exists() {
-            std::fs::remove_dir_all(&stage).map_err(|error| engine(&error))?;
+            remove_tree(&stage).map_err(|error| engine(&error))?;
         }
         Ok(())
     }

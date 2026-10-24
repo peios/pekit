@@ -419,3 +419,94 @@ fn a_step_that_needs_a_failed_step_s_result_fails_with_its_error_unrun() {
         "{events:?}"
     );
 }
+
+#[test]
+fn a_step_s_compositions_link_its_inputs_and_no_program_changes_them() {
+    let text = "import fs\n\
+                #[hermetic] fn probe(src: File) -> File {\n\
+                \x20   let d = fs.compose_dir({\"in/x\" = src})\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"stat -c %h {d.path}/in/x > out.txt; \
+                (echo y > {d.path}/new || echo refused) >> out.txt 2>/dev/null; \
+                (echo y >> {d.path}/in/x || echo refused) >> out.txt 2>/dev/null\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = probe(file(\"x.txt\")) }\n";
+    let dir = workspace(text, &[("x.txt", "x\n")]);
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "hello").unwrap();
+    let out = dir.path().join("pekit-out/app/hello/probe/out.txt");
+    let lines: Vec<String> = fs::read_to_string(out)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    // Linked, not copied: the store's blob, its staged input and the
+    // composition's entry are one file.
+    assert!(lines[0].parse::<u32>().unwrap() >= 3, "{lines:?}");
+    assert_eq!(lines[1..], ["refused", "refused"]);
+}
+
+#[test]
+fn a_step_s_sandbox_is_an_overlay_read_upper_over_lower() {
+    let busybox = Path::new("/usr/bin/busybox");
+    if !busybox.exists() {
+        eprintln!("skipped: no static busybox on this host");
+        return;
+    }
+    let text = "#[hermetic] fn inside(root: Dir) -> {made: File, bin: Dir, sub: Dir} {\n\
+                \x20   let s = root.sandbox()\n\
+                \x20   let a = s.exec(\"/bin/sh\", \"-c\", \"echo one > /made.txt; echo new > /bin/extra\")\n\
+                \x20   let b = s.exec(\"/bin/sh\", \"-c\", \"echo two >> /made.txt; mv /bin/old /old; mkdir /sub; echo s > /sub/f\")\n\
+                \x20   made = s.file(\"/made.txt\")\n\
+                \x20   bin = s.dir(\"/bin\")\n\
+                \x20   sub = s.dir(\"/sub\")\n\
+                }\n\
+                #[hermetic] fn pick(i: {made: File, bin: Dir, sub: Dir}) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {i.made.path} > out.txt; ls {i.bin.path} >> out.txt; ls {i.sub.path} >> out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = pick(inside(dir(\"root\"))) }\n";
+    let dir = workspace(text, &[("root/bin/old", "old\n")]);
+    let bin = dir.path().join("app/root/bin");
+    fs::copy(busybox, bin.join("busybox")).unwrap();
+    std::os::unix::fs::symlink("busybox", bin.join("sh")).unwrap();
+    std::os::unix::fs::symlink("busybox", bin.join("mv")).unwrap();
+    std::os::unix::fs::symlink("busybox", bin.join("mkdir")).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "hello").unwrap();
+    let out = dir.path().join("pekit-out/app/hello/pick/out.txt");
+    // Each command's writes kept for the next; `/bin` the lower's and the
+    // upper's, but what was moved away; `/sub` the upper's alone.
+    assert_eq!(
+        fs::read_to_string(out).unwrap(),
+        "one\ntwo\nbusybox\nextra\nmkdir\nmv\nsh\nf\n"
+    );
+    // The workspace's directory is untouched.
+    assert!(dir.path().join("app/root/bin/old").exists());
+    assert!(!dir.path().join("app/root/made.txt").exists());
+}
+
+#[test]
+fn a_sandbox_of_what_the_step_changes_is_a_copy() {
+    let busybox = Path::new("/usr/bin/busybox");
+    if !busybox.exists() {
+        eprintln!("skipped: no static busybox on this host");
+        return;
+    }
+    let text = "#[hermetic] fn inside(bb: File) -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"mkdir -p made/bin && cp {bb.path} made/bin/sh\"])\n\
+                \x20   let s = dir(\"made\").sandbox()\n\
+                \x20   let w = s.exec(\"/bin/sh\", \"-c\", \"echo copied > /x\")\n\
+                \x20   s.file(\"/x\")\n\
+                }\n\
+                def build hello() { out = inside(file(\"busybox\")) }\n";
+    let dir = workspace(text, &[]);
+    fs::copy(busybox, dir.path().join("app/busybox")).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "hello").unwrap();
+    let [(path, _)] = built.value.files()[..] else {
+        panic!("{:?}", built.value);
+    };
+    let out = dir.path().join(path.trim_start_matches('/'));
+    assert_eq!(fs::read_to_string(out).unwrap(), "copied\n");
+}

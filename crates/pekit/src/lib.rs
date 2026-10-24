@@ -10,6 +10,7 @@ pub mod cli;
 pub mod engine;
 pub mod events;
 pub mod host;
+pub mod layers;
 pub mod load;
 pub mod platform;
 pub mod receipt;

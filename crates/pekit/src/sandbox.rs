@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use gcsl::eval::Effects;
 
+use crate::layers::{Layers, Overlay};
 use crate::record::Kept;
 use crate::store::Store;
 
@@ -110,11 +111,19 @@ enum Isolation {
     Hermetic,
 }
 
-/// The command that runs `command`, a program of a sandbox whose copy is at
-/// `root` on the host, with the copy as its `/`, cut off as `isolation`
-/// says: one bubblewrap, never one inside another, which a host such as
-/// Ubuntu forbids.
-fn sandboxed(root: &Path, command: &Command, isolation: Isolation) -> Result<Command, String> {
+/// Where a sandbox's root is on the host.
+enum Root {
+    /// A directory of its own.
+    Dir(PathBuf),
+    /// An overlay.
+    Overlay(Overlay),
+}
+
+/// The command that runs `command`, a program of a sandbox whose root is
+/// `root` on the host, with it as its `/`, cut off as `isolation` says: one
+/// bubblewrap, never one inside another, which a host such as Ubuntu
+/// forbids.
+fn sandboxed(root: &Root, command: &Command, isolation: Isolation) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
     let mut wrapped = Command::new(bwrap()?);
     match isolation {
@@ -122,7 +131,16 @@ fn sandboxed(root: &Path, command: &Command, isolation: Isolation) -> Result<Com
         Isolation::Hermetic => wrapped.args(["--unshare-all", "--new-session"]),
     };
     wrapped.arg("--die-with-parent");
-    wrapped.arg("--bind").arg(root).arg("/");
+    match root {
+        Root::Dir(root) => wrapped.arg("--bind").arg(root).arg("/"),
+        Root::Overlay(overlay) => wrapped
+            .arg("--overlay-src")
+            .arg(&overlay.lower)
+            .arg("--overlay")
+            .arg(&overlay.upper)
+            .arg(&overlay.work)
+            .arg("/"),
+    };
     wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
     wrapped.args(["--chdir", cwd.as_deref().unwrap_or("/")]);
     wrapped.arg("--clearenv");
@@ -210,7 +228,7 @@ impl Effects for HostView {
     fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
         Some(
             self.host_path(root)
-                .and_then(|root| sandboxed(&root, &command, Isolation::Plain)),
+                .and_then(|root| sandboxed(&Root::Dir(root), &command, Isolation::Plain)),
         )
     }
 
@@ -269,6 +287,8 @@ pub struct StepSandbox {
     host: HostTools,
     /// The number of the next temporary directory.
     temps: AtomicU32,
+    /// Its compositions and sandboxes.
+    layers: Layers,
 }
 
 impl StepSandbox {
@@ -285,12 +305,20 @@ impl StepSandbox {
             fs::create_dir_all(stage.join(part))?;
         }
         let relative = under(&own, OUTPUTS).unwrap_or_default();
-        fs::create_dir_all(stage.join("out").join(relative))?;
+        let own_host = stage.join("out").join(relative);
+        fs::create_dir_all(&own_host)?;
+        fs::create_dir_all(stage.join("layers"))?;
+        let layers = Layers::new(
+            vec![stage.join("w"), stage.join("out")],
+            &own_host,
+            &stage.join("layers"),
+        );
         Ok(Self {
             stage: stage.to_path_buf(),
             own,
             host: HostTools::default(),
             temps: AtomicU32::new(0),
+            layers,
         })
     }
 
@@ -348,6 +376,10 @@ impl Effects for StepSandbox {
             .arg(OUTPUTS);
         let own = self.host_path(&self.own)?;
         wrapped.arg("--bind").arg(own).arg(&self.own);
+        // Its compositions, which nothing may change.
+        for (path, host) in self.layers.sealed() {
+            wrapped.arg("--ro-bind").arg(host).arg(path);
+        }
         wrapped
             .arg("--bind")
             .arg(self.stage.join("tmp"))
@@ -376,13 +408,43 @@ impl Effects for StepSandbox {
     }
 
     fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
-        Some(
-            self.host_path(root)
-                .and_then(|root| sandboxed(&root, &command, Isolation::Hermetic)),
-        )
+        let root = match self.layers.overlay(root) {
+            Some(overlay) => Root::Overlay(overlay),
+            None => match self.host_path(root) {
+                Ok(root) => Root::Dir(root),
+                Err(error) => return Some(Err(error)),
+            },
+        };
+        Some(sandboxed(&root, &command, Isolation::Hermetic))
+    }
+
+    fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {
+        self.layers.place_file(source, target)
+    }
+
+    fn composed(&self, root: &str) {
+        if let Ok(host) = self.host_path(root) {
+            // A composition that cannot be sealed is left as it is: it is
+            // still the step's, and correct, only not guarded.
+            let _ = self.layers.composed(root, &host);
+        }
+    }
+
+    fn make_sandbox(&self, source: &str, root: &str) -> Option<Result<(), String>> {
+        let (Ok(lower), Ok(upper)) = (self.host_path(source), self.host_path(root)) else {
+            return None;
+        };
+        match self.layers.make_sandbox(root, &lower, &upper) {
+            Ok(true) => Some(Ok(())),
+            Ok(false) => None,
+            Err(error) => Some(Err(error.to_string())),
+        }
     }
 
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
+        if let Some(resolved) = self.layers.resolve(path) {
+            return resolved.map_err(|error| error.to_string());
+        }
         if let Some(rest) = under(path, WORKSPACE) {
             return Ok(self.stage.join("w").join(rest));
         }
