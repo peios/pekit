@@ -1,0 +1,4 @@
+title = "Pekit"
+monogram = "Pk"
+color = "#f59e0b"
+description = "A build system whose build files are GCSL."

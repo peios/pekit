@@ -1,0 +1,11 @@
+#!/bin/sh
+# Check the authored Learn contribution with a caller-selected Trail build.
+set -eu
+
+repo=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
+trail=${TRAIL:-trail}
+"$trail" lint docs/learn
+output=$(mktemp -d "${TMPDIR:-/tmp}/pekit-learn.XXXXXXXX")
+trap 'rm -rf -- "$output"' EXIT HUP INT TERM
+"$trail" build docs/learn --strict --no-cache --out "$output"

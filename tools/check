@@ -1,0 +1,8 @@
+#!/bin/sh
+# The gate: style, strict lints, and every test.
+set -eu
+repo=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
+python3 tools/style-check.py
+cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
+cargo +1.98.1 test --workspace --locked

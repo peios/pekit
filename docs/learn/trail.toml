@@ -1,0 +1,24 @@
+sitename = "Peios Learn"
+title = "Pekit"
+description = "Building with pekit."
+footer = "Peios Learn"
+featured = ["pekit"]
+
+[lint]
+rules = [
+  "spelling", "em-dash", "double-hyphen", "curly-quotes",
+  "invisible-characters", "exclamation", "ampersand", "double-space",
+  "title-case", "heading-case", "heading-punctuation", "heading-levels",
+  "code-language", "shell-prompt", "line-length", "hex-case", "serial-comma",
+]
+line_length = 78
+proper_nouns = [
+  "GCSL", "LSP", "REPL", "UTF-16", "Pekit", "Peios", "Fenesh", "Fenestra", "Gexora", "WebP", "AVIF", "Linux", "Bazel", "Rust", "Cargo", "SSH", "POSIX", "Argon2id",
+  "NSS", "SID", "SIDs", "API", "ABI", "SDK", "SYSTEM", "GXWI",
+  "regman", "evman", "peinit", "authd", "eventd", "evctl", "KMES",
+  "KACS", "LCS", "PSPU", "PSPK", "PGSS", "PCDS", "SQL", "SQLite",
+  "WAL", "MessagePack", "GUID", "GUIDs", "Loom", "JSON", "UTF-8",
+]
+
+[lint.spelling]
+banned-words = ["banned-words.txt"]

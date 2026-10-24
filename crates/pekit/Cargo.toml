@@ -1,0 +1,19 @@
+[package]
+name = "pekit"
+description = "Pekit, a build system that runs GCSL build files as an action graph."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# GCSL's branch for PEI-1595, until it is merged into GCSL's main.
+gcsl = { path = "../../../local/worktrees/gcsl-1595/crates/gcsl" }
+gcsl-disk = { path = "../../../local/worktrees/gcsl-1595/crates/gcsl-disk" }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints]
+workspace = true

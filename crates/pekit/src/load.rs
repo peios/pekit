@@ -1,0 +1,139 @@
+//! Loading a workspace: finding its root, reading its files and checking
+//! them through GCSL.
+//!
+//! # Loading
+//!
+//! A workspace is the directory tree under a `workspace.gcsl`, found from a
+//! directory by its nearest ancestor that holds one ([`gcsl_disk::find_root`]).
+//! Its files are read as `gcsl-disk` reads them for the `gcsl` command
+//! ([`gcsl_disk::read_workspace`]), every nested workspace left out, and
+//! checked beside GCSL's standard library ([`gcsl::workspace::check_with_standard`]).
+//! The sources are kept, the standard files first, so that a diagnostic,
+//! which names its file by input number, is shown against its file
+//! ([`Loaded::render`], [`LoadError::render`]).
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use gcsl::workspace::{self, Workspace};
+use gcsl::{Diagnostic, SourceFile};
+
+/// A workspace loaded and checked (see [Loading](#loading)).
+#[derive(Debug)]
+pub struct Loaded {
+    /// Its root, canonical.
+    pub root: PathBuf,
+    /// The directory it was loaded from, relative to the root, `/`
+    /// separated: empty for the root itself.
+    pub here: String,
+    /// Every source, the standard files first, each named as it is shown,
+    /// in input order: what diagnostics are shown against.
+    pub sources: Vec<SourceFile>,
+    /// The checked workspace.
+    pub workspace: Workspace,
+}
+
+impl Loaded {
+    /// `diagnostics`, each shown against the source of its input.
+    #[must_use]
+    pub fn render(&self, diagnostics: &[Diagnostic]) -> String {
+        render(&self.sources, diagnostics)
+    }
+}
+
+/// Why a workspace could not be loaded (see [Loading](#loading)).
+#[derive(Debug)]
+pub enum LoadError {
+    /// No directory from the one given up holds a `workspace.gcsl`.
+    NoWorkspace {
+        /// The directory given.
+        dir: PathBuf,
+    },
+    /// A file or directory of the workspace could not be read.
+    Read(gcsl_disk::ReadError),
+    /// The workspace's check failed.
+    Check {
+        /// Every source, as [`Loaded::sources`] has them.
+        sources: Vec<SourceFile>,
+        /// What the check found.
+        diagnostics: Vec<Diagnostic>,
+    },
+}
+
+impl LoadError {
+    /// The error as the `pekit` command shows it.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            LoadError::NoWorkspace { dir } => format!(
+                "error: no workspace here: neither {} nor any directory above it holds a \
+                 workspace.gcsl\n",
+                dir.display()
+            ),
+            LoadError::Read(error) => format!("error: {error}\n"),
+            LoadError::Check {
+                sources,
+                diagnostics,
+            } => render(sources, diagnostics),
+        }
+    }
+}
+
+/// Loads the workspace that `dir` is in (see [Loading](#loading)). Like all
+/// of GCSL's pipeline, it must run on a thread with at least
+/// [`gcsl::STACK_SIZE`] bytes of stack.
+///
+/// # Errors
+///
+/// That no workspace holds `dir`, that a file of it cannot be read, or
+/// what its check found.
+pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
+    let canonical = dir.canonicalize().map_err(|_| LoadError::NoWorkspace {
+        dir: dir.to_path_buf(),
+    })?;
+    let Some(root) = gcsl_disk::find_root(&canonical) else {
+        return Err(LoadError::NoWorkspace {
+            dir: dir.to_path_buf(),
+        });
+    };
+    let root = root.to_path_buf();
+    let here = canonical
+        .strip_prefix(&root)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let read = gcsl_disk::read_workspace(&root, None).map_err(LoadError::Read)?;
+    let (standard, checked) =
+        workspace::check_with_standard(&read.relative, &read.nested, &root.to_string_lossy());
+    let mut sources = standard;
+    sources.extend(read.shown);
+    match checked {
+        Ok(workspace) => Ok(Loaded {
+            root,
+            here,
+            sources,
+            workspace,
+        }),
+        Err(diagnostics) => Err(LoadError::Check {
+            sources,
+            diagnostics,
+        }),
+    }
+}
+
+/// `diagnostics`, each shown against the source of its input in `sources`,
+/// or with no source if it names none.
+fn render(sources: &[SourceFile], diagnostics: &[Diagnostic]) -> String {
+    let mut shown = String::new();
+    for diagnostic in diagnostics {
+        let source = diagnostic
+            .input
+            .and_then(|input| sources.get(input as usize));
+        match source {
+            Some(source) => shown.push_str(&diagnostic.render(source)),
+            None => {
+                let _ = writeln!(shown, "error: {}", diagnostic.message);
+            }
+        }
+    }
+    shown
+}
