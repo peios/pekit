@@ -209,10 +209,109 @@ existing program changes meaning.
 - No exabyte units.
 - No float arithmetic on quantities.
 
+## 6. Host-declared attributes with typed arguments
+
+### Rule
+
+An attribute's arguments are a record, and declaring an attribute means
+declaring the record type of its arguments, marked as an attribute:
+
+```gcsl
+#[attribute] type hermetic = {on: Bool = true}
+#[attribute] type scratch = {}
+#[attribute] type device = {name: String}
+```
+
+- **Declaration.** `#[attribute]` is a new built-in attribute, allowed only
+  on a `type` item. The type must be a record type, written or named,
+  whose fields are all of constant-able types: `Int`, `Float`, `Bool`,
+  `String`, `Duration`, `Size`, or lists and records of those, with no
+  rest-field. Otherwise the error is "an attribute's arguments are a record
+  of constants", at the type. An attribute is still a type, usable as one;
+  it is simply also an attribute.
+- **Namespace.** Attributes are types, so they live in the types'
+  namespace and follow its rules: directories, views, member and `*`
+  imports, sessions and conflicts. A host's attributes come from an
+  importable module, for example `import hermetic from pekit/attributes`,
+  that plain GCSL accepts. A misspelt attribute is still an error, "unknown
+  attribute `x`", with a suggestion from the attributes in view. A type that
+  is not marked `#[attribute]` gives "`PackageDef` is not an attribute",
+  noted "an attribute is a `type` marked `#[attribute]`".
+- **Built-in attributes.** `shadowable`, `def_type`, `no_prelude`,
+  `attribute`, `retry` and `timeout` are built in, and an `#[attribute]`
+  type may not be named like one. `retry` is `{times: Int}` and `timeout`
+  is `{limit: Duration}`. They are core GCSL, so they are not prelude
+  types: a user's `type retry = ...` is still a type, and does not
+  conflict.
+- **Use.** `#[NAME]` or `#[NAME(ARGS)]`. The arguments are constants, by the
+  rule for constant defaults. They are named, `#[device(name = "kvm")]`,
+  or, for an attribute of exactly one field, one positional argument:
+  `#[retry(3)]`, `#[timeout(30s)]`, `#[hermetic(false)]`. Each argument is
+  checked against its field's type, as a constant default is. Fields left
+  out take their defaults, and a field with no default left out is
+  "`device` needs `name`". `#[hermetic()]` is the same as `#[hermetic]`.
+  Bare words, `#[device(kvm)]`, wait for extensible enums (feature 9), so
+  for now one is an ordinary unknown name. Qualified names, `#[pk.hermetic]`,
+  are out of scope, since the lexer's shape is a single identifier.
+  Arguments on an inner attribute, `#![x(...)]`, are an error.
+- **Targets.** A named `fn` item at any level, a `def`, a definition made
+  with a def-type, and a def-type itself. Anything else (a `let`, a field,
+  a function expression, an import, a `type` other than through
+  `#[attribute]`) is "attributes apply to functions: a `fn`, a `def` or a
+  definition". One attribute written twice on one item is "`#[retry]` is
+  written twice".
+- **Def-type defaults.** Attributes on a def-type are defaults for its
+  definitions. A definition's own attribute of the same name replaces the
+  def-type's whole record, not field by field, so `#[hermetic(false)]` on a
+  test overrides the `test` def-type's `#[hermetic]`.
+- **Pass-through.** Every function's code carries its resolved attributes,
+  each an `Attribute { id: AttributeId, args: Constant }`. `AttributeId`
+  identifies the declaration, not just the name: the declaring module's
+  path and the type's name, or a built-in. A host reads them from any
+  closure (`Closure::attributes()`), and in layer B from every action-graph
+  node. Plain GCSL ignores host attributes.
+- **Retry and timeout semantics (6b).** The design says plain GCSL honours
+  `#[retry]` and `#[timeout]`. Feature 6 declares, checks and passes them
+  through, and they are inert until 6b. Under 6b, an impure function's call
+  that fails with a panic is run again up to `times` more times. A call that
+  runs longer than `limit` fails, with any child process killed. Retry on a
+  pure function is a warning, since rerunning it cannot change the result.
+
+### Implementation outline
+
+- **Lexer.** Besides `#[NAME]`, the shape `#[NAME(` is an attribute with
+  arguments: a `TokenKind::AttributeArgs(name)` token covering `#[NAME`.
+  The lexer pushes a `[` on its bracket stack, so newlines inside are
+  insignificant and the closing `]` pops it. The arguments are ordinary
+  tokens. The inner form is `#![NAME(`. The shape lives in `attribute_at`,
+  which the scan shares, and for the argument form the scan ends the
+  attribute at the `(`.
+- **Parser.** Built-in attributes keep their item rules, and
+  `#[attribute]` is new and applies to a `type` item. Any other outer name
+  is a *use*, kept in a side table by item: its name, span and argument
+  range, parsed as call arguments, with constants checked later.
+- **Workspace.** `DeclaredType` records whether it is an attribute. Each
+  use's name resolves through the file's view of types, as a type name does,
+  to a declaration, or to a built-in. The tree is expanded with the
+  attribute's record type, as a type is.
+- **Checker.** Checks the uses on each function item: the target, the
+  arguments as constants against the record type, defaults, duplicates and
+  def-type defaults. Records each function's attributes as constants.
+- **Lowering, IR and values.** `FnCode::attributes`, and
+  `Closure::attributes()`.
+
+### Decisions to confirm with Jack
+
+- An attribute as a record type marked `#[attribute]`, rather than a new
+  item, `attribute hermetic(on: Bool = true)`, which could later become
+  sugar for the same thing.
+- Attribute types are usable as types.
+- `retry` and `timeout` built in, not declared in the prelude.
+- A positional argument only for a one-field attribute.
+
 ## Later features
 
-Specified in detail when their turn comes: 6
-host-declared attributes with typed arguments; 7 receiver methods; 8
+Specified in detail when their turn comes: 7 receiver methods; 8
 generics; 9 extensible enums and `Partial<T>`; 10 context (`context`, `^`,
 `with`); 11 `recover` and `assert`; 12 `Secret<T>`; 13 persistent lists;
 14 `File`, `Dir`, `Sandbox` and `exec` options; 15 wildcard def-type
