@@ -170,6 +170,51 @@ fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
     assert_eq!((again.ran, again.cached), (2, 1));
 }
 
+/// What the Python archive at the logical path `path` of a build of the
+/// workspace `root` prints, run by the host's `python3`.
+fn run_python(root: &Path, path: &str) -> String {
+    let ran = Command::new("python3")
+        .arg(built_file(root, path))
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    String::from_utf8(ran.stdout).unwrap()
+}
+
+#[test]
+fn example_8_reruns_the_checks_a_change_reaches_and_the_bundle() {
+    let dir = example(8, HOST);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "app").unwrap();
+    // Each file's check, and the bundle.
+    assert_eq!((built.ran, built.cached), (4, 0));
+    let program = file_of(&built.value, None).to_owned();
+    assert_eq!(run_python(dir.path(), &program), "Hello, pekit2\n");
+    let first = fs::read(built_file(dir.path(), &program)).unwrap();
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = dir.path().join("example").join(path);
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    // `words`, which `app` reaches through `greet`: its check and the
+    // bundle, not the others' checks.
+    edit("words/words.py", "\"Hello\"", "\"Hi\"");
+    let again = build_in(dir.path(), state.path(), "app").unwrap();
+    assert_eq!((again.ran, again.cached), (2, 2));
+    assert_eq!(run_python(dir.path(), &program), "Hi, pekit2\n");
+    // The program: its check and the bundle.
+    edit("app/__main__.py", "\"pekit2\"", "\"you\"");
+    let again = build_in(dir.path(), state.path(), "app").unwrap();
+    assert_eq!((again.ran, again.cached), (2, 2));
+    assert_eq!(run_python(dir.path(), &program), "Hi, you\n");
+    // The same sources give the same archive, built again from nothing.
+    edit("words/words.py", "\"Hi\"", "\"Hello\"");
+    edit("app/__main__.py", "\"you\"", "\"pekit2\"");
+    let fresh = tempfile::tempdir().unwrap();
+    build_in(dir.path(), fresh.path(), "app").unwrap();
+    assert_eq!(fs::read(built_file(dir.path(), &program)).unwrap(), first);
+}
+
 #[test]
 fn example_6_builds_for_the_host_alone_with_the_host_s_toolchain() {
     let dir = example(6, "");
@@ -208,20 +253,23 @@ fn example_9_compiles_files_found_only_once_their_generator_has_run() {
 /// toolchains and the buildenv library's pinned environment.
 const PINNED: &str = "import * from \"github.com/gcslib/gcc\"\n\
                       import * from \"github.com/gcslib/buildenv\"\n\
+                      import * from \"github.com/gcslib/python\"\n\
                       import Toolchain from toolchain\n\
                       pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::C \
-                      gcc_x86_64_to_aarch64, Toolchain::BuildEnv busybox_x86_64]}\n";
+                      gcc_x86_64_to_aarch64, Toolchain::BuildEnv busybox_x86_64, \
+                      Toolchain::Python python_3_14]}\n";
 
 /// The workspace configuration that registers the host's own C toolchain
 /// and tools.
 const HOST: &str = "import * from \"github.com/gcslib/buildenv\"\n\
+                    import * from \"github.com/gcslib/python\"\n\
                     import * from toolchain\n\
                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::BuildEnv \
-                    host_tools]}\n";
+                    host_tools, Toolchain::Python system_python]}\n";
 
 /// Each file the libraries and examples fetch, by its name in the
 /// directory of [`downloads`], with its pin.
-const DOWNLOADS: [(&str, &str); 5] = [
+const DOWNLOADS: [(&str, &str); 6] = [
     (
         "x86-64--glibc--stable-2026.08-1.tar.xz",
         "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3",
@@ -241,6 +289,10 @@ const DOWNLOADS: [(&str, &str); 5] = [
     (
         "zlib-1.3.1.tar.gz",
         "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+    ),
+    (
+        "cpython-3.14.8+20261009-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "83f9cb480b702548c592443f86209cf0fc03448d90692df257f095c01791dccc",
     ),
 ];
 
@@ -322,6 +374,13 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
             "example {n}"
         );
     }
+    // Example 8, with the pinned interpreter.
+    let dir = example(8, PINNED);
+    let built = build_in(dir.path(), state.path(), "app").unwrap();
+    assert_eq!(
+        run_python(dir.path(), file_of(&built.value, None)),
+        "Hello, pekit2\n"
+    );
     // Example 6, for both platforms, its tool built once, for the host.
     let dir = example(6, PINNED);
     let built = build_in(dir.path(), state.path(), "all").unwrap();

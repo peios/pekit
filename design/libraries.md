@@ -328,3 +328,21 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
     `toolchains` failed before.
 - Follow-up from D8: a developer's test key, generated rather than
   configured, as the core model has it, waits for a generator.
+- As built in D9, `gcslib/python`:
+  - `Toolchain::Python` is declared in the library, one line, as example 8
+    asked: the extensible enum needed nothing more. Its layout has a
+    `runtime`, as the C toolchain's has: python-build-standalone's
+    interpreter is linked against glibc, and runs on the gcc library's
+    Bootlin sysroot, named directly as `buildenv` names the compiler.
+  - Python targets stay `def build`s whose results are `python.Library`s,
+    typed records, so a C library given to `python.binary` is a type
+    error. No new def-types.
+  - Transitive sources are joined with spreads into an accumulator; GCSL's
+    lists are persistent ropes, so a join shares both halves, the cost a
+    depset's, without a new concept. Duplicates are dropped by path where
+    the bundle is made.
+  - A check compiles the source with `compile()`, writing nothing beside it,
+    since `py_compile` writes `__pycache__` into a read-only directory.
+    The bundle writes its own zip, entries sorted and dated 1980, since
+    `zipapp` dates them by the files' times, which the store does not keep;
+    the host's Python and the pinned one give the same bytes.

@@ -1,0 +1,18 @@
+# Example 8, runnable: teaching pekit a new language.
+#
+# Python libraries are `def build`s whose results are `python.Library`s,
+# each handing its users its sources and every dependency's.
+import "github.com/gcslib/python"
+
+def build words() {
+    = python.library([file("words/words.py")])
+}
+
+def build greet() {
+    = python.library([file("greet/greet.py")], deps = [build words()])
+}
+
+# Depends on greet only. words arrives through greet's sources.
+def build app() {
+    = python.binary(file("app/__main__.py"), deps = [build greet()], output = "app.pyz")
+}
