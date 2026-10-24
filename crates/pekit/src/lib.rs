@@ -9,5 +9,6 @@
 pub mod load;
 pub mod receipt;
 pub mod record;
+pub mod sandbox;
 pub mod store;
 pub mod target;
