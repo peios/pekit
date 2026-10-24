@@ -209,7 +209,7 @@ existing program changes meaning.
 - No exabyte units.
 - No float arithmetic on quantities.
 
-## 6. Host-declared attributes with typed arguments
+## 6. Host-declared attributes with typed arguments (done; 6b open)
 
 ### Rule
 
@@ -277,7 +277,35 @@ declaring the record type of its arguments, marked as an attribute:
   runs longer than `limit` fails, with any child process killed. Retry on a
   pure function is a warning, since rerunning it cannot change the result.
 
-### Implementation outline
+### Implementation, as built
+
+- **Lexer.** `#[NAME(` lexes as `TokenKind::AttributeArgs` through the name,
+  and its `[` stays open on the bracket stack until the `]` after the
+  arguments, which lex as ordinary tokens. The shape lives in
+  `attribute_at`, which the scan shares.
+- **Parser.** Each use gets a synthetic `TypeExprKind::Named` at its name.
+  The existing type machinery then resolves and expands it with no new
+  resolution code (`type_reads` walks every type expression), and the
+  index's references and rename cover attribute uses for free. Uses are
+  kept per item (`Ast::attribute_uses`). An unbalanced bracket in the
+  arguments recovers as an unbalanced list does.
+- **Store and workspace.** `TypeStore` records which declarations are
+  attributes, keyed by declaration number with their `AttributeId`, so
+  sessions keep them. The checker asks `Context::attribute(name)` through
+  the file's view of types.
+- **Checker.** `check_attribute_uses` runs before the body. Arguments are
+  checked with `check_expr_expecting`, as constant defaults are, so
+  mismatch errors read as usual and every argument expression is typed;
+  the slot allocation is given back afterwards. `Attribute { id, args }`
+  holds the args by field name text, so a host needs no names table. A
+  definition takes its def-type's attributes through the def-type's
+  function, `KnownParams` carrying them across files and session inputs.
+- **Lowering.** `FnCode::attributes`, and `Closure::attributes()` for hosts.
+- **Departure.** `retry` and `timeout` are not in the prelude (see below).
+  A user's `type retry` is unaffected, and only `#[attribute] type retry`
+  is an error.
+
+### Implementation outline (planned)
 
 - **Lexer.** Besides `#[NAME]`, the shape `#[NAME(` is an attribute with
   arguments: a `TokenKind::AttributeArgs(name)` token covering `#[NAME`.
