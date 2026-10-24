@@ -30,6 +30,8 @@ the language server and Learn follow every syntax change.
 5. **Duration and size literals** (`c9b8040`; see below).
 6. **Host-declared attributes** (`b57331c`; see below), and **retry and
    timeout** (`a705b27`).
+7. **Receiver methods** (`51947a8`, `0bf0d9b`, `a894aff`, `354021a`; see
+   below).
 8. **Generics** (`ecbec8a`, `79f5461`, `7180d8a`; see below). Generic
    functions with inferred type parameters, and generic `type`
    declarations.
@@ -584,6 +586,31 @@ checker. So generics come first, and methods are built on them.
 - **Index.** A method's name at a call links to its declaration, for
   go-to-definition and hover. Completion after `.` needs the static type
   at the cursor and comes with the language server's completion work.
+
+### Implementation, as built
+
+- **Bindings.** A method is an ordinary top-level function binding under a
+  name no source can write, `<method twice@0>` (first free ordinal in the
+  shared names table, so session inputs never collide), recorded in
+  `Ast::methods`. Hoisting, grouping, captures, defaults, lowering and
+  session persistence are a `fn`'s, unchanged. The plan's
+  `ItemKind::Method` was not needed.
+- **Calls.** `Checker::check_field_call` types the receiver first, then
+  the field or the most specific applying method; `call_method` binds the
+  receiver as parameter 0 (generics first) and the rest from parameter 1
+  (`Bound` offsets). Lowering calls the binding or slot with the receiver
+  as argument 0 (`Resolution::method_receiver`).
+- **Workspace.** Flat method views (`File::method_view`) from the
+  directory chain and every imported module; needs per
+  `method_needs`, conservative as specified, the cycle label saying "may
+  call the method `get` of `lib.gcsl` here"; checked methods passed to
+  later files by slot, type and known parameters (`KnownCallee::Method`).
+- **Language server.** Hover (`fn (x: Int) twice(): Int`), definition,
+  references and rename across files; completion after `.` of the
+  methods whose receiver may fit (`TypeTable::may_receive`).
+- **Limits found.** `[]` cannot be a receiver: it is typed before a method
+  is chosen. The REPL can import only standard modules today, so it sees
+  workspace methods only through those.
 
 ### Decisions to confirm with Jack
 
