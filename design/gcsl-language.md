@@ -1199,6 +1199,27 @@ GCSL `6761d60` and `d192a4d`. Differences from the plan above:
 - `secret(value, identity)` is available to plain code.
 - `exec`'s `argv` accepts `Revealed<String>` elements.
 
+### As built (12d): hardening
+
+GCSL `1ee8782`, as agreed with Jack on 2026-10-24: weighed towards
+tainting more, which can be relaxed later.
+
+- **Threat model.** Secrets protect against accidental disclosure, into
+  logs, errors, cache keys and command output. They do not protect a
+  secret from the code that uses it, and timing is out of scope.
+- **`exec_secret(argv, secrets = {NAME = s.reveal()})`** is the one way a
+  program is given a secret: as an environment variable, since argv can be
+  read by any user. Plain `exec`, `exec_live` and `File.exec` take no
+  secret anywhere.
+- **Its result is a secret,** `Secret<{status, stdout, stderr}>`, whose
+  identity is derived from everything it was given. Files the program
+  writes are not secrets, so signed outputs are cached normally.
+- **Its failure** names nothing, "a program given a secret failed", and,
+  as Jack chose, can be recovered and retried. It has no `live` and no
+  `interactive`.
+- **A completeness test** classifies every kind of expression by how it
+  treats a secret, so that a new kind cannot be added unclassified.
+
 ## 13. Persistent lists
 
 Agreed in core-model.md (methods, example 8): all GCSL lists become
