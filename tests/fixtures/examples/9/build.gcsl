@@ -1,0 +1,32 @@
+# Example 9, runnable: steps found only once another has run.
+#
+# `msggen` is linked statically, as example 3's tool is, and writes into a
+# directory its step makes first.
+import fs
+import path
+import "github.com/gcslib/gcc"
+
+def build msggen() {
+    = gcc.link([gcc.compile(file("gen/msggen.c"))], output = "msggen", flags = ["-static"])
+}
+
+#[hermetic]
+fn generate(tool: File, input: File) -> Dir {
+    let out = dir("out")
+    fs.mkdir(out.path)
+    let ran = exec([tool.path, input.path, out.path])
+    = out
+}
+
+def build app() {
+    let out = generate(build msggen() with { platform = ^host_platform }, file("data/messages.txt"))
+
+    # The dynamic point. Listing `out` needs generate's result, so this code
+    # waits until it has run; then it makes one compile step per file.
+    let generated = for f in out.files() if f.path.ends_with(".c") {
+        gcc.compile(f)
+    }
+
+    let main = gcc.compile(file("main.c"), headers = [out.file("messages.h")])
+    = gcc.link([main, ...generated], output = "app")
+}

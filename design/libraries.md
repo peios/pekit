@@ -248,3 +248,31 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
 - L2: `fetch` refused inside a hermetic step.
 - L7: library roots, `$GCSL_LIBRARY_PATH` then `.gcsl/libraries/`, and the
   `gcslib` libraries kept in this repository for now.
+- As built in D6, `gcslib/gcc`:
+  - The rules compose with `fs.compose`, a list of `{at; place}` entries,
+    since a record's keys can't be computed; L6a's `fs.compose_dir` call
+    is written that way.
+  - A toolchain whose `runtime` is `/` is the host's, and its tools run
+    as they are; any other's run in a sandbox over its runtime, its
+    install at `/opt/cc`. This host-or-pinned branch lives in the library.
+  - `system_c` declares `^host_platform` as both its platforms, so that a
+    build for another platform with nothing registered fails, naming the
+    platform, rather than building for the host.
+  - A workspace registers a library's toolchains through
+    `import * from "github.com/gcslib/gcc"`, which brings its definitions
+    into view as written; `Toolchain::C gcc.gcc_x86_64` names none.
+  - Tools built and run during a build are linked statically in the
+    fixtures. Running a dynamically linked built program on its
+    toolchain's sysroot is a follow-up.
+- Found in D6 and fixed: a step's future is keyed by its node once the
+  host has given it (GCSL), so a target that awaits a step after passing
+  another's future to it converges; a spread whose elements might be
+  futures awaits them (GCSL); a file of an output tree reached through a
+  symbolic link is its target's (pekit); and a step stages each directory
+  before the inputs inside it, so a toolchain's links stay links (pekit).
+- Follow-ups from D6: `unique` and `contains` refuse lists that might hold
+  futures, which needs a presence bound on type parameters to await them;
+  a step's key holds every bound context, so a host tool's run is
+  repeated for each target platform; a target's steps called from another
+  target take that target's names, `link.2`; and every workspace input is
+  hashed on every build, where Bazel keeps a digest cache.

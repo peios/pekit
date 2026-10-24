@@ -69,27 +69,23 @@ it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
 A library asks GCSL's `toolchain` module for a compiler, as
 `toolchain.get(Toolchain::C)`, rather than naming one. With nothing
-registered, the answer is the host's own `cc`, found on `PATH`. To build
-with toolchains of your own, register them in `workspace.gcsl`:
+registered, the answer is the host's own `cc`, found on `PATH`, which
+builds for the host alone. To build with pinned toolchains, register them
+in `pekitconf` in `workspace.gcsl`. The gcc library provides Bootlin's:
 
 ```text
+import * from "github.com/gcslib/gcc"
 import Toolchain from toolchain
 
-def Toolchain::C gcc_x86_64() {
-    let files = archive.unpack(fetch("https://example.org/gcc.tar.xz", sha256 = "..."))
-    host_platform = {arch = "x86_64"}
-    platform = {arch = "x86_64"}
-    provides = {root = files; runtime = files.dir("sysroot"); cc = files.file("bin/gcc")
-                ar = files.file("bin/ar"); ld = files.file("bin/ld"); sysroot = files.dir("sysroot")}
-}
-
-pekitconf = {toolchains = [Toolchain::C gcc_x86_64]}
+pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::C gcc_x86_64_to_aarch64]}
 ```
 
 Pekit sets the `toolchains` context from `pekitconf.toolchains` for every
 target it builds, and the first registered toolchain that fits the
 platforms is used. A step is given its toolchain as an argument, so a
-changed compiler rebuilds exactly the steps that use it.
+changed compiler rebuilds exactly the steps that use it. A pinned
+toolchain's programs run on its own runtime, never on the host's
+libraries. See ~pekit/building-c for the gcc library itself.
 
 ## Libraries
 

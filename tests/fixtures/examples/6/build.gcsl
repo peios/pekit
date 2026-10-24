@@ -1,0 +1,32 @@
+# Example 6, runnable: one build for two platforms, its tool for the host.
+#
+# The draft sets `platform.arch` alone; a `with` sets a whole context, so
+# this gives the whole platform.
+import "github.com/gcslib/gcc"
+
+def build embed() {
+    = gcc.link([gcc.compile(file("gen/embed.c"))], output = "embed", flags = ["-static"])
+}
+
+#[hermetic]
+fn run_embed(tool: File, input: File, name: String) -> {header: File, source: File} {
+    let ran = exec([tool.path, input.path, name, "."])
+    header = file("{name}.h")
+    source = file("{name}.c")
+}
+
+def build app() {
+    # embed runs during the build, so it is built for wherever steps run.
+    let tool = build embed() with { platform = ^host_platform }
+    let message = run_embed(tool, file("data/message.txt"), "message")
+    let objs = [
+        gcc.compile(file("main.c"), headers = [message.header]),
+        gcc.compile(message.source),
+    ]
+    = gcc.link(objs, output = "app")
+}
+
+def build all() {
+    x86_64 = build app() with { platform = {arch = "x86_64"; os = "linux"} }
+    aarch64 = build app() with { platform = {arch = "aarch64"; os = "linux"} }
+}

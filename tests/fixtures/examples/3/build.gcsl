@@ -1,0 +1,27 @@
+# Example 3, runnable: a tool built during the build.
+#
+# `embed` is linked statically, so that it runs in a step with nothing of
+# the toolchain it was built with.
+import "github.com/gcslib/gcc"
+
+def build embed() {
+    = gcc.link([gcc.compile(file("gen/embed.c"))], output = "embed", flags = ["-static"])
+}
+
+# Runs embed on one file. It is hermetic, so its sandbox holds only the tool
+# and the input, and both of its outputs are captured.
+#[hermetic]
+fn run_embed(tool: File, input: File, name: String) -> {header: File, source: File} {
+    let ran = exec([tool.path, input.path, name, "."])
+    header = file("{name}.h")
+    source = file("{name}.c")
+}
+
+def build app() {
+    let message = run_embed(build embed(), file("data/message.txt"), "message")
+    let objs = [
+        gcc.compile(file("main.c"), headers = [message.header]),
+        gcc.compile(message.source),
+    ]
+    = gcc.link(objs, output = "app")
+}

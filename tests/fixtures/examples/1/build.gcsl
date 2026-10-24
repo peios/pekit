@@ -1,0 +1,9 @@
+# Example 1, runnable: one C file to one binary.
+#
+# The draft compiles and links in one call; the gcc library's `compile`
+# always makes an object, so this links it too.
+import "github.com/gcslib/gcc"
+
+def build hello() {
+    = gcc.link([gcc.compile(file("hello.c"))], output = "hello")
+}

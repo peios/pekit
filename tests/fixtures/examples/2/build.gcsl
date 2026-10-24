@@ -1,0 +1,18 @@
+# Example 2, runnable: a library, a program and headers.
+#
+# The library's target gives its archive and its public header. The
+# program's compile is given that header alone, so editing the private
+# `internal.h` never reruns it.
+import "github.com/gcslib/gcc"
+
+def build greet() {
+    let obj = gcc.compile(file("lib/greet.c"), headers = [file("lib/greet.h"), file("lib/internal.h")])
+    archive = gcc.archive([obj], output = "libgreet.a")
+    headers = [file("lib/greet.h")]
+}
+
+def build app() {
+    let g = build greet()
+    let obj = gcc.compile(file("main.c"), headers = g.headers)
+    = gcc.link([obj], libraries = [g.archive], output = "app")
+}

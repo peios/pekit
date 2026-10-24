@@ -15,3 +15,30 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+# The crates that hash and decompress, optimised in development builds and
+# tests too: unoptimised, hashing and unpacking a toolchain of 500 MB takes
+# many times as long, and the tests unpack two.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.liblzma-sys]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.zlib-rs]
+opt-level = 3
+
+[profile.dev.package.libbz2-rs-sys]
+opt-level = 3
+
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.tar]
+opt-level = 3

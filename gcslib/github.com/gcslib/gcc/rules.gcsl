@@ -1,0 +1,94 @@
+# The gcc library's rules: compiling C, bundling objects into a static
+# library and linking a program, each one hermetic step.
+#
+# - `compile(src, headers, output, flags)`: the object `output` of the C
+#   source `src`, by default its name with `.o` for `.c`. `headers` are the
+#   headers it may include, each given to the step, and each one's directory
+#   a `-I` flag; `flags` go to the compiler as they are.
+# - `archive(objs, output)`: the static library `output` of the objects
+#   `objs`, by `ar rcs`.
+# - `link(objs, libraries, output, flags)`: the program `output` of the
+#   objects `objs` and the static libraries `libraries`.
+#
+# Each resolves its toolchain in a parameter default, `cchain =
+# toolchain.get(Toolchain::C)`, so the step is given it as an argument: the
+# first registered `Toolchain::C` for `^host_platform` and `^platform`, or the
+# host's own. A toolchain whose `runtime` is `/` is the host's own, and its
+# tools run as they are; any other's tools run in a sandbox whose `/` is its
+# runtime, its whole install at `/opt/cc` and each input at its own path, so a
+# build with pinned toolchains reads nothing of the host.
+import fs
+import path
+import toolchain
+import Toolchain from toolchain
+
+# The step's own directory as a sandbox's commands see it, where they write.
+let OUT = "/.out"
+
+# Where a pinned toolchain's install is placed in its sandbox.
+let OPT = "/opt/cc"
+
+#[hermetic]
+def compile(
+    src: File,
+    headers: FileSet = [],
+    output: String = "",
+    flags: List<String> = [],
+    cchain: toolchain.CToolchain = toolchain.get(Toolchain::C),
+) -> File {
+    let named = if output == "" { object_name(src) } else { output }
+    let includes = for at in (for h in headers { path.dirname(h.path) }).unique() { "-I{at}" }
+    = run(cchain, cchain.cc, ["-c", ...includes, ...flags, src.path, "-o", named], [src, ...headers], named)
+}
+
+#[hermetic]
+def archive(
+    objs: FileSet,
+    output: String,
+    cchain: toolchain.CToolchain = toolchain.get(Toolchain::C),
+) -> File {
+    = run(cchain, cchain.ar, ["rcs", output, ...paths(objs)], objs, output)
+}
+
+#[hermetic]
+def link(
+    objs: FileSet,
+    libraries: FileSet = [],
+    output: String = "a.out",
+    flags: List<String> = [],
+    cchain: toolchain.CToolchain = toolchain.get(Toolchain::C),
+) -> File {
+    let words = ["-o", output, ...paths(objs), ...paths(libraries), ...flags]
+    = run(cchain, cchain.cc, words, [...objs, ...libraries], output)
+}
+
+# The object `src` compiles to by default: its name, `.o` for `.c`.
+fn object_name(src: File) -> String {
+    let name = path.basename(src.path)
+    = if name.ends_with(".c") { "{name.strip_suffix(".c")}.o" } else { "{name}.o" }
+}
+
+fn paths(files: FileSet) -> List<String> { for f in files { f.path } }
+
+# Runs the tool `tool` of `cchain` with the arguments `words`, given the files
+# `inputs`, and gives the file `output` it writes in the step's directory.
+fn run(cchain: toolchain.CToolchain, tool: File, words: List<String>, inputs: FileSet, output: String) -> File {
+    if cchain.runtime.path == "/" {
+        let ran = exec([tool.path, ...words])
+        return file(output)
+    }
+    let prefix = "{cchain.root.path}/"
+    if not tool.path.starts_with(prefix) {
+        panic("`{tool.path}` is not in its toolchain's install, `{cchain.root.path}`")
+    }
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = cchain.runtime},
+        {at = OPT; place = cchain.root},
+        ...(for at in paths(inputs).unique() { {at = at; place = file(at)} }),
+    ]
+    let box = fs.compose(placed).sandbox(cwd = OUT, env = {TMPDIR = OUT})
+    let ran = box.exec("{OPT}/{tool.path.strip_prefix(prefix)}", ...words)
+    let made = file(output)
+    fs.copy(box.file("{OUT}/{output}").path, made.path)
+    = made
+}
