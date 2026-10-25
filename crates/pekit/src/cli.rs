@@ -44,7 +44,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
-use crate::engine::{BuildError, Outcomes, Settings, build_all_observed};
+use crate::engine::{BuildError, Outcomes, Packing, Settings, build_all_observed, package_all_observed};
 use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
@@ -69,8 +69,39 @@ enum Command {
     Build(BuildArgs),
     /// Run tests.
     Test(TestArgs),
+    /// Pack packages with the workspace's packagers.
+    Package(PackageArgs),
+    /// Pack packages and publish them into a store.
+    Publish(PublishArgs),
     /// Remove what builds left: `pekit-out/`, and with `--cache` the store.
     Clean(CleanArgs),
+}
+
+/// `pekit package`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct PackageArgs {
+    /// The packages, named or selected as targets are; every package below
+    /// this directory, `**`, if none is given.
+    #[arg(value_name = "PACKAGE")]
+    packages: Vec<String>,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
+}
+
+/// `pekit publish`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct PublishArgs {
+    /// The packages, named or selected as targets are.
+    #[arg(required = true, value_name = "PACKAGE")]
+    packages: Vec<String>,
+    /// The store to publish into: a path or a URL, as each packager reads
+    /// it.
+    #[arg(long, value_name = "STORE")]
+    to: String,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
 }
 
 /// `pekit clean`'s arguments (see [Commands](#commands)).
@@ -165,6 +196,18 @@ pub fn run(
     match cli.command {
         Command::Build(args) => build_command(&args, cwd, terminal),
         Command::Test(args) => test_command(&args, cwd, terminal),
+        Command::Package(args) => package_command(
+            (&args.packages, &Packing::Pack),
+            &args.shared,
+            cwd,
+            terminal,
+        ),
+        Command::Publish(args) => {
+            let packing = Packing::Publish {
+                to: args.to.clone(),
+            };
+            package_command((&args.packages, &packing), &args.shared, cwd, terminal)
+        }
         Command::Clean(args) => clean_command(&args, cwd, terminal),
     }
 }
@@ -197,7 +240,12 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
         return ExitCode::FAILURE;
     };
-    let outcomes = match build_targets(&mut loaded, &targets, &settings, &args.shared, terminal) {
+    let outcomes = match build_targets(
+        (&mut loaded, &targets, None),
+        &settings,
+        &args.shared,
+        terminal,
+    ) {
         Ok(outcomes) => outcomes,
         Err(error) => {
             let _ = write!(terminal.err, "{}", error.render(&loaded));
@@ -272,7 +320,12 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
     let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
         return ExitCode::FAILURE;
     };
-    let outcomes = match build_targets(&mut loaded, &tests, &settings, &args.shared, terminal) {
+    let outcomes = match build_targets(
+        (&mut loaded, &tests, None),
+        &settings,
+        &args.shared,
+        terminal,
+    ) {
         Ok(outcomes) => outcomes,
         Err(error) => {
             let _ = write!(terminal.err, "{}", error.render(&loaded));
@@ -316,6 +369,129 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `pekit package [PACKAGE...]` and `pekit publish PACKAGE... --to STORE`
+/// (see [Commands](#commands)): packs each package with each packager, and
+/// for `publish` publishes each, showing what each packer made.
+fn package_command(
+    (given, packing): (&[String], &Packing),
+    shared: &Shared,
+    cwd: &Path,
+    terminal: &mut Terminal<'_>,
+) -> ExitCode {
+    let mut loaded = match load(cwd) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut names: Vec<&str> = given.iter().map(String::as_str).collect();
+    if names.is_empty() {
+        names.push("**");
+    }
+    let packages = match select(&loaded.workspace, "package", &names, &loaded.here) {
+        Ok(packages) if packages.is_empty() => {
+            let _ = writeln!(
+                terminal.err,
+                "error: no `package` is selected by {}",
+                quoted(&names)
+            );
+            return ExitCode::FAILURE;
+        }
+        Ok(packages) => packages,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{}", error.message());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(settings) = settings_for(shared, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let built = build_targets(
+        (&mut loaded, &packages, Some(packing)),
+        &settings,
+        shared,
+        terminal,
+    );
+    let outcomes = match built {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            return ExitCode::FAILURE;
+        }
+    };
+    let verb = match packing {
+        Packing::Pack => "packed",
+        Packing::Publish { .. } => "published",
+    };
+    let mut failed = false;
+    for (package, outcome) in packages.iter().zip(&outcomes.targets) {
+        let shown = package.qualified();
+        let packed = match outcome {
+            Ok(Plain::List(packed)) if packed.is_empty() => {
+                failed = true;
+                let _ = writeln!(
+                    terminal.err,
+                    "error: `{shown}` was packed by no packager: list one in \
+                     `pekitconf.packagers`"
+                );
+                continue;
+            }
+            Ok(Plain::List(packed)) => packed,
+            Ok(other) => {
+                failed = true;
+                let _ = writeln!(terminal.err, "error: `{shown}` packed to {other:?}");
+                continue;
+            }
+            Err(error) => {
+                failed = true;
+                let _ = write!(terminal.err, "{}", error.render(&loaded));
+                continue;
+            }
+        };
+        for each in packed {
+            let (by, dir) = packed_by(each);
+            let _ = writeln!(terminal.out, "{verb} {shown} with {by}");
+            if let Some(dir) = dir {
+                let shown = shown_path(dir, &loaded.root, cwd);
+                let _ = writeln!(terminal.out, "  {}", shown.display());
+            }
+        }
+    }
+    let _ = writeln!(
+        terminal.out,
+        "{}",
+        steps_counted(outcomes.ran, outcomes.cached)
+    );
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The packager's name and the directory of `packed`, a `packaging.Packed`.
+fn packed_by(packed: &Plain) -> (&str, Option<&str>) {
+    let Plain::Record(fields) = packed else {
+        return ("a packager", None);
+    };
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    };
+    let packager = match field("packager") {
+        Some(Plain::Str(name)) => name.as_str(),
+        _ => "a packager",
+    };
+    let dir = match field("packed") {
+        Some(Plain::Dir { path, .. }) => Some(path.as_str()),
+        _ => None,
+    };
+    (packager, dir)
 }
 
 /// `pekit clean [--cache]` (see [Commands](#commands)): removes the
@@ -448,16 +624,15 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
     })
 }
 
-/// Builds `targets` of `loaded`'s workspace with `settings`, showing its
-/// progress on `terminal` as it goes and writing its trace where `shared`
-/// says.
+/// Builds `targets` of `loaded`'s workspace with `settings`, or packs them
+/// as `packing` says, showing its progress on `terminal` as it goes and
+/// writing its trace where `shared` says.
 ///
 /// # Errors
 ///
-/// What [`build_all_observed`] fails with.
+/// What [`build_all_observed`] or [`package_all_observed`] fails with.
 fn build_targets(
-    loaded: &mut Loaded,
-    targets: &[Target],
+    (loaded, targets, packing): (&mut Loaded, &[Target], Option<&Packing>),
     settings: &Settings,
     shared: &Shared,
     terminal: &mut Terminal<'_>,
@@ -473,7 +648,12 @@ fn build_targets(
                 progress.show(event, err);
             }
         };
-        build_all_observed(loaded, targets, settings, &mut events)
+        match packing {
+            Some(packing) => {
+                package_all_observed(loaded, targets, (settings, packing), &mut events)
+            }
+            None => build_all_observed(loaded, targets, settings, &mut events),
+        }
     };
     if live {
         progress.clear(terminal.err);

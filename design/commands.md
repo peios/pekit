@@ -197,3 +197,13 @@ its own piece of work, after layer E.
   the build's error, since its parameters' defaults run inside the
   `recover`. A failure shows its message alone; the values an `assert`
   labels its sides with are a follow-up.
+- E2: `pekit clean` removes `pekit-out/`, and with `--cache` the store and
+  its scratch, never the state directory, which holds the keychain's key.
+- E3: `Workspace::prepare_call_wrapped` gives a target's call to a
+  top-level function, with arguments of its own after it:
+  `packaging.pack(package NAME())` and `packaging.publish(package NAME(),
+  "STORE")`. The store is an argument, not a root context, since a root
+  context keys every step under it: publishing into a second store packs
+  nothing again. A `publish` fails a package alone, as any target's
+  failure does; the packages before it in program order stay published.
+  `ppk fetch` makes a store directory that is not there.

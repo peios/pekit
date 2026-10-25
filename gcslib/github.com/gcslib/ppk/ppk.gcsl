@@ -10,7 +10,12 @@
 #   the same directory, and a package whose files did not change is not
 #   packed again. Copying it into an artifact store, which ppk refuses for
 #   a version whose content changed, is publishing, which is no step.
+# - `packager()`: ppk as a `packaging.Packager`, for a workspace to list in
+#   `pekitconf.packagers`: its `pack` is `pack`, and its `publish` copies a
+#   packed package into an artifact directory with `ppk fetch`, which
+#   refuses a version whose content changed.
 import fs
+import packaging
 import toolchain
 import Toolchain from toolchain
 
@@ -38,6 +43,36 @@ def pack(
         out.path,
     ])
     = out
+}
+
+def packager() -> packaging.Packager {
+    name = "ppk"
+    pack = fn(pkg: Package) -> Dir { packed(pkg) }
+    publish = fn(pkg: Package, packed: Dir, store: String) -> {} { published(pkg, packed, store) }
+}
+
+# `pkg` packed, as `pack` packs it: the name a packager's function calls,
+# since a field of the packager's own name would be the field.
+fn packed(pkg: Package) -> Dir { pack(pkg) }
+
+# `pkg`, packed into `packed`, copied into the artifact directory `store` by
+# `ppk fetch`, outside any step.
+fn published(
+    pkg: Package,
+    packed: Dir,
+    store: String,
+    arch: String = this_arch(),
+    tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
+) -> {} {
+    let ran = exec([
+        tool.ppk.path,
+        "fetch",
+        "--from",
+        packed.path,
+        "{pkg.name}@{pkg.version}?arch={arch}",
+        "--artifact-dir",
+        store,
+    ])
 }
 
 # The architecture packages are built for: `^platform`'s.

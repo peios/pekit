@@ -171,7 +171,7 @@ fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
 }
 
 /// The workspace configuration of example 5: the host's C toolchain and
-/// the ppk tool at `tools/ppk`.
+/// the ppk tool at `tools/ppk`, and ppk its packager.
 const PPK: &str = "import * from \"github.com/gcslib/ppk\"\n\
                    import * from toolchain\n\
                    import fileroot\n\
@@ -182,8 +182,10 @@ const PPK: &str = "import * from \"github.com/gcslib/ppk\"\n\
                    \x20   platform = {}\n\
                    \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
                    }\n\
-                   pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk \
-                   workspace_ppk]}\n";
+                   pekitconf = {\n\
+                   \x20   toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk]\n\
+                   \x20   packagers = [packager()]\n\
+                   }\n";
 
 /// The `ppk` on this process's `PATH`, if there is one.
 fn ppk_tool() -> Option<PathBuf> {
@@ -239,6 +241,74 @@ fn example_5_packs_two_packages_and_repacks_what_a_change_reaches() {
     assert_eq!((again.ran, again.cached), (2, 4));
     let greet = built_file(dir.path(), file_of_dir(&again.value, "greet"));
     assert!(greet.join("refs/dev.example.greet/1.0-2/x86_64").is_file());
+}
+
+#[test]
+fn example_5_s_packages_are_packed_and_published_by_their_packager() {
+    let Some(tool) = ppk_tool() else {
+        eprintln!("skipped: no `ppk` on PATH");
+        return;
+    };
+    let dir = example(5, PPK);
+    fs::create_dir_all(dir.path().join("tools")).unwrap();
+    fs::copy(tool, dir.path().join("tools/ppk")).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    // Every package, each packed by ppk.
+    let (out, success) = pekit(dir.path(), cache.path(), &["package"]);
+    assert!(success, "{out}");
+    assert_eq!(
+        out,
+        "packed example/dev.example.greet with ppk\n\
+         \x20 pekit-out/example/dev.example.greet/pack/artifacts\n\
+         packed example/dev.example.greet-dev with ppk\n\
+         \x20 pekit-out/example/dev.example.greet-dev/pack/artifacts\n\
+         6 steps run, 0 found in the store\n"
+    );
+    let packed = dir
+        .path()
+        .join("pekit-out/example/dev.example.greet/pack/artifacts");
+    assert!(packed.join("refs/dev.example.greet/1.0-1/x86_64").is_file());
+    // Published into two stores, packed once: publishing is no step, so it
+    // is done each time, and the packing is found.
+    let stores = tempfile::tempdir().unwrap();
+    for store in ["one", "two"] {
+        let to = stores.path().join(store);
+        let to = format!("--to={}", to.display());
+        let (out, success) = pekit(
+            dir.path(),
+            cache.path(),
+            &["publish", "dev.example.greet", &to],
+        );
+        assert!(success, "{out}");
+        assert!(
+            out.starts_with("published example/dev.example.greet with ppk\n")
+                && out.ends_with("0 steps run, 5 found in the store\n"),
+            "{out}"
+        );
+        let published = stores.path().join(store);
+        assert!(
+            published
+                .join("refs/dev.example.greet/1.0-1/x86_64")
+                .is_file()
+        );
+        assert!(!published.join("refs/dev.example.greet-dev").exists());
+    }
+}
+
+#[test]
+fn a_workspace_with_no_packager_packs_nothing() {
+    let dir = example(5, "");
+    let cache = tempfile::tempdir().unwrap();
+    let ran = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["package"])
+        .current_dir(dir.path())
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .output()
+        .unwrap();
+    assert!(!ran.status.success());
+    let err = String::from_utf8(ran.stderr).unwrap();
+    assert!(err.contains("packed by no packager"), "{err}");
 }
 
 /// The path of the directory `value`'s field `field` is.

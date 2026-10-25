@@ -47,8 +47,8 @@ use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
 use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
 use gcsl::eval::plain::Plain;
-use gcsl::workspace::graph::{PreparedCall, RootField};
-use gcsl::workspace::{InvokeError, Progress, StepInputs};
+use gcsl::workspace::graph::{PreparedCall, RootField, RootWrap};
+use gcsl::workspace::{Given, InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
@@ -79,6 +79,12 @@ const KEYCHAIN_PROFILE: &str = "keychain_profile";
 
 /// The context of the `keychain` module's configuration.
 const KEYCHAIN_KEYS: &str = "keychain_keys";
+
+/// The context the `packaging` module lists the packagers in.
+const PACKAGERS: &str = "packagers";
+
+/// The packaging module's file, which packing gives each package to.
+const PACKAGING_FILE: &str = "<stdlib>/packaging.gcsl";
 
 /// How many symbolic links a path is followed through, as Linux follows
 /// them, before it is refused.
@@ -295,6 +301,69 @@ pub fn build_all_observed(
     settings: &Settings,
     events: &mut dyn FnMut(&Event),
 ) -> Result<Outcomes, BuildError> {
+    build_roots(loaded, targets, settings, (None, Vec::new()), events)
+}
+
+/// What packing does with each package (see [Building](#building)): packs
+/// it with each packager, or packs it and publishes it into the store
+/// `to`, a path or a URL as the packager reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Packing {
+    /// Pack, the packaging module's `pack`.
+    Pack,
+    /// Pack and publish, the packaging module's `publish`.
+    Publish {
+        /// The store.
+        to: String,
+    },
+}
+
+/// Packs each of `targets`, definitions of `package`, of `loaded`'s
+/// workspace with each packager its configuration lists, as one build, as
+/// `packing` says: each target's value given to the packaging module's
+/// `pack`, or `publish` with the store, the packagers `^packagers`, from
+/// `pekitconf`. The store is an argument, not a root context, so that the
+/// packing steps are those of any store. Each comes to a list of what each
+/// packager packed (see [`build_all_observed`]).
+///
+/// # Errors
+///
+/// That the workspace loads no packaging module, so has no packager, or
+/// those of [`build_all_observed`].
+pub fn package_all_observed(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    (settings, packing): (&Settings, &Packing),
+    events: &mut dyn FnMut(&Event),
+) -> Result<Outcomes, BuildError> {
+    let Some(file) = loaded.workspace.file(PACKAGING_FILE) else {
+        return Err(BuildError::Engine(
+            "this workspace has no packager: list one in `pekitconf.packagers`, from a \
+             packager library such as gcslib's `ppk`"
+                .to_owned(),
+        ));
+    };
+    let (function, args) = match packing {
+        Packing::Pack => ("pack", Vec::new()),
+        Packing::Publish { to } => ("publish", vec![Given::Str(to.clone())]),
+    };
+    let wrap = RootWrap {
+        file,
+        function,
+        args: &args,
+    };
+    build_roots(loaded, targets, settings, (Some(wrap), Vec::new()), events)
+}
+
+/// [`build_all_observed`], each target's call given to `wrap` if it is
+/// given, in the root contexts and `contexts` too.
+fn build_roots(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
+    events: &mut dyn FnMut(&Event),
+) -> Result<Outcomes, BuildError> {
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
     let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
@@ -303,7 +372,7 @@ pub fn build_all_observed(
             settings.state.display()
         ))
     })?);
-    let roots = prepare_roots(loaded, targets, settings, &keychain);
+    let roots = prepare_roots(loaded, targets, (settings, &keychain), (wrap, contexts));
     let code_table: Rc<[(String, Digest)]> = loaded
         .names
         .iter()
@@ -370,10 +439,11 @@ pub fn build_all_observed(
 fn prepare_roots(
     loaded: &mut Loaded,
     targets: &[Target],
-    settings: &Settings,
-    keychain: &Arc<Keychain>,
+    (settings, keychain): (&Settings, &Arc<Keychain>),
+    (wrap, extra): (Option<RootWrap<'_>>, Vec<(String, Value)>),
 ) -> Vec<Root> {
-    let contexts = root_contexts(loaded, settings);
+    let mut contexts = root_contexts(loaded, settings);
+    contexts.extend(extra);
     let fields = root_fields(loaded);
     targets
         .iter()
@@ -387,11 +457,11 @@ fn prepare_roots(
                 )
                 .with_keychain(Arc::clone(keychain)),
             );
-            let call = loaded.workspace.prepare_call_with(
+            let call = loaded.workspace.prepare_call_wrapped(
                 (&target.def_type, &target.qualified()),
                 &[],
                 &contexts,
-                &fields,
+                (&fields, wrap),
             );
             let dir = target.qualified().trim_start_matches('/').to_owned();
             match call {
@@ -445,6 +515,7 @@ fn root_fields(loaded: &Loaded) -> Vec<RootField<'static>> {
         for (context, path) in [
             (TOOLCHAINS, &["toolchains"] as &[&str]),
             (KEYCHAIN_KEYS, &["keychain"]),
+            (PACKAGERS, &["packagers"]),
         ] {
             if loaded.workspace.declares_context(context)
                 && loaded.workspace.top_level_has(file, PEKITCONF, path)
