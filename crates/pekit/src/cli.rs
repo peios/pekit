@@ -46,8 +46,9 @@ use gcsl::eval::plain::Plain;
 
 use crate::engine::{
     BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed, package_all_observed,
-    program_command, run_script_observed,
+    program_command, query_all, run_script_observed,
 };
+use crate::query::TargetDeps;
 use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
@@ -75,6 +76,9 @@ enum Command {
     Test(TestArgs),
     /// Run a script, or the program a build gives.
     Run(RunArgs),
+    /// Ask what targets reach, without running a step.
+    #[command(subcommand)]
+    Query(QueryCommand),
     /// Pack packages with the workspace's packagers.
     Package(PackageArgs),
     /// Pack packages and publish them into a store.
@@ -101,6 +105,47 @@ struct RunArgs {
         value_name = "ARG"
     )]
     args: Vec<String>,
+}
+
+/// `pekit query`'s questions (see [Commands](#commands)).
+#[derive(Debug, clap::Subcommand)]
+enum QueryCommand {
+    /// The steps targets reach, and the workspace files each reads.
+    Deps(DepsArgs),
+    /// The targets that read a workspace file.
+    Rdeps(RdepsArgs),
+}
+
+/// `pekit query deps`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct DepsArgs {
+    /// The targets, named or selected as `pekit build` names them.
+    #[arg(required = true, value_name = "TARGET")]
+    targets: Vec<String>,
+    /// The def-type of the targets: `build`, `test`, `package` or another.
+    #[arg(long, default_value = "build")]
+    kind: String,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
+}
+
+/// `pekit query rdeps`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct RdepsArgs {
+    /// The file, a path from this directory.
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+    /// The targets to ask of, named or selected as `pekit build` names
+    /// them; every one below this directory, `**`, if none is given.
+    #[arg(value_name = "TARGET")]
+    targets: Vec<String>,
+    /// The def-type of the targets: `build`, `test`, `package` or another.
+    #[arg(long, default_value = "build")]
+    kind: String,
+    /// What every command that builds takes.
+    #[command(flatten)]
+    shared: Shared,
 }
 
 /// What a command does with the targets it builds.
@@ -283,6 +328,8 @@ pub fn run(
         Command::Build(args) => build_command(&args, cwd, terminal),
         Command::Test(args) => test_command(&args, cwd, terminal),
         Command::Run(args) => run_command(&args, cwd, terminal),
+        Command::Query(QueryCommand::Deps(args)) => deps_command(&args, cwd, terminal),
+        Command::Query(QueryCommand::Rdeps(args)) => rdeps_command(&args, cwd, terminal),
         Command::Package(args) => package_command(
             (&args.packages, &Packing::Pack),
             &args.shared,
@@ -529,6 +576,138 @@ fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitC
             ExitCode::FAILURE
         }
     }
+}
+
+/// `pekit query deps TARGET...` (see [Commands](#commands)): what each
+/// target reaches, run no step, as [`TargetDeps::shown`] shows it.
+fn deps_command(args: &DepsArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let names: Vec<&str> = args.targets.iter().map(String::as_str).collect();
+    let Some((loaded, queried)) = query(cwd, (&args.kind, &names), &args.shared, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let mut failed = false;
+    for deps in queried {
+        match deps {
+            Ok(deps) => {
+                let _ = write!(terminal.out, "{}", deps.shown());
+            }
+            Err(error) => {
+                failed = true;
+                let _ = write!(terminal.err, "{}", error.render(&loaded));
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `pekit query rdeps FILE [TARGET...]` (see [Commands](#commands)): each
+/// target that reads `FILE`, by its qualified name, one to a line; one
+/// that waits for a step's result is among them, since it might read it
+/// after, and said to be.
+fn rdeps_command(args: &RdepsArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let mut names: Vec<&str> = args.targets.iter().map(String::as_str).collect();
+    if names.is_empty() {
+        names.push("**");
+    }
+    let Some((loaded, queried)) = query(cwd, (&args.kind, &names), &args.shared, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let file = absolute(cwd, &args.file);
+    let Some(file) = file
+        .strip_prefix(&loaded.root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+    else {
+        let _ = writeln!(
+            terminal.err,
+            "error: `{}` is not in the workspace at `{}`",
+            args.file.display(),
+            loaded.root.display()
+        );
+        return ExitCode::FAILURE;
+    };
+    let mut failed = false;
+    for deps in queried {
+        match deps {
+            Ok(deps) if deps.reads_file(&file) => {
+                let _ = writeln!(terminal.out, "{}", deps.target);
+            }
+            Ok(deps) => {
+                if let Some(at) = &deps.waits {
+                    let _ = writeln!(terminal.out, "{}", deps.target);
+                    let _ = writeln!(
+                        terminal.err,
+                        "note: `{}` waits at {at} for a step's result, so it might read `{file}` \
+                         after: it is listed",
+                        deps.target
+                    );
+                }
+            }
+            Err(error) => {
+                failed = true;
+                let _ = write!(terminal.err, "{}", error.render(&loaded));
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The workspace `cwd` is in, loaded, and what each target of the def-type
+/// `kind` that `names` select reaches ([`query_all`]); `None` if it cannot
+/// be, said on `terminal`.
+fn query(
+    cwd: &Path,
+    (kind, names): (&str, &[&str]),
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Option<(Loaded, Vec<Result<TargetDeps, BuildError>>)> {
+    let mut loaded = match load(cwd) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return None;
+        }
+    };
+    let targets = match select(&loaded.workspace, kind, names, &loaded.here) {
+        Ok(targets) => targets,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{}", error.message());
+            return None;
+        }
+    };
+    let settings = settings_for(shared, &loaded, terminal)?;
+    match query_all(&mut loaded, &targets, &settings) {
+        Ok(queried) => Some((loaded, queried)),
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            None
+        }
+    }
+}
+
+/// `path`, from the directory `cwd` if it is relative, with every `.` and
+/// `..` taken out by its text, so that a file that is not there yet is
+/// named too.
+fn absolute(cwd: &Path, path: &Path) -> PathBuf {
+    let mut absolute = PathBuf::new();
+    for part in cwd.join(path).components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                absolute.pop();
+            }
+            other => absolute.push(other),
+        }
+    }
+    absolute
 }
 
 /// `--check-reproducible` refused for the command `pekit COMMAND`, whose

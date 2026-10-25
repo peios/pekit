@@ -59,6 +59,7 @@ use crate::layers::remove_tree;
 use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
+use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{Kept, StepRecord, StoreError, Stored, differences, keep_files, stored};
 use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
@@ -531,52 +532,7 @@ fn build_roots(
     (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
     events: &mut dyn FnMut(&Event),
 ) -> Result<Outcomes, BuildError> {
-    let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
-    std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
-    let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
-        engine(&format!(
-            "cannot open the keychain's key in `{}`: {error}",
-            settings.state.display()
-        ))
-    })?);
-    let roots = prepare_roots(loaded, targets, (settings, &keychain), (wrap, contexts));
-    let code_table: Rc<[(String, Digest)]> = loaded
-        .names
-        .iter()
-        .zip(&loaded.sources)
-        .map(|(name, source)| (name.clone(), Digest::of(source.text().as_bytes())))
-        .collect();
-    let unit_roots = roots
-        .iter()
-        .enumerate()
-        .filter_map(|(index, root)| Some((root.call.as_ref()?.unit(), index)))
-        .collect();
-    let mut run = Run {
-        loaded,
-        store,
-        settings,
-        roots,
-        unit_roots,
-        graph: Graph::new(),
-        outputs: HashMap::new(),
-        steps: HashMap::new(),
-        step_names: HashMap::new(),
-        step_roots: HashMap::new(),
-        step_dirs: HashMap::new(),
-        names_used: HashMap::new(),
-        named: 0,
-        pool: Pool::new(settings.jobs.max(1)),
-        in_flight: HashMap::new(),
-        events,
-        began: Instant::now(),
-        keychain,
-        code_table,
-        ran: 0,
-        cached: 0,
-        flaky: Vec::new(),
-        reports: Vec::new(),
-        mismatches: Vec::new(),
-    };
+    let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
     let mut outcomes = Vec::with_capacity(run.roots.len());
     for index in 0..run.roots.len() {
@@ -600,6 +556,98 @@ fn build_roots(
         flaky: std::mem::take(&mut run.flaky),
         steps: std::mem::take(&mut run.reports),
         mismatches: std::mem::take(&mut run.mismatches),
+    })
+}
+
+/// What each of `targets` of `loaded`'s workspace reaches, evaluated as
+/// [`build_all_observed`] builds them but running no step (see
+/// [Queries](crate::query#queries)): its own effects run, a fetch's or a
+/// read's, and a target that waits for a step's result stops there. Each
+/// comes to what it reaches, or the failure of its evaluation.
+///
+/// # Errors
+///
+/// What [`build_all_observed`] fails with of pekit's own.
+pub fn query_all(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+) -> Result<Vec<Result<TargetDeps, BuildError>>, BuildError> {
+    let mut events = |_: &Event| {};
+    let mut run = new_run(loaded, targets, settings, (None, Vec::new()), &mut events)?;
+    run.query = true;
+    run.drive()?;
+    let mut found = Vec::with_capacity(targets.len());
+    for (index, target) in targets.iter().enumerate() {
+        let done = run.roots.get_mut(index).and_then(|root| root.done.take());
+        found.push(match done {
+            Some(Ok(_)) => Ok(run.deps_of(index, target.qualified())),
+            Some(Err(error)) => Err(error),
+            None => Err(engine(&"a target the query never finished")),
+        });
+    }
+    Ok(found)
+}
+
+/// A run of `targets` of `loaded`'s workspace, as [`build_roots`] makes it,
+/// not yet driven.
+///
+/// # Errors
+///
+/// That the store, its scratch or the keychain's key cannot be opened.
+fn new_run<'a>(
+    loaded: &'a mut Loaded,
+    targets: &[Target],
+    settings: &'a Settings,
+    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
+    events: &'a mut dyn FnMut(&Event),
+) -> Result<Run<'a>, BuildError> {
+    let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
+    std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
+    let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
+        engine(&format!(
+            "cannot open the keychain's key in `{}`: {error}",
+            settings.state.display()
+        ))
+    })?);
+    let roots = prepare_roots(loaded, targets, (settings, &keychain), (wrap, contexts));
+    let code_table: Rc<[(String, Digest)]> = loaded
+        .names
+        .iter()
+        .zip(&loaded.sources)
+        .map(|(name, source)| (name.clone(), Digest::of(source.text().as_bytes())))
+        .collect();
+    let unit_roots = roots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, root)| Some((root.call.as_ref()?.unit(), index)))
+        .collect();
+    Ok(Run {
+        loaded,
+        store,
+        settings,
+        roots,
+        unit_roots,
+        query: false,
+        graph: Graph::new(),
+        outputs: HashMap::new(),
+        steps: HashMap::new(),
+        step_names: HashMap::new(),
+        step_roots: HashMap::new(),
+        step_dirs: HashMap::new(),
+        names_used: HashMap::new(),
+        named: 0,
+        pool: Pool::new(settings.jobs.max(1)),
+        in_flight: HashMap::new(),
+        events,
+        began: Instant::now(),
+        keychain,
+        code_table,
+        ran: 0,
+        cached: 0,
+        flaky: Vec::new(),
+        reports: Vec::new(),
+        mismatches: Vec::new(),
     })
 }
 
@@ -641,6 +689,8 @@ fn prepare_roots(
                     host,
                     main: Main::Runnable,
                     done: None,
+                    stopped_at: Vec::new(),
+                    waits: None,
                 },
                 Err(error) => Root {
                     call: None,
@@ -648,6 +698,8 @@ fn prepare_roots(
                     host,
                     main: Main::Runnable,
                     done: Some(Err(BuildError::Invoke(error))),
+                    stopped_at: Vec::new(),
+                    waits: None,
                 },
             }
         })
@@ -766,6 +818,9 @@ struct Run<'a> {
     /// The target each unit is of, by unit: a target's own, and each
     /// step's, so that a step met in one is of the same target.
     unit_roots: HashMap<u32, usize>,
+    /// Whether it is a query's, which runs no step (see
+    /// [Queries](crate::query#queries)).
+    query: bool,
     /// The action graph.
     graph: Graph,
     /// What the store keeps of each output a step made, by its logical
@@ -874,6 +929,11 @@ struct Root {
     main: Main,
     /// What it came to, once it is done.
     done: Option<Result<Value, BuildError>>,
+    /// In a query, what it needed when it was done: the holes of its value,
+    /// or the step's result it stopped for.
+    stopped_at: Vec<NodeId>,
+    /// In a query, the step whose result it stopped for, if it did.
+    waits: Option<NodeId>,
 }
 
 /// Where a target's unit is.
@@ -939,6 +999,7 @@ impl Run<'_> {
     /// ends with a value, or fails.
     fn run_roots(&mut self) {
         let no_dynamic = self.settings.no_dynamic;
+        let query = self.query;
         for root in &mut self.roots {
             if root.done.is_some() || !matches!(root.main, Main::Runnable) {
                 continue;
@@ -961,12 +1022,21 @@ impl Run<'_> {
                         .node(node)
                         .filter(|found| found.kind() == NodeKind::Deferred);
                     match step {
+                        Some(_) if query => {
+                            root.stopped_at = vec![node];
+                            root.waits = Some(node);
+                            // Its value is never read: what it reached is.
+                            root.done = Some(Ok(Value::Str(Rc::from(""))));
+                        }
                         Some(found) if no_dynamic => {
-                            root.done = Some(Err(BuildError::Dynamic(Diagnostic::error(
-                                "the target waits here for a step's result, a dynamic \
-                                 dependency, which `--no-dynamic` forbids",
-                                found.span(),
-                            ))));
+                            root.done = Some(Err(BuildError::Dynamic(
+                                Diagnostic::error(
+                                    "the target waits here for a step's result, a dynamic \
+                                     dependency, which `--no-dynamic` forbids",
+                                    found.span(),
+                                )
+                                .in_input(found.input()),
+                            )));
                         }
                         _ => root.main = Main::Paused(node),
                     }
@@ -990,6 +1060,11 @@ impl Run<'_> {
                 Main::Paused(node) => demands.push(*node),
                 Main::Holding(value) => {
                     let holes = self.graph.holes(value);
+                    if self.query {
+                        root.done = Some(Ok(value.clone()));
+                        root.stopped_at = holes;
+                        continue;
+                    }
                     if holes.is_empty() {
                         let failures = self.graph.failures(value);
                         root.done = Some(if failures.is_empty() {
@@ -1023,6 +1098,149 @@ impl Run<'_> {
         self.unit_roots.get(&unit).copied().unwrap_or(0)
     }
 
+    /// What the target of the root `index`, named `target`, reached, once a
+    /// query's run is done with it (see [Queries](crate::query#queries)).
+    fn deps_of(&self, index: usize, target: String) -> TargetDeps {
+        let workspace = &self.loaded.workspace;
+        let names = &self.loaded.names;
+        let shown = |files: Vec<u32>| -> Vec<String> {
+            let mut shown: Vec<String> = files
+                .into_iter()
+                .filter_map(|file| names.get(file as usize))
+                .filter(|name| !name.starts_with('<'))
+                .cloned()
+                .collect();
+            shown.sort();
+            shown.dedup();
+            shown
+        };
+        let Some(root) = self.roots.get(index) else {
+            return TargetDeps {
+                target,
+                code: Vec::new(),
+                reads: Vec::new(),
+                steps: Vec::new(),
+                waits: None,
+            };
+        };
+        let call = root.call.as_ref();
+        let code = call.map_or_else(Vec::new, |call| {
+            call.files()
+                .iter()
+                .flat_map(|&file| workspace.files_needed(file))
+                .collect()
+        });
+        let reached = self.graph.needed(&root.stopped_at);
+        let steps = reached
+            .iter()
+            .filter(|&&id| {
+                self.graph
+                    .node(id)
+                    .is_some_and(|node| node.kind() == NodeKind::Deferred)
+            })
+            .map(|&id| StepDeps {
+                name: format!("{}/{}", self.step_dir(id), self.step_name(id)),
+                code: shown(workspace.node_code_files(&self.graph, id)),
+                reads: self.node_reads(id),
+                after: self.steps_after(id),
+            })
+            .collect();
+        let waits = root.waits.and_then(|id| {
+            let node = self.graph.node(id)?;
+            let (span, file) = (node.span(), node.input());
+            let source = self.loaded.sources.get(file as usize)?;
+            let line = source
+                .text()
+                .get(..span.start as usize)?
+                .matches('\n')
+                .count()
+                + 1;
+            Some(format!("{}:{line}", names.get(file as usize)?))
+        });
+        TargetDeps {
+            target,
+            code: shown(code),
+            reads: call.map_or_else(Vec::new, |call| self.own_reads(call.unit())),
+            steps,
+            waits,
+        }
+    }
+
+    /// The workspace files and directories the node `id`, a step, is given:
+    /// those its arguments, captures and context hold, by their paths
+    /// relative to the root, sorted.
+    fn node_reads(&self, id: NodeId) -> Vec<String> {
+        let Some(node) = self.graph.node(id) else {
+            return Vec::new();
+        };
+        let mut values: Vec<&Value> = node.args().iter().collect();
+        if let Some(closure) = node.closure() {
+            values.extend(closure.captures.iter());
+        }
+        let context = node.context();
+        values.extend(context.iter().map(|(_, value)| value));
+        let mut reads: Vec<String> = values
+            .into_iter()
+            .flat_map(|value| value.files().into_iter().chain(value.dirs()))
+            .filter_map(|file| in_workspace(&file.path))
+            .collect();
+        reads.sort();
+        reads.dedup();
+        reads
+    }
+
+    /// The steps whose results the node `id` is given, by name, sorted.
+    fn steps_after(&self, id: NodeId) -> Vec<String> {
+        let Some(node) = self.graph.node(id) else {
+            return Vec::new();
+        };
+        let mut after: Vec<String> = self
+            .graph
+            .needed(node.data())
+            .into_iter()
+            .filter(|&edge| {
+                edge != id
+                    && self
+                        .graph
+                        .node(edge)
+                        .is_some_and(|found| found.kind() == NodeKind::Deferred)
+            })
+            .map(|edge| format!("{}/{}", self.step_dir(edge), self.step_name(edge)))
+            .collect();
+        after.sort();
+        after.dedup();
+        after
+    }
+
+    /// The workspace files and directories the effects of the unit `unit`,
+    /// a target's own, read: each that reads a path's, and the files and
+    /// directories any other is given, by their paths relative to the root,
+    /// sorted.
+    fn own_reads(&self, unit: u32) -> Vec<String> {
+        let mut reads = Vec::new();
+        for (id, node) in self.graph.nodes() {
+            if node.unit() != unit || node.kind() == NodeKind::Deferred {
+                continue;
+            }
+            let Ok(job) = self.loaded.workspace.effect_job(&self.graph, id) else {
+                continue;
+            };
+            for arg in job.args() {
+                if let Plain::Str(path) = arg {
+                    reads.extend(in_workspace(path));
+                }
+                reads.extend(
+                    arg.files()
+                        .into_iter()
+                        .filter_map(|(path, _)| in_workspace(path)),
+                );
+            }
+        }
+        reads.sort();
+        reads.dedup();
+        reads
+    }
+
     /// The directory under `/pekit-out` of the step `id`
     /// ([`Run::name_new_steps`]).
     fn step_dir(&self, id: NodeId) -> &str {
@@ -1052,6 +1270,9 @@ impl Run<'_> {
             let Some(node) = self.graph.node(id) else {
                 continue;
             };
+            if self.query && node.kind() == NodeKind::Deferred {
+                continue;
+            }
             // What needs a failed result fails with its failure, unrun.
             let failed =
                 node.data()

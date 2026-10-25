@@ -164,9 +164,15 @@ archive is unpacked only once.
 ## Where results go
 
 Pekit copies the files the target gives to `pekit-out/` at the root of
-the workspace. Each step writes to a directory named after the target
-and the step, `pekit-out/app/hello/cc/` for the step `cc` of `app/hello`.
-A target that calls a function twice has steps `cc` and `cc.2`.
+the workspace. Each step writes to a directory named after the
+definition whose code made it and the step, `pekit-out/app/hello/cc/`
+for the step `cc` of `app/hello`. A target that calls a function twice
+has steps `cc` and `cc.2`.
+
+A step that `build lib()` makes is `lib`'s, whichever target, test, or
+script calls it, so building `lib` itself finds it in the store. Two
+targets that make the same call in their own code have a step each. To
+share the work, put it in a build of its own that both call.
 
 The copies are your own: you can change or delete them, and the next
 build puts them back.

@@ -16,6 +16,7 @@ pub mod layers;
 pub mod load;
 pub mod platform;
 pub mod pool;
+pub mod query;
 pub mod receipt;
 pub mod record;
 pub mod sandbox;

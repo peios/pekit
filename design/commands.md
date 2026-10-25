@@ -238,3 +238,23 @@ its own piece of work, after layer E.
   of the workspace and outputs are fixed by the build's inputs (example
   9 needs them), and a release signs. `#[scratch]` is not built yet, so
   there is no scratch directory to start empty.
+- E6: `pekit query deps TARGET... [--kind KIND]` and `pekit query rdeps
+  FILE [TARGET...] [--kind KIND]`, `build` by default, over the engine's
+  query mode (`query_all`): a target's own effects run, a fetch's or a
+  read's, no step starts, and a target that waits for a step's result is
+  done there, with what it reached and where it waits. A target reads a
+  file if its call's code needs it (`PreparedCall::files` and
+  `Workspace::files_needed`), a step's code does
+  (`Workspace::node_code_files`), its own effects read it, a step is
+  given it, or a directory given holds it; and a GCSL file is read by
+  every target whose code is in its directory or below, its definitions
+  seen there. `rdeps` lists a target that waits as reading every file,
+  noted on standard error: unknown is never no.
+- With E6, a step's naming was made independent of what else is built:
+  a prepared call binds its own definition as a reference's call does
+  (GCSL's `run_prepared`), so two targets that make the same call in
+  their own code each have their step, named by its definition, rather
+  than sharing one named after whichever met it first, whose name, and
+  so key, depended on what else was built. Work two targets share is
+  shared by putting it in a build both call, as Bazel's actions belong
+  to their targets. A decision taken without Jack, to surface.

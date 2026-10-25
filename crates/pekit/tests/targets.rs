@@ -137,10 +137,12 @@ fn names_and_globs_select_targets_once_each_sorted() {
 }
 
 #[test]
-fn several_targets_are_one_build_their_shared_step_run_once() {
+fn several_targets_are_one_build_a_build_they_share_built_once() {
     let text = format!(
-        "{SHOUT}def build first() {{ out = shout(file(\"name.txt\")) }}\n\
-         def build second() {{ out = shout(file(\"name.txt\")) }}\n\
+        "{SHOUT}def build common() {{ = shout(file(\"name.txt\")) }}\n\
+         def build first() {{ out = build common() }}\n\
+         def build second() {{ out = build common() }}\n\
+         def build own() {{ out = shout(file(\"name.txt\")) }}\n\
          def build broken() {{ = panic(\"no\") }}\n"
     );
     let dir = workspace(&[("app/build.gcsl", &text), ("app/name.txt", "n\n")]);
@@ -148,26 +150,35 @@ fn several_targets_are_one_build_their_shared_step_run_once() {
     let (outcomes, counts) = build_all(
         dir.path(),
         state.path(),
-        &["first", "second", "broken"],
+        &["first", "second", "own", "broken"],
         |_| {},
     );
-    // `broken` fails alone; `first` and `second` share one step, of
-    // `first`, which met it first.
-    assert_eq!(counts, (1, 0));
+    // `broken` fails alone; `first` and `second` share `common`'s step,
+    // named by `common`, and `own`, which makes the same call itself, has
+    // its own: a step is its definition's, whatever else is built.
+    assert_eq!(counts, (2, 0));
     // In the order `select` gives, by qualified name.
-    let [broken, first, second] = &outcomes[..] else {
+    let [broken, first, own, second] = &outcomes[..] else {
         panic!("{outcomes:?}");
     };
     assert_eq!(first, second);
     let shown = format!("{first:?}");
     assert!(
-        shown.contains("/pekit-out/app/first/shout/out.txt"),
+        shown.contains("/pekit-out/app/common/shout/out.txt"),
+        "{shown}"
+    );
+    let shown = format!("{own:?}");
+    assert!(
+        shown.contains("/pekit-out/app/own/shout/out.txt"),
         "{shown}"
     );
     let error = broken.as_ref().unwrap_err();
     assert!(error.contains("error: no"), "{error}");
-    let out = dir.path().join("pekit-out/app/first/shout/out.txt");
+    let out = dir.path().join("pekit-out/app/common/shout/out.txt");
     assert_eq!(fs::read_to_string(out).unwrap(), "N\n");
+    // `common` built alone is the step its callers built.
+    let (_, counts) = build_all(dir.path(), state.path(), &["common"], |_| {});
+    assert_eq!(counts, (0, 1));
 }
 
 #[test]
