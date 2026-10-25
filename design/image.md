@@ -134,3 +134,29 @@ ported under the example 10 fixture, since `pkgs` is Jack's.
   prelude, binds `/dev/kvm` with `--dev-bind` into the step's sandbox, and
   into each `Dir.sandbox` it makes, where the machine has it; `kvm` is the
   only device known, another failing the step at its call.
+- X2: `gcslib/qemu`: `QemuToolchain = {root, runtime, system, firmware,
+  variables}`, `system_qemu` the host's under `/usr`; `boot(iso, until)`
+  with `-accel kvm -accel tcg`, so a machine without KVM emulates, `-nic
+  none`, and the firmware's variables a snapshot, so the template is
+  never written. QEMU puts a snapshot in `/var/tmp`, which a step lacks,
+  when `TMPDIR` is `/tmp`, so `boot` gives it `/tmp/qemu-snapshots`.
+  `launcher(iso)` writes a `#!/bin/sh` program that boots the ISO with the
+  terminal, naming QEMU and the ISO by their paths, which `pekit run`'s
+  host view has.
+- X3: `gcslib/peiso`: `PeisoToolchain = {root, runtime, peiso, mkirf,
+  mkuki}`; `iso(kernel, packages, initramfs, liveboot, output)`, each
+  package a `Package` the library packs with `ppk.packed` or a
+  `ppk.PpkPackage`, narrowed with `is`; a hermetic step gathers them with
+  `ppk fetch` into one repository, writes peiso's TOML spec, and runs
+  `peiso build`. A layout's links are a list of `{at, to}`, since GCSL
+  can't list a record's fields.
+- X4: `ppk.from_repository(repo, name, version)`, a hermetic step given the
+  repository's tree, and `ppk.packed(pkg)`, both giving a `PpkPackage =
+  {name, version, arch, artifacts}`.
+- X5: `tests/fixtures/examples/10/`: the kernel and busybox from a
+  repository seeded into `local/pekit2-data/peios-repository` by `ppk
+  fetch` from `pkgs/_artifacts`, and a package built here, booted to
+  busybox's prompt by a test in about two seconds with KVM. The rows of
+  I5 it checks hold: a change to the package built here runs three steps
+  and finds the repository's two; a change to the command line alone runs
+  the ISO's step and finds four; each reruns the boot test.

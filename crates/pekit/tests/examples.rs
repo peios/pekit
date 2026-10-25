@@ -656,3 +656,122 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
         false,
     );
 }
+
+/// The workspace configuration of example 10: the host's C toolchain and
+/// QEMU, and ppk and peiso's tools at `tools/`.
+const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
+                     import * from \"github.com/gcslib/peiso\"\n\
+                     import * from \"github.com/gcslib/qemu\"\n\
+                     import * from toolchain\n\
+                     import fileroot\n\
+                     import path\n\
+                     def Toolchain::Ppk workspace_ppk() {\n\
+                     \x20   let tools = dir(path.join(fileroot.this, \"tools\"))\n\
+                     \x20   host_platform = ^host_platform\n\
+                     \x20   platform = {}\n\
+                     \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
+                     }\n\
+                     def Toolchain::Peiso workspace_peiso() {\n\
+                     \x20   let tools = dir(path.join(fileroot.this, \"tools\"))\n\
+                     \x20   host_platform = ^host_platform\n\
+                     \x20   platform = {}\n\
+                     \x20   provides = {root = tools; runtime = dir(\"/\"); peiso = tools.file(\"peiso\"); \
+                     mkirf = tools.file(\"mkirf\"); mkuki = tools.file(\"mkuki\")}\n\
+                     }\n\
+                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk, \
+                     Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu]}\n";
+
+/// The programs example 10 needs, each by its name in the workspace's
+/// `tools/` and where it is: ppk and peiso from `PATH`, and peiosutils'
+/// `mkirf` and `mkuki` built into `local/pekit2-data` (see
+/// `design/image.md`); `None` if one is missing, or QEMU or its firmware
+/// is.
+fn image_tools() -> Option<Vec<(&'static str, PathBuf)>> {
+    let on_path = |name: &str| {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    };
+    let built = downloads().join("peiosutils-target/release");
+    let host = [
+        "/usr/bin/qemu-system-x86_64",
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+        "/usr/bin/xorriso",
+        "/usr/sbin/mkfs.vfat",
+        "/usr/bin/mcopy",
+    ];
+    if !host.iter().all(|path| Path::new(path).is_file()) {
+        return None;
+    }
+    let tools = vec![
+        ("ppk", on_path("ppk")?),
+        ("peiso", on_path("peiso")?),
+        ("mkirf", built.join("mkirf")),
+        ("mkuki", built.join("mkuki")),
+    ];
+    tools
+        .iter()
+        .all(|(_, path)| path.is_file())
+        .then_some(tools)
+}
+
+#[test]
+fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
+    let repository = downloads().join("peios-repository");
+    let Some(tools) = image_tools().filter(|_| repository.is_dir()) else {
+        eprintln!("skipped: example 10's tools or its repository are not on this machine");
+        return;
+    };
+    let dir = example(10, IMAGE);
+    fs::create_dir_all(dir.path().join("tools")).unwrap();
+    for (name, path) in &tools {
+        fs::copy(path, dir.path().join("tools").join(name)).unwrap();
+    }
+    copy_tree(&repository, &dir.path().join("example/repository"));
+    let state = tempfile::tempdir().unwrap();
+    // The kernel and busybox from the repository, the package built here,
+    // packed, and the ISO.
+    let built = build_in(dir.path(), state.path(), "iso").unwrap();
+    assert_eq!((built.ran, built.cached), (5, 0));
+    assert!(built_file(dir.path(), file_of(&built.value, None)).is_file());
+    // The boot test boots it to busybox's prompt.
+    let cache = state.path();
+    let (out, passed) = pekit(dir.path(), cache, &["test"]);
+    assert!(passed, "{out}");
+    assert_eq!(out, "passed           example/boots\n1 passed, 0 failed\n");
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = dir.path().join("example").join(path);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{text}");
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    // A change to the package built here: its step, its packing and the
+    // ISO, and none of the repository's packages.
+    edit("motd.txt", "welcome", "hello");
+    let again = build_in(dir.path(), state.path(), "iso").unwrap();
+    assert_eq!((again.ran, again.cached), (3, 2));
+    // A change to the kernel's command line alone: the ISO, and no package.
+    edit("build.gcsl", "\"console=ttyS0\"", "\"console=ttyS0 quiet\"");
+    let again = build_in(dir.path(), state.path(), "iso").unwrap();
+    assert_eq!((again.ran, again.cached), (1, 4));
+    // Each reaches the boot test, which boots the new ISO.
+    let (out, passed) = pekit(dir.path(), cache, &["test"]);
+    assert!(passed, "{out}");
+    assert_eq!(out, "passed           example/boots\n1 passed, 0 failed\n");
+    let (rdeps, _) = pekit(
+        dir.path(),
+        cache,
+        &["query", "rdeps", "example/motd.txt", "--kind", "test"],
+    );
+    assert_eq!(rdeps, "example/boots\n");
+    // The launcher `pekit run boot` runs.
+    let launcher = build_in(dir.path(), state.path(), "boot").unwrap();
+    let script =
+        fs::read_to_string(built_file(dir.path(), file_of(&launcher.value, None))).unwrap();
+    assert!(
+        script.contains("-cdrom /pekit-out/example/iso/assemble/peios.iso"),
+        "{script}"
+    );
+}

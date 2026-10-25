@@ -14,6 +14,15 @@
 #   `pekitconf.packagers`: its `pack` is `pack`, and its `publish` copies a
 #   packed package into an artifact directory with `ppk fetch`, which
 #   refuses a version whose content changed.
+# - `PpkPackage`: a package as ppk packed it: its name, version and
+#   architecture, and an artifact directory holding it.
+# - `packed(pkg)`: the `PpkPackage` of `pkg`, packed as `pack` packs it.
+# - `from_repository(repo, name, version)`: the `PpkPackage` of the version
+#   `version` of the package `name`, for `^platform`'s architecture, taken
+#   from the artifact directory `repo` with `ppk fetch`: a hermetic step,
+#   keyed by the repository's contents, so what it gives is what the
+#   repository holds. A repository is a directory of the workspace, until
+#   Peios serves packages over the network.
 import fs
 import packaging
 import toolchain
@@ -45,15 +54,48 @@ def pack(
     = out
 }
 
+type PpkPackage = {name: String, version: String, arch: String, artifacts: Dir}
+
 def packager() -> packaging.Packager {
     name = "ppk"
-    pack = fn(pkg: Package) -> Dir { packed(pkg) }
+    pack = fn(pkg: Package) -> Dir { pack_of(pkg) }
     publish = fn(pkg: Package, packed: Dir, store: String) -> {} { published(pkg, packed, store) }
+}
+
+def packed(pkg: Package, arch: String = this_arch()) -> PpkPackage {
+    name = pkg.name
+    version = pkg.version
+    arch = arch
+    artifacts = pack(pkg, arch = arch)
+}
+
+#[hermetic]
+def from_repository(
+    repo: Dir,
+    name: String,
+    version: String,
+    arch: String = this_arch(),
+    tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
+) -> PpkPackage {
+    let out = dir("artifacts")
+    let ran = exec([
+        tool.ppk.path,
+        "fetch",
+        "--from",
+        repo.path,
+        "{name}@{version}?arch={arch}",
+        "--artifact-dir",
+        out.path,
+    ])
+    name = name
+    version = version
+    arch = arch
+    artifacts = out
 }
 
 # `pkg` packed, as `pack` packs it: the name a packager's function calls,
 # since a field of the packager's own name would be the field.
-fn packed(pkg: Package) -> Dir { pack(pkg) }
+fn pack_of(pkg: Package) -> Dir { pack(pkg) }
 
 # `pkg`, packed into `packed`, copied into the artifact directory `store` by
 # `ppk fetch`, outside any step.

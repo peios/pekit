@@ -1,0 +1,94 @@
+# The qemu library: QEMU, the machine emulator, as a toolchain, and booting
+# images with it.
+#
+# - `Toolchain::Qemu`: a `QemuToolchain`: `root`, its install; `runtime`, a
+#   root it runs on, `/` for the host's; `system`, the emulator of x86-64
+#   machines; `firmware`, the UEFI firmware's code; and `variables`, a
+#   template of the firmware's variables, which each boot writes to a copy
+#   of its own. Its platform is the machine it emulates.
+# - `system_qemu`: the host's, under `/usr`: `qemu-system-x86_64` and
+#   OVMF's firmware, as Debian and Ubuntu install them.
+# - `boot(iso, until)`: boots the ISO `iso` under UEFI, with no network and
+#   its console on its first serial port, until a line holding `until`
+#   appears on it, and gives what it printed, as `exec` gives it: its
+#   status 0 if the line appeared. It uses KVM where the step has it
+#   (`#[device("kvm")]`), and emulates the machine where it hasn't.
+# - `launcher(iso)`: a program that boots `iso` as `boot` does, but with
+#   the terminal, for a person to use, as `pekit run` runs a build that
+#   gives one.
+import fs
+import toolchain
+import Toolchain from toolchain
+
+type QemuToolchain = {root: Dir, runtime: Dir, system: File, firmware: File, variables: File}
+
+enum Toolchain::Qemu<QemuToolchain>
+
+def Toolchain::Qemu system_qemu() {
+    host_platform = ^host_platform
+    platform = {arch = "x86_64"}
+    provides = {
+        root = dir("/usr")
+        runtime = dir("/")
+        system = file("/usr/bin/qemu-system-x86_64")
+        firmware = file("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        variables = file("/usr/share/OVMF/OVMF_VARS_4M.fd")
+    }
+}
+
+def boot(
+    iso: File,
+    until: String,
+    memory: String = "1G",
+    vm: QemuToolchain = toolchain.get(Toolchain::Qemu),
+) -> {status: Int, stdout: String, stderr: String} {
+    # The firmware's variables' snapshot goes under the step's own `/tmp`:
+    # QEMU puts one in `/var/tmp`, which a step has none of, if `TMPDIR` is
+    # `/tmp` itself.
+    let snapshots = "/tmp/qemu-snapshots"
+    let made = fs.mkdir(snapshots)
+    = exec(
+        [vm.system.path, ...machine(iso, memory, vm), "-nic", "none"],
+        env = {TMPDIR = snapshots},
+        panic = false,
+        until = until,
+    )
+}
+
+#[hermetic]
+def launcher(
+    iso: File,
+    memory: String = "2G",
+    vm: QemuToolchain = toolchain.get(Toolchain::Qemu),
+) -> File {
+    let words = [vm.system.path, ...machine(iso, memory, vm)].join(" ")
+    let at = "{dir(".").path}/boot"
+    let written = fs.write(at, "#!/bin/sh\nexec {words} \"$@\"\n")
+    let made = fs.set_executable(at, true)
+    = file(at)
+}
+
+# The machine `boot` and `launcher` boot `iso` on, with `memory` of memory:
+# QEMU's arguments but its program's. UEFI writes to its variables, so they
+# are a snapshot, written to a temporary file of QEMU's own, never to the
+# template.
+fn machine(iso: File, memory: String, vm: QemuToolchain): List<String> {
+    = [
+        "-accel",
+        "kvm",
+        "-accel",
+        "tcg",
+        "-machine",
+        "q35",
+        "-m",
+        memory,
+        "-nographic",
+        "-no-reboot",
+        "-drive",
+        "if=pflash,format=raw,readonly=on,file={vm.firmware.path}",
+        "-drive",
+        "if=pflash,format=raw,snapshot=on,file={vm.variables.path}",
+        "-cdrom",
+        iso.path,
+    ]
+}

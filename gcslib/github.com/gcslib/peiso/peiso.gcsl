@@ -1,0 +1,133 @@
+# The peiso library: bootable Peios ISOs, built by `peiso` from ppk
+# packages.
+#
+# - `Toolchain::Peiso`: peiso and the tools it runs, a `PeisoToolchain`:
+#   `root`, their install; `runtime`, a root they run on, `/` for the
+#   host's; and `peiso`, `mkirf` and `mkuki`. A workspace registers one in
+#   `pekitconf`, as it does ppk: none is published, so the library pins none.
+# - `Kernel`: the kernel an ISO boots, a package holding it, as peiso finds
+#   one, and its command line.
+# - `Carried`: a package an ISO carries, and whether the live system and
+#   the initramfs each hold it.
+# - `Layout`: what the initramfs or the live system holds outside `/usr`:
+#   symbolic links, each a path and its target, a target that starts with
+#   `:` being in `usr`, and empty directories.
+# - `iso(kernel, packages, ...)`: the ISO of `kernel` and `packages`, each a
+#   `package` definition's `Package`, which the library packs with ppk, or a
+#   `ppk.PpkPackage` packed already, such as one from a repository. The
+#   layouts replace peiso's defaults, as its spec's do. A hermetic step
+#   gathers the packages into one artifact directory with `ppk fetch`,
+#   writes peiso's spec, and runs `peiso build`: the same packages, kernel
+#   and layouts give the same ISO.
+import fs
+import toolchain
+import Toolchain from toolchain
+import "github.com/gcslib/ppk"
+
+type PeisoToolchain = {root: Dir, runtime: Dir, peiso: File, mkirf: File, mkuki: File}
+
+enum Toolchain::Peiso<PeisoToolchain>
+
+type Kernel = {package: Package | ppk.PpkPackage, cmdline: String = ""}
+
+type Carried = {package: Package | ppk.PpkPackage, liveboot: Bool = true, initramfs: Bool = false}
+
+type Link = {at: String, to: String}
+
+type Layout = {symlinks: List<Link>, dirs: List<String>}
+
+# A package as `assemble` is given it: packed.
+type Gathered = {package: ppk.PpkPackage, liveboot: Bool, initramfs: Bool}
+
+def iso(
+    kernel: Kernel,
+    packages: List<Carried>,
+    initramfs: Layout = {symlinks = [{at = "init"; to = ":sbin/prelude"}]; dirs = ["proc", "sys", "tmp"]},
+    liveboot: Layout = {
+        symlinks = [{at = "bin"; to = ":bin"}, {at = "sbin"; to = ":sbin"}]
+        dirs = ["tmp"]
+    },
+    output: String = "peios.iso",
+) -> File {
+    let gathered = for entry in packages {
+        = {package = packed(entry.package); liveboot = entry.liveboot; initramfs = entry.initramfs}
+    }
+    let booted = {package = packed(kernel.package); cmdline = kernel.cmdline}
+    = assemble(booted, gathered, initramfs, liveboot, output)
+}
+
+# `entry` packed by ppk, if it is not already.
+fn packed(entry: Package | ppk.PpkPackage) -> ppk.PpkPackage {
+    if entry is ppk.PpkPackage { entry } else { ppk.packed(entry) }
+}
+
+#[hermetic]
+fn assemble(
+    kernel: {package: ppk.PpkPackage, cmdline: String},
+    packages: List<Gathered>,
+    initramfs: Layout,
+    liveboot: Layout,
+    output: String,
+    tool: PeisoToolchain = toolchain.get(Toolchain::Peiso),
+    ppk_tool: ppk.PpkToolchain = toolchain.get(Toolchain::Ppk),
+) -> File {
+    let repo = dir("repository")
+    let carried = [kernel.package, ...(for entry in packages { entry.package })]
+    for pkg in carried {
+        let fetched = exec([
+            ppk_tool.ppk.path,
+            "fetch",
+            "--from",
+            pkg.artifacts.path,
+            "{pkg.name}@{pkg.version}?arch={pkg.arch}",
+            "--artifact-dir",
+            repo.path,
+        ])
+    }
+    let spec = "{dir(".").path}/peios.toml"
+    let written = fs.write(spec, spec_of(kernel, packages, initramfs, liveboot))
+    let built = exec([
+        tool.peiso.path,
+        "build",
+        spec,
+        "--out",
+        output,
+        "--mkirf",
+        tool.mkirf.path,
+        "--mkuki",
+        tool.mkuki.path,
+    ])
+    = file(output)
+}
+
+# peiso's TOML spec of an ISO of `kernel` and `packages`, its repository the
+# directory `repository` beside it, and the layouts.
+fn spec_of(
+    kernel: {package: ppk.PpkPackage, cmdline: String},
+    packages: List<Gathered>,
+    initramfs: Layout,
+    liveboot: Layout,
+): String {
+    let carried = for entry in packages {
+        = "[[package]]\nname = {quoted(entry.package.name)}\nversion = {quoted(entry.package.version)}\nliveboot = {entry.liveboot}\ninitramfs = {entry.initramfs}\n"
+    }
+    let head = [
+        "disable_default_repos = true\n",
+        "[[repository]]\nfilepath = \"repository\"\n",
+        "[kernel]\npackage = {quoted(kernel.package.name)}\nversion = {quoted(kernel.package.version)}\ncmdline = {quoted(kernel.cmdline)}\n",
+    ]
+    let tail = ["[initramfs]\n{layout(initramfs)}", "[liveboot]\n{layout(liveboot)}"]
+    = [...head, ...carried, ...tail].join("\n")
+}
+
+# A layout's keys, as peiso's spec writes them.
+fn layout(of: Layout): String {
+    let links = for link in of.symlinks { "{quoted(link.at)} = {quoted(link.to)}" }
+    let dirs = for name in of.dirs { quoted(name) }
+    = "symlinks = {{ {links.join(", ")} }}\ndirs = [{dirs.join(", ")}]\n"
+}
+
+# `text` as a TOML string.
+fn quoted(text: String): String {
+    = "\"{text.split("\\").join("\\\\").split("\"").join("\\\"")}\""
+}

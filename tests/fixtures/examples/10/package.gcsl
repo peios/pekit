@@ -1,0 +1,11 @@
+# A package built here: the message of the day, its text shouted.
+#[hermetic]
+fn shouted(src: File) -> File {
+    let r = exec(["/bin/sh", "-c", "tr a-z A-Z < {src.path} > motd"])
+    = file("motd")
+}
+
+def package dev.example.motd() {
+    version = "1.0-1"
+    files = {"share/motd" = shouted(file("motd.txt"))}
+}
