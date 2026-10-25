@@ -207,3 +207,19 @@ its own piece of work, after layer E.
   nothing again. A `publish` fails a package alone, as any target's
   failure does; the packages before it in program order stay published.
   `ppk fetch` makes a store directory that is not there.
+- E4: GCSL's function types can be written needing contexts, `fn(^arch)
+  -> T`, after their parameters, as they are shown; a declared `type`
+  cannot need one yet, since it is resolved in each file using it. The
+  prelude's `script<T>(name, f: fn(^script_session) -> T) -> T`, with
+  `ScriptSession = {args: List<String>}`, is the def-type. `pekit run NAME
+  ARGS...` runs the script `NAME`, its own effects on the host view, the
+  progress line cleared while one runs, since it may have the terminal;
+  or builds the build `NAME` and runs the one executable `File` it gives
+  on the same view, in pekit's directory, exiting with its status. The
+  host view is a bubblewrap, so a script's programs cannot gain
+  privileges: `sudo` fails in one. A build and a script of one name in
+  one directory fail every command at load; of one name in two
+  directories, `pekit run` asks for the directory. Two engine changes
+  came with it, to keep a script's builds those of `pekit build`: steps
+  keyed by the context they can read, and named under the definition
+  whose call made them (`engine.md`, as built in E4).

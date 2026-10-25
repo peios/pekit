@@ -7,8 +7,10 @@
 //!
 //! - its code: the path and contents' digest of every file whose source
 //!   makes it, in order;
-//! - its arguments, its function's captures and the context it runs in,
-//!   as plain data, each record's fields sorted by name, since GCSL compares
+//! - its arguments, its function's captures and the context it can read,
+//!   as GCSL gives it, every context bound where it was made but those with
+//!   no default that its function does not need, as plain data, each
+//!   record's fields sorted by name, since GCSL compares
 //!   records so, a float by its bits, every NaN one and `-0.0` as `0.0`;
 //! - each file it is given by its path *and* the digest of its contents,
 //!   and each directory by its path and its tree's digest: the path stays,

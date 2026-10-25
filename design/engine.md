@@ -233,3 +233,31 @@ Each leaves pekit2 working, and tested, as far as it goes.
 - As built in C5: the cache directory is `$PEKIT_CACHE_DIR`, else
   `$XDG_CACHE_HOME/pekit`, else `~/.cache/pekit`, holding the store and the
   staging directories (never `/tmp`, which is often memory).
+- As built in E4: a step's receipt holds only the context it can read, as
+  GCSL gives it: every context with a default, and each with none that its
+  function's type needs, needs being inferred through every call. So a
+  context only `pekit run` binds, `^script_session`, keys no step that
+  does not read it.
+- As built in E4: a step is named, and its outputs placed, under the
+  definition whose call made it, the innermost `DT PATH()` around it
+  (GCSL's `Workspace::step_definition`), else under its target: so
+  `build lib()` called from another target, a test or a script gives the
+  steps `pekit build lib` gives, found in the store.
+
+## Next: keying a step by the contexts it read
+
+A context with a default still keys every step under it, though few read
+it: changing one registered toolchain rekeys every step, since every step
+is keyed by `^toolchains`. The fix is to key a step by the contexts it
+read, recorded as it ran, as GCSL's memoised calls record theirs: a
+manifest per key of everything else, listing the contexts each run read,
+and a record per manifest entry, keyed by their values too. One
+constraint makes it more than keying: staging must match. A step's
+sandbox holds the files of every context's value, so a step keyed by the
+contexts it read could reach, by a fixed path, a file of one it didn't
+read, whose contents its key would not hold. So a step must be given the
+files of a context only once it reads it, which reads before the `exec`
+that uses them make possible: each effect's binds made from the contexts
+read so far, not the step's at its start. That is a change to how
+`start_step` stages a step and to `Layers`, and wants its own design and
+commits, before layer F.

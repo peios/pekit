@@ -44,13 +44,16 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
-use crate::engine::{BuildError, Outcomes, Packing, Settings, build_all_observed, package_all_observed};
+use crate::engine::{
+    BuildError, Outcomes, Packing, Settings, build_all_observed, package_all_observed,
+    program_command, run_script_observed,
+};
 use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
 use crate::layers::remove_tree;
 use crate::load::{Loaded, load};
-use crate::target::{Target, select};
+use crate::target::{Target, TargetError, select};
 use crate::trace::Trace;
 
 /// Pekit, a build system that runs GCSL build files as an action graph.
@@ -69,12 +72,45 @@ enum Command {
     Build(BuildArgs),
     /// Run tests.
     Test(TestArgs),
+    /// Run a script, or the program a build gives.
+    Run(RunArgs),
     /// Pack packages with the workspace's packagers.
     Package(PackageArgs),
     /// Pack packages and publish them into a store.
     Publish(PublishArgs),
     /// Remove what builds left: `pekit-out/`, and with `--cache` the store.
     Clean(CleanArgs),
+}
+
+/// `pekit run`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct RunArgs {
+    /// What every command that builds takes, before the name.
+    #[command(flatten)]
+    shared: Shared,
+    /// The script to run, or the build whose program to run, named as a
+    /// target is.
+    #[arg(value_name = "NAME")]
+    name: String,
+    /// What it is given: a script's `^script_session.args`, or the
+    /// program's arguments.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARG"
+    )]
+    args: Vec<String>,
+}
+
+/// What a command does with the targets it builds.
+#[derive(Clone, Copy, Debug)]
+enum Doing<'a> {
+    /// Builds them.
+    Build,
+    /// Packs them, or packs and publishes them.
+    Pack(&'a Packing),
+    /// Runs the one script given, with these words.
+    Script(&'a [String]),
 }
 
 /// `pekit package`'s arguments (see [Commands](#commands)).
@@ -196,6 +232,7 @@ pub fn run(
     match cli.command {
         Command::Build(args) => build_command(&args, cwd, terminal),
         Command::Test(args) => test_command(&args, cwd, terminal),
+        Command::Run(args) => run_command(&args, cwd, terminal),
         Command::Package(args) => package_command(
             (&args.packages, &Packing::Pack),
             &args.shared,
@@ -241,7 +278,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         return ExitCode::FAILURE;
     };
     let outcomes = match build_targets(
-        (&mut loaded, &targets, None),
+        (&mut loaded, &targets, Doing::Build),
         &settings,
         &args.shared,
         terminal,
@@ -321,7 +358,7 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
         return ExitCode::FAILURE;
     };
     let outcomes = match build_targets(
-        (&mut loaded, &tests, None),
+        (&mut loaded, &tests, Doing::Build),
         &settings,
         &args.shared,
         terminal,
@@ -371,6 +408,116 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
     }
 }
 
+/// `pekit run NAME [ARG...]` (see [Commands](#commands)): runs the script
+/// `NAME` with the words `ARG`, or builds the build `NAME` and runs the one
+/// executable file it gives with the arguments `ARG`, exiting as the
+/// program does.
+fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let mut loaded = match load(cwd) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return ExitCode::FAILURE;
+        }
+    };
+    let (target, script) = match runnable(&loaded, &args.name) {
+        Ok(found) => found,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let doing = if script {
+        Doing::Script(&args.args)
+    } else {
+        Doing::Build
+    };
+    let targets = [target];
+    let built = build_targets(
+        (&mut loaded, &targets, doing),
+        &settings,
+        &args.shared,
+        terminal,
+    );
+    let value = match built.map(|mut outcomes| outcomes.targets.remove(0)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) | Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            return ExitCode::FAILURE;
+        }
+    };
+    if script {
+        return ExitCode::SUCCESS;
+    }
+    let shown = targets[0].qualified();
+    let Plain::File { path, .. } = &value else {
+        let _ = writeln!(
+            terminal.err,
+            "error: `{shown}` gives no program to run: `pekit run` runs a build that gives one \
+             executable file"
+        );
+        return ExitCode::FAILURE;
+    };
+    let ran = program_command(&loaded, &settings, (path, &args.args)).and_then(|mut command| {
+        command
+            .status()
+            .map_err(|error| BuildError::Engine(error.to_string()))
+    });
+    match ran {
+        Ok(status) => status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .map_or(ExitCode::FAILURE, ExitCode::from),
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The script, or failing one the build, that `name` names in `loaded`'s
+/// workspace from its directory, with whether it is a script.
+///
+/// # Errors
+///
+/// That `name` is a glob, names neither, or names both, each as shown.
+fn runnable(loaded: &Loaded, name: &str) -> Result<(Target, bool), String> {
+    if name == "." || name.contains('*') {
+        return Err(format!(
+            "error: `pekit run` runs one script or build, which `{name}` does not name"
+        ));
+    }
+    let found = |def_type: &str| select(&loaded.workspace, def_type, &[name], &loaded.here);
+    let (script, build) = (found("script"), found("build"));
+    let one = |found: &Result<Vec<Target>, TargetError>| match found {
+        Ok(targets) => targets.first().cloned(),
+        Err(_) => None,
+    };
+    match (one(&script), one(&build)) {
+        (Some(script), Some(build)) => Err(format!(
+            "error: `{name}` names the script `{}` and the build `{}`: name the one to run by \
+             its directory",
+            script.qualified(),
+            build.qualified()
+        )),
+        (Some(script), None) => Ok((script, true)),
+        (None, Some(build)) => Ok((build, false)),
+        (None, None) => {
+            let unexpected = [script, build]
+                .into_iter()
+                .filter_map(Result::err)
+                .find(|error| !matches!(error, TargetError::NoDefinition { .. }));
+            Err(unexpected.map_or_else(
+                || format!("error: no `script` or `build` is named `{name}`"),
+                |error| error.message(),
+            ))
+        }
+    }
+}
+
 /// `pekit package [PACKAGE...]` and `pekit publish PACKAGE... --to STORE`
 /// (see [Commands](#commands)): packs each package with each packager, and
 /// for `publish` publishes each, showing what each packer made.
@@ -410,7 +557,7 @@ fn package_command(
         return ExitCode::FAILURE;
     };
     let built = build_targets(
-        (&mut loaded, &packages, Some(packing)),
+        (&mut loaded, &packages, Doing::Pack(packing)),
         &settings,
         shared,
         terminal,
@@ -624,15 +771,16 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
     })
 }
 
-/// Builds `targets` of `loaded`'s workspace with `settings`, or packs them
-/// as `packing` says, showing its progress on `terminal` as it goes and
-/// writing its trace where `shared` says.
+/// Builds `targets` of `loaded`'s workspace with `settings`, or does with
+/// them what `doing` says, showing its progress on `terminal` as it goes
+/// and writing its trace where `shared` says.
 ///
 /// # Errors
 ///
-/// What [`build_all_observed`] or [`package_all_observed`] fails with.
+/// What [`build_all_observed`], [`package_all_observed`] or
+/// [`run_script_observed`] fails with.
 fn build_targets(
-    (loaded, targets, packing): (&mut Loaded, &[Target], Option<&Packing>),
+    (loaded, targets, doing): (&mut Loaded, &[Target], Doing<'_>),
     settings: &Settings,
     shared: &Shared,
     terminal: &mut Terminal<'_>,
@@ -648,11 +796,15 @@ fn build_targets(
                 progress.show(event, err);
             }
         };
-        match packing {
-            Some(packing) => {
+        match (doing, targets) {
+            (Doing::Build, _) => build_all_observed(loaded, targets, settings, &mut events),
+            (Doing::Pack(packing), _) => {
                 package_all_observed(loaded, targets, (settings, packing), &mut events)
             }
-            None => build_all_observed(loaded, targets, settings, &mut events),
+            (Doing::Script(args), [script]) => {
+                run_script_observed(loaded, script, (settings, args), &mut events)
+            }
+            (Doing::Script(_), _) => Err(BuildError::Engine("a script is run alone".to_owned())),
         }
     };
     if live {
@@ -681,7 +833,9 @@ fn build_targets(
 }
 
 /// A build's progress, as a terminal shows it: one line, rewritten at each
-/// event, of the steps running and how many have finished.
+/// event, of the steps running and how many have finished. None is shown
+/// while one of a target's own effects runs, which may be a script's
+/// program that has the terminal.
 #[derive(Debug, Default)]
 struct Progress {
     /// The steps running, in the order they started.
@@ -692,12 +846,24 @@ struct Progress {
     found: usize,
     /// Whether a line is shown.
     shown: bool,
+    /// The target's own effects queued and not yet run, by node.
+    own: Vec<u32>,
 }
 
 impl Progress {
     /// Takes in `event` and shows the line again on `err`.
     fn show(&mut self, event: &Event, err: &mut dyn Write) {
         match &event.kind {
+            EventKind::EffectQueued {
+                node, step: None, ..
+            } => {
+                self.own.push(*node);
+                self.clear(err);
+                return;
+            }
+            EventKind::EffectRan {
+                node, step: None, ..
+            } => self.own.retain(|own| own != node),
             EventKind::Started { step, .. } => self.running.push(step.clone()),
             EventKind::Finished { step } | EventKind::Failed { step, .. } => {
                 self.running.retain(|running| running != step);
@@ -707,6 +873,9 @@ impl Progress {
             }
             EventKind::Cached { .. } => self.found += 1,
             _ => return,
+        }
+        if !self.own.is_empty() {
+            return;
         }
         let mut line = format!("{} run, {} found", self.finished, self.found);
         if !self.running.is_empty() {

@@ -83,6 +83,9 @@ const KEYCHAIN_KEYS: &str = "keychain_keys";
 /// The context the `packaging` module lists the packagers in.
 const PACKAGERS: &str = "packagers";
 
+/// The context only a run of a script binds (see the prelude's `script`).
+const SCRIPT_SESSION: &str = "script_session";
+
 /// The packaging module's file, which packing gives each package to.
 const PACKAGING_FILE: &str = "<stdlib>/packaging.gcsl";
 
@@ -355,6 +358,69 @@ pub fn package_all_observed(
     build_roots(loaded, targets, settings, (Some(wrap), Vec::new()), events)
 }
 
+/// Runs the script `script` of `loaded`'s workspace, a definition of
+/// `script`, as one build, as [`build_all_observed`] builds a target: in
+/// the root context `^script_session` too, its `args` the words `args`.
+/// Its own effects run on the host's view of the workspace, in program
+/// order, outside any step, and what it builds is built as any build is.
+///
+/// # Errors
+///
+/// That the workspace's standard library declares no scripts, or those of
+/// [`build_all_observed`].
+pub fn run_script_observed(
+    loaded: &mut Loaded,
+    script: &Target,
+    (settings, args): (&Settings, &[String]),
+    events: &mut dyn FnMut(&Event),
+) -> Result<Outcomes, BuildError> {
+    if !loaded.workspace.declares_context(SCRIPT_SESSION) {
+        return Err(BuildError::Engine(format!(
+            "this workspace's GCSL declares no `{SCRIPT_SESSION}`, so it runs no scripts"
+        )));
+    }
+    let words = args.iter().map(|word| Plain::Str(word.clone())).collect();
+    let session = Plain::Record(vec![("args".to_owned(), Plain::List(words))]);
+    let session = loaded.workspace.from_plain(&session);
+    let contexts = vec![(SCRIPT_SESSION.to_owned(), session)];
+    build_roots(
+        loaded,
+        std::slice::from_ref(script),
+        settings,
+        (None, contexts),
+        events,
+    )
+}
+
+/// The command that runs the program at `path`, as a build names it,
+/// `/pekit-out/app/link/app` say, with the arguments `args`, on the host's
+/// view of `loaded`'s workspace that a script's effects run on, in the
+/// directory pekit runs in, with its terminal and its environment.
+///
+/// # Errors
+///
+/// That `path` is no file of the view, or is not executable, or that the
+/// view cannot be made.
+pub fn program_command(
+    loaded: &Loaded,
+    settings: &Settings,
+    (path, args): (&str, &[String]),
+) -> Result<std::process::Command, BuildError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let host = HostView::new(&loaded.root, &settings.outputs, "", &settings.scratch);
+    let on_host = host.host_path(path).map_err(BuildError::Engine)?;
+    let executable = fs::metadata(&on_host)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
+    if !executable {
+        return Err(BuildError::Engine(format!(
+            "`{path}` is no executable file, so it cannot be run"
+        )));
+    }
+    let mut command = std::process::Command::new(path);
+    command.args(args);
+    host.command(command).map_err(BuildError::Engine)
+}
+
 /// [`build_all_observed`], each target's call given to `wrap` if it is
 /// given, in the root contexts and `contexts` too.
 fn build_roots(
@@ -395,6 +461,7 @@ fn build_roots(
         steps: HashMap::new(),
         step_names: HashMap::new(),
         step_roots: HashMap::new(),
+        step_dirs: HashMap::new(),
         names_used: HashMap::new(),
         named: 0,
         pool: Pool::new(settings.jobs.max(1)),
@@ -607,8 +674,11 @@ struct Run<'a> {
     step_names: HashMap<NodeId, String>,
     /// The target each step is of, by node, its number among the roots.
     step_roots: HashMap<NodeId, usize>,
-    /// How many steps of each function's name each target has named.
-    names_used: HashMap<(usize, String), u32>,
+    /// The directory under `/pekit-out` of each step, by node: the
+    /// definition's whose call made it, or failing one its target's.
+    step_dirs: HashMap<NodeId, String>,
+    /// How many steps of each function's name each directory has named.
+    names_used: HashMap<(String, String), u32>,
     /// How many of the graph's nodes have been looked at to name steps.
     named: usize,
     /// The pool effects run on.
@@ -848,8 +918,12 @@ impl Run<'_> {
         self.unit_roots.get(&unit).copied().unwrap_or(0)
     }
 
-    /// The directory under `/pekit-out` of the target the step `id` is of.
+    /// The directory under `/pekit-out` of the step `id`
+    /// ([`Run::name_new_steps`]).
     fn step_dir(&self, id: NodeId) -> &str {
+        if let Some(dir) = self.step_dirs.get(&id) {
+            return dir;
+        }
         let root = self.step_roots.get(&id).copied().unwrap_or(0);
         self.roots.get(root).map_or("", |found| found.dir.as_str())
     }
@@ -1139,7 +1213,12 @@ impl Run<'_> {
     /// Names every step the graph has that is not named, in the order the
     /// target's code met them, which is the same in every build whatever
     /// order steps finish in: its function's name, and its number among the
-    /// target's steps of that name after the first, `compile.2`.
+    /// steps of that name of its directory after the first, `compile.2`.
+    /// A step's directory is that of the definition whose call made it,
+    /// `app/lib` for one `build lib()` made, whichever target called it, so
+    /// that its outputs, which key it, are the same in every build that
+    /// reaches it ([`gcsl::workspace::Workspace::step_definition`]); one a
+    /// target's own code made is its target's.
     fn name_new_steps(&mut self) {
         let mut found = Vec::new();
         for (id, node) in self.graph.nodes().skip(self.named) {
@@ -1158,7 +1237,18 @@ impl Run<'_> {
         for (id, function, root) in found {
             self.step_roots.insert(id, root);
             self.unit_roots.insert(STEP_UNITS + id.number(), root);
-            let count = self.names_used.entry((root, function.clone())).or_insert(0);
+            let dir = match self.loaded.workspace.step_definition(&self.graph, id) {
+                Some(definition) => definition.qualified().trim_start_matches('/').to_owned(),
+                None => self
+                    .roots
+                    .get(root)
+                    .map_or_else(String::new, |found| found.dir.clone()),
+            };
+            let count = self
+                .names_used
+                .entry((dir.clone(), function.clone()))
+                .or_insert(0);
+            self.step_dirs.insert(id, dir);
             *count += 1;
             let name = if *count == 1 {
                 function

@@ -12,7 +12,9 @@
 //! `fileroot.workspace` is `/w` and `fileroot.this` `/w/<directory>`.
 //! The sources are kept, the standard files first, so that a diagnostic,
 //! which names its file by input number, is shown against its file
-//! ([`Loaded::render`], [`LoadError::render`]).
+//! ([`Loaded::render`], [`LoadError::render`]). A `build` and a `script` of
+//! one name in one directory are an error, since `pekit run NAME` would run
+//! either ([`LoadError::BuildAndScript`]).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 use gcsl::workspace::{self, Workspace};
 
 use crate::sandbox::WORKSPACE;
+use crate::target::{Target, select};
 use gcsl::diagnostic::Renderer;
 use gcsl::{Diagnostic, SourceFile};
 
@@ -60,6 +63,11 @@ pub enum LoadError {
     },
     /// A file or directory of the workspace could not be read.
     Read(gcsl_disk::ReadError),
+    /// A `build` and a `script` of one directory have one name.
+    BuildAndScript {
+        /// Their qualified name.
+        name: String,
+    },
     /// The workspace's check failed.
     Check {
         /// Every source, as [`Loaded::sources`] has them.
@@ -80,6 +88,10 @@ impl LoadError {
                 dir.display()
             ),
             LoadError::Read(error) => format!("error: {error}\n"),
+            LoadError::BuildAndScript { name } => format!(
+                "error: `{name}` is both a build and a script, so `pekit run` could run either: \
+                 rename one\n"
+            ),
             LoadError::Check {
                 sources,
                 diagnostics,
@@ -124,18 +136,41 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
     let mut sources = standard;
     sources.extend(read.shown);
     match checked {
-        Ok(workspace) => Ok(Loaded {
-            root,
-            here,
-            sources,
-            names,
-            workspace,
-        }),
+        Ok(workspace) => {
+            if let Some(name) = build_and_script(&workspace) {
+                return Err(LoadError::BuildAndScript { name });
+            }
+            Ok(Loaded {
+                root,
+                here,
+                sources,
+                names,
+                workspace,
+            })
+        }
         Err(diagnostics) => Err(LoadError::Check {
             sources,
             diagnostics,
         }),
     }
+}
+
+/// The qualified name of a `build` of `workspace` that a `script` of its
+/// directory has too, the first in order, if one has. A workspace whose
+/// def-types cannot be listed has none here: the commands report why.
+fn build_and_script(workspace: &Workspace) -> Option<String> {
+    let every = |def_type: &str| -> Vec<String> {
+        select(workspace, def_type, &["**"], "")
+            .map(|targets| targets.iter().map(Target::qualified).collect())
+            .unwrap_or_default()
+    };
+    let scripts = every("script");
+    if scripts.is_empty() {
+        return None;
+    }
+    every("build")
+        .into_iter()
+        .find(|build| scripts.binary_search(build).is_ok())
 }
 
 /// `diagnostics`, each shown against the source of its input in `sources`,
