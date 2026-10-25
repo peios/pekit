@@ -1,0 +1,7 @@
+# ppk, built from its source in `src`, with the crates its `Cargo.lock`
+# pins, as a static program.
+import "github.com/gcslib/rust"
+
+def build ppk() {
+    = rust.cargo_build(dir("src"), rust.vendored(file("src/Cargo.lock")), bins = ["ppk"])
+}

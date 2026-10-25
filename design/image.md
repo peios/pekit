@@ -160,3 +160,18 @@ ported under the example 10 fixture, since `pkgs` is Jack's.
   I5 it checks hold: a change to the package built here runs three steps
   and finds the repository's two; a change to the command line alone runs
   the ISO's step and finds four; each reruns the boot test.
+- X6a: `gcslib/rust`: `rust_1_98`, Rust 1.98.1's rustc, Cargo and the
+  `x86_64-unknown-linux-gnu` and `-musl` standard libraries, pinned by the
+  SHA-256s prelude's `MODULE.bazel` pins, composed into one install by a
+  step; rustc needs `libz.so.1`, which the Bootlin sysroot lacks, so the
+  toolchain builds zlib 1.3.1 with buildenv's pinned environment and puts
+  its libraries beside rustc's, found through rustc's `$ORIGIN/../lib`.
+  `crates(lock)` reads `Cargo.lock` line by line, since GCSL reads no
+  TOML; `vendored(lock)` fetches each crate by its checksum and lays them
+  out with `.cargo-checksum.json` records that name no file, which Cargo
+  accepts; `cargo_build` runs Cargo in a sandbox of the runtime, with
+  prelude's musl flags, `-Crelocation-model=pic -Clink-self-contained=yes
+  -Clink-arg=-static-pie`, by default, linking with Bootlin's gcc. ppk
+  builds from its committed tree in about half a minute from nothing,
+  and the same program strictly, byte for byte. Cargo is one step: per
+  crate steps, as `rules_rust` makes, are a follow-up.

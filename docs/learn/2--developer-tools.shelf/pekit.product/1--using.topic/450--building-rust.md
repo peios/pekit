@@ -1,0 +1,61 @@
+---
+title: Building Rust
+type: guide
+description: Build Rust programs with Cargo from the crates Cargo.lock pins, hermetically, with gcslib's rust library and its pinned Rust.
+---
+
+The rust library builds Rust programs with Cargo, from the crates your
+`Cargo.lock` pins, with no network and nothing of the host:
+
+```text
+import "github.com/gcslib/rust"
+
+def build ppk() {
+    = rust.cargo_build(dir("src"), rust.vendored(file("src/Cargo.lock")), bins = ["ppk"])
+}
+```
+
+`rust.vendored(lock)` fetches every crate of crates.io that `lock` pins,
+each checked against the checksum `Cargo.lock` records for it, and lays
+them out as `cargo vendor` does. `rust.cargo_build(src, vendor, bins)`
+then builds the Cargo workspace `src` with `cargo build --release
+--frozen --offline` from those crates, and gives a directory of the
+binaries `bins`, each by its name. A crate from anywhere but crates.io,
+such as a git repository, is an error, since nothing pins it by a
+checksum.
+
+## Targets
+
+By default `cargo_build` builds for `x86_64-unknown-linux-musl`, as
+static, position-independent programs that need nothing of the system
+they run on. Give `target = "x86_64-unknown-linux-gnu"` and `rustflags =
+[]` for programs linked against glibc instead. `packages` names the
+workspace's packages to build, as Cargo's `-p` does.
+
+## The toolchain
+
+The library asks the `toolchain` module for a `Toolchain::Rust`. Its
+`rust_1_98` is Rust 1.98.1 from static.rust-lang.org, each part pinned by
+its SHA-256, with the standard libraries for both targets. It runs on the
+gcc library's Bootlin sysroot and links with its compiler, and gives
+rustc the zlib it needs, built from zlib's pinned source with the
+buildenv library's pinned environment. Register it with the gcc
+library's toolchain:
+
+```text
+import * from "github.com/gcslib/gcc"
+import * from "github.com/gcslib/rust"
+import Toolchain from toolchain
+
+pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::Rust rust_1_98]}
+```
+
+Everything is pinned, so a strict build (see ~pekit/building-a-target)
+builds the same program, byte for byte.
+
+## What is a step
+
+Each crate's fetch and unpacking is its own, kept in the store. The
+vendored directory is one step, and the whole of `cargo build` another,
+so changing one source file of the workspace builds the workspace again,
+as Cargo would, but no crate is fetched again.

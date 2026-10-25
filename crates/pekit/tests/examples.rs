@@ -775,3 +775,97 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
         "{script}"
     );
 }
+
+/// The workspace configuration that registers the gcc library's Bootlin
+/// toolchain and the rust library's pinned Rust.
+const RUST: &str = "import * from \"github.com/gcslib/gcc\"\n\
+                    import * from \"github.com/gcslib/rust\"\n\
+                    import Toolchain from toolchain\n\
+                    pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::Rust rust_1_98]}\n";
+
+/// The Rust parts and the crates `rust.vendored` fetches, by their paths in
+/// [`downloads`]' `rust/`: what the rust library's builds need, besides the
+/// Bootlin toolchain.
+fn rust_downloads() -> Vec<PathBuf> {
+    let dir = downloads().join("rust");
+    let mut found: Vec<PathBuf> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "xz"))
+        .collect();
+    found.extend(
+        fs::read_dir(dir.join("crates"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path()),
+    );
+    found
+}
+
+#[test]
+fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
+    let source = repository().join("../ppk");
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) =
+        seeded(&names).filter(|_| rust.len() > 4 && source.join("Cargo.lock").is_file())
+    else {
+        eprintln!("skipped: Rust, the crates or ppk's source are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    copy_tree(
+        &repository().join("tests/fixtures/rust"),
+        &dir.path().join("example"),
+    );
+    copy_tree(
+        &repository().join("gcslib"),
+        &dir.path().join(".gcsl/libraries"),
+    );
+    fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
+    // ppk's committed tree, as a release would build it.
+    let src = dir.path().join("example/src");
+    fs::create_dir_all(&src).unwrap();
+    let archive = Command::new("git")
+        .args(["-C", &source.to_string_lossy(), "archive", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(archive.status.success());
+    tar::Archive::new(&archive.stdout[..]).unpack(&src).unwrap();
+    let built = build_in(dir.path(), state.path(), "ppk").unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let ppk = built_file(dir.path(), &format!("{path}/ppk"));
+    let version = Command::new(&ppk).arg("--version").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
+    // A static program, which needs nothing of the system it runs on.
+    let header = fs::read(&ppk).unwrap();
+    assert!(
+        !header
+            .windows(b"ld-linux".len())
+            .any(|window| window == b"ld-linux")
+    );
+    // Built again, nothing runs.
+    let again = build_in(dir.path(), state.path(), "ppk").unwrap();
+    assert_eq!(again.ran, 0);
+    // And strictly, with nothing of the host: the same program.
+    let strict = Options {
+        strict: true,
+        ..Options::default()
+    };
+    let (built, _) = observed_with(dir.path(), state.path(), "ppk", strict);
+    let built = built.unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let strictly = fs::read(built_file(dir.path(), &format!("{path}/ppk"))).unwrap();
+    assert_eq!(strictly, header, "a strict build gives the same program");
+}
