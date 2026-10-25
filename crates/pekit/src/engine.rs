@@ -771,6 +771,31 @@ fn hermetic(attributes: &[Attribute]) -> bool {
     })
 }
 
+/// The directory under `/pekit-out` of the steps of `definition`: its
+/// qualified name, a library's under `.libraries/`, which no directory of a
+/// workspace can be, and one made with a variant under its def-type and
+/// variant too, `Toolchain.C/gcc`, so that two of one name never share one.
+fn definition_dir(definition: &gcsl::workspace::Referenced) -> String {
+    let dir = match definition.dir.strip_prefix(gcsl::workspace::LIBRARIES) {
+        Some(rest) => format!(".libraries{rest}"),
+        None => definition.dir.clone(),
+    };
+    let name = if definition.def_type.contains("::") {
+        format!(
+            "{}/{}",
+            definition.def_type.replace("::", "."),
+            definition.path
+        )
+    } else {
+        definition.path.clone()
+    };
+    if dir.is_empty() {
+        name
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
 /// The devices a step of a function with `attributes` is bound, by its
 /// `#[device(NAME)]`s: `/dev/kvm` for `kvm`, where this machine has it, and
 /// nothing where it doesn't, since a device changes how fast a step runs,
@@ -1611,7 +1636,7 @@ impl Run<'_> {
             self.step_roots.insert(id, root);
             self.unit_roots.insert(STEP_UNITS + id.number(), root);
             let dir = match self.loaded.workspace.step_definition(&self.graph, id) {
-                Some(definition) => definition.qualified().trim_start_matches('/').to_owned(),
+                Some(definition) => definition_dir(&definition),
                 None => self
                     .roots
                     .get(root)

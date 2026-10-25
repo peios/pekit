@@ -211,7 +211,10 @@ has steps `cc` and `cc.2`.
 A step that `build lib()` makes is `lib`'s, whichever target, test, or
 script calls it, so building `lib` itself finds it in the store. Two
 targets that make the same call in their own code have a step each. To
-share the work, put it in a build of its own that both call.
+share the work, put it in a build of its own that both call. A step that
+a library's definition makes, such as a pinned toolchain's, is under
+`pekit-out/.libraries/`, by the library's path, the same for every target
+that uses it.
 
 The copies are your own: you can change or delete them, and the next
 build puts them back.

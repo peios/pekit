@@ -1,3 +1,5 @@
+import "github.com/gcslib/rust"
+
 # A package built here: the message of the day, its text shouted.
 #[hermetic]
 fn shouted(src: File) -> File {
@@ -8,4 +10,22 @@ fn shouted(src: File) -> File {
 def package dev.example.motd() {
     version = "1.0-1"
     files = {"share/motd" = shouted(file("motd.txt"))}
+}
+
+# ppk, built from its source with the crates its `Cargo.lock` pins.
+def build ppk() {
+    = rust.cargo_build(dir("ppk"), rust.vendored(file("ppk/Cargo.lock")), bins = ["ppk"])
+}
+
+# ppk's static program.
+def package dev.peios.ppk() {
+    version = "0.1.0-1"
+    files = {"bin/ppk" = (build ppk()).file("ppk")}
+}
+
+# The live-boot hook, which finds the medium and composes the live system's
+# root from the packages it holds.
+def package dev.peios.live-root() {
+    version = "0.1.0-1"
+    files = {"libexec/prelude/hooks.d/ppk-live-root" = file("ppk/boot/ppk-live-root")}
 }

@@ -1,7 +1,8 @@
 # Example 10, as it runs today: an ISO of the Peios kernel and busybox, from
-# a repository beside this file, and a package built here, booted to
-# busybox's prompt by a test. Jack's draft is examples/10/build.gcsl; what
-# it needs that does not exist yet is in design/image.md.
+# a repository beside this file, and packages built here, ppk among them,
+# from its source in `ppk/`, booted to busybox's prompt by a test. Jack's
+# draft is examples/10/build.gcsl; what it needs that does not exist yet is
+# in design/image.md.
 import "github.com/gcslib/peiso"
 import "github.com/gcslib/ppk"
 import "github.com/gcslib/qemu"
@@ -13,12 +14,14 @@ fn from_repository(name: String, version: String) -> ppk.PpkPackage {
 }
 
 # The image: an ordinary build. Busybox is the initramfs's init, since
-# prelude, the live-boot hook and ppk are not built yet.
+# prelude is not built yet, so the live-boot hook is carried but not run.
 def build iso() {
     = peiso.iso(
         kernel = {package = from_repository("dev.peios.kernel", "0.25.0-indev-1"); cmdline = "console=ttyS0"},
         packages = [
             {package = from_repository("net.busybox.busybox", "1.37.0-1"); initramfs = true},
+            {package = package dev.peios.ppk(); initramfs = true},
+            {package = package dev.peios.live-root(); liveboot = false; initramfs = true},
             {package = package dev.example.motd()},
         ],
         initramfs = {symlinks = [{at = "init"; to = ":bin/busybox"}]; dirs = ["proc", "sys", "tmp", "dev"]},

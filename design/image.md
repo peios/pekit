@@ -175,3 +175,19 @@ ported under the example 10 fixture, since `pkgs` is Jack's.
   builds from its committed tree in about half a minute from nothing,
   and the same program strictly, byte for byte. Cargo is one step: per
   crate steps, as `rules_rust` makes, are a follow-up.
+- X6b: example 10's image carries `dev.peios.ppk`, built from ppk's
+  committed tree with the rust library, and `dev.peios.live-root`, its
+  hook from ppk's `boot/`. With busybox as init the hook is carried, not
+  run. Found with it: a step a library's definition made, buildenv's
+  toolchain's say, was its target's, since a definition made with a
+  variant is in no def-type's listing, so each target that resolved the
+  toolchain made it again. GCSL now finds such a definition by its cell,
+  `Tool::C gcc`, and pekit puts a library's under `.libraries/` and a
+  variant's under its def-type, `.libraries/github.com/gcslib/buildenv/
+  Toolchain.BuildEnv/busybox_x86_64/assemble`.
+- Next of I6: prelude needs the Peios SDK, built from `peios-sdk` at a
+  pinned commit by prelude's `tools/prepare-sdk.py`, a crate from a git
+  repository, `peios-rs` pinned by commit, which the rust library refuses
+  until it pins git crates, and libclang, for bindgen, which wants a
+  pinned LLVM. peiosutils, for `mkirf` and `mkuki`, is a large Cargo
+  workspace. The kernel waits on Jack.

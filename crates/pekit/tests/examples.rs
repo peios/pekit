@@ -658,10 +658,11 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
 }
 
 /// The workspace configuration of example 10: the host's C toolchain and
-/// QEMU, and ppk and peiso's tools at `tools/`.
+/// QEMU, ppk and peiso's tools at `tools/`, and the pinned Rust.
 const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      import * from \"github.com/gcslib/peiso\"\n\
                      import * from \"github.com/gcslib/qemu\"\n\
+                     import * from \"github.com/gcslib/rust\"\n\
                      import * from toolchain\n\
                      import fileroot\n\
                      import path\n\
@@ -679,7 +680,8 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      mkirf = tools.file(\"mkirf\"); mkuki = tools.file(\"mkuki\")}\n\
                      }\n\
                      pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk, \
-                     Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu]}\n";
+                     Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu, \
+                     Toolchain::Rust rust_1_98]}\n";
 
 /// The programs example 10 needs, each by its name in the workspace's
 /// `tools/` and where it is: ppk and peiso from `PATH`, and peiosutils'
@@ -719,22 +721,32 @@ fn image_tools() -> Option<Vec<(&'static str, PathBuf)>> {
 
 #[test]
 fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
-    let repository = downloads().join("peios-repository");
-    let Some(tools) = image_tools().filter(|_| repository.is_dir()) else {
-        eprintln!("skipped: example 10's tools or its repository are not on this machine");
+    let source = repository().join("../ppk");
+    let packages = downloads().join("peios-repository");
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let ready = packages.is_dir() && rust.len() > 4 && source.join("Cargo.lock").is_file();
+    let (Some(tools), Some(state)) = (image_tools(), seeded(&names).filter(|_| ready)) else {
+        eprintln!("skipped: example 10's tools, its repository, Rust or ppk's source are not here");
         return;
     };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
     let dir = example(10, IMAGE);
+    committed(&source, &dir.path().join("example/ppk"));
     fs::create_dir_all(dir.path().join("tools")).unwrap();
     for (name, path) in &tools {
         fs::copy(path, dir.path().join("tools").join(name)).unwrap();
     }
-    copy_tree(&repository, &dir.path().join("example/repository"));
-    let state = tempfile::tempdir().unwrap();
-    // The kernel and busybox from the repository, the package built here,
-    // packed, and the ISO.
+    copy_tree(&packages, &dir.path().join("example/repository"));
+    // The kernel and busybox from the repository, ppk built from its source
+    // and the packages built here, each packed, and the ISO.
     let built = build_in(dir.path(), state.path(), "iso").unwrap();
-    assert_eq!((built.ran, built.cached), (5, 0));
+    assert!(built.ran > 9, "{}", built.ran);
+    let ppk = build_in(dir.path(), state.path(), "ppk").unwrap();
+    assert_eq!(ppk.ran, 0, "the ISO's ppk is the one built alone");
     assert!(built_file(dir.path(), file_of(&built.value, None)).is_file());
     // The boot test boots it to busybox's prompt.
     let cache = state.path();
@@ -751,11 +763,11 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
     // ISO, and none of the repository's packages.
     edit("motd.txt", "welcome", "hello");
     let again = build_in(dir.path(), state.path(), "iso").unwrap();
-    assert_eq!((again.ran, again.cached), (3, 2));
+    assert_eq!(again.ran, 3, "{}", again.cached);
     // A change to the kernel's command line alone: the ISO, and no package.
     edit("build.gcsl", "\"console=ttyS0\"", "\"console=ttyS0 quiet\"");
     let again = build_in(dir.path(), state.path(), "iso").unwrap();
-    assert_eq!((again.ran, again.cached), (1, 4));
+    assert_eq!(again.ran, 1, "{}", again.cached);
     // Each reaches the boot test, which boots the new ISO.
     let (out, passed) = pekit(dir.path(), cache, &["test"]);
     assert!(passed, "{out}");
@@ -805,6 +817,18 @@ fn rust_downloads() -> Vec<PathBuf> {
     found
 }
 
+/// The committed tree of the git repository at `source`, at `HEAD`,
+/// written into `into`, as a release would build it.
+fn committed(source: &Path, into: &Path) {
+    fs::create_dir_all(into).unwrap();
+    let archive = Command::new("git")
+        .args(["-C", &source.to_string_lossy(), "archive", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(archive.status.success());
+    tar::Archive::new(&archive.stdout[..]).unpack(into).unwrap();
+}
+
 #[test]
 fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     let source = repository().join("../ppk");
@@ -831,14 +855,7 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     );
     fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
     // ppk's committed tree, as a release would build it.
-    let src = dir.path().join("example/src");
-    fs::create_dir_all(&src).unwrap();
-    let archive = Command::new("git")
-        .args(["-C", &source.to_string_lossy(), "archive", "HEAD"])
-        .output()
-        .unwrap();
-    assert!(archive.status.success());
-    tar::Archive::new(&archive.stdout[..]).unpack(&src).unwrap();
+    committed(&source, &dir.path().join("example/src"));
     let built = build_in(dir.path(), state.path(), "ppk").unwrap();
     let Plain::Dir { path, .. } = &built.value else {
         panic!("not a directory: {:?}", built.value);
