@@ -771,6 +771,43 @@ fn hermetic(attributes: &[Attribute]) -> bool {
     })
 }
 
+/// The devices a step of a function with `attributes` is bound, by its
+/// `#[device(NAME)]`s: `/dev/kvm` for `kvm`, where this machine has it, and
+/// nothing where it doesn't, since a device changes how fast a step runs,
+/// never what it gives, and so keys nothing.
+///
+/// # Errors
+///
+/// A device pekit doesn't know.
+fn devices_of(attributes: &[Attribute]) -> Result<Vec<PathBuf>, String> {
+    let mut devices = Vec::new();
+    for attribute in attributes
+        .iter()
+        .filter(|attribute| attribute.id.name() == "device")
+    {
+        let name = attribute
+            .args
+            .iter()
+            .find_map(|(field, value)| match value {
+                Constant::Str(name) if &**field == "name" => Some(name.to_string()),
+                _ => None,
+            });
+        let path = match name.as_deref() {
+            Some("kvm") => PathBuf::from("/dev/kvm"),
+            other => {
+                return Err(format!(
+                    "pekit gives a step no device `{}`: the one it knows is `kvm`",
+                    other.unwrap_or_default()
+                ));
+            }
+        };
+        if path.exists() && !devices.contains(&path) {
+            devices.push(path);
+        }
+    }
+    Ok(devices)
+}
+
 /// No deferred call is a step: what runs in a step's own unit, inline.
 fn inline(_: &[Attribute]) -> bool {
     false
@@ -786,6 +823,8 @@ struct StepRun {
     sandbox: Arc<StepSandbox>,
     /// What it is given, by logical path, which each attempt is staged with.
     given: Vec<(String, Kept)>,
+    /// The devices bound into its sandbox, by its `#[device]`s.
+    devices: Vec<PathBuf>,
     /// The secret files it is given, by logical path, and where each is on
     /// the host, which each attempt has bound.
     secrets: Vec<SecretFile>,
@@ -1677,6 +1716,14 @@ impl Run<'_> {
             .workspace
             .step_inputs(&self.graph, id)
             .map_err(BuildError::Engine)?;
+        let devices = match devices_of(&inputs.attributes) {
+            Ok(devices) => devices,
+            Err(message) => {
+                let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+                self.finish_now(id, Err(Diagnostic::error(message, span)));
+                return Ok(());
+            }
+        };
         let code: Vec<(String, Digest)> = inputs
             .code_files
             .iter()
@@ -1737,7 +1784,7 @@ impl Run<'_> {
         }
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
         let secrets = self.secret_files(&inputs).map_err(BuildError::Engine)?;
-        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets))?;
+        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices))?;
         let started = Instant::now();
         self.steps.insert(
             id,
@@ -1745,6 +1792,7 @@ impl Run<'_> {
                 sandbox,
                 given,
                 secrets,
+                devices,
                 attempt: 0,
                 receipt,
                 started,
@@ -1769,7 +1817,7 @@ impl Run<'_> {
         id: NodeId,
         own: &str,
         attempt: u32,
-        (given, secrets): (&[(String, Kept)], &[SecretFile]),
+        (given, secrets, devices): (&[(String, Kept)], &[SecretFile], &[PathBuf]),
     ) -> Result<Arc<StepSandbox>, BuildError> {
         let stage = self.stage_dir(id, attempt);
         if stage.exists() {
@@ -1779,7 +1827,8 @@ impl Run<'_> {
             let sandbox = StepSandbox::new(&stage, own)
                 .map_err(|error| engine(&error))?
                 .with_host(&self.settings.host_tools)
-                .with_secrets(secrets.to_vec());
+                .with_secrets(secrets.to_vec())
+                .with_devices(devices.to_vec());
             // Each directory before what is in it, which it stages: so a
             // file of a staged directory is as the directory's tree has it, a
             // symbolic link a link, not the file it leads to.
@@ -2060,7 +2109,12 @@ impl Run<'_> {
         self.unstage(id, &step)?;
         let own = format!("{}/{name}", self.step_dir(id));
         let attempt = step.attempt + 1;
-        let sandbox = self.fresh_sandbox(id, &own, attempt, (&step.given, &step.secrets))?;
+        let sandbox = self.fresh_sandbox(
+            id,
+            &own,
+            attempt,
+            (&step.given, &step.secrets, &step.devices),
+        )?;
         self.graph.forget_unit(STEP_UNITS + id.number());
         self.steps.insert(
             id,

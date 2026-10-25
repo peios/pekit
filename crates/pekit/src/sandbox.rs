@@ -132,7 +132,11 @@ enum Root {
 /// `root` on the host, with it as its `/`, cut off as `isolation` says: one
 /// bubblewrap, never one inside another, which a host such as Ubuntu
 /// forbids.
-fn sandboxed(root: &Root, command: &Command, isolation: Isolation) -> Result<Command, String> {
+fn sandboxed(
+    root: &Root,
+    command: &Command,
+    (isolation, devices): (Isolation, &[PathBuf]),
+) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
     let mut wrapped = Command::new(bwrap()?);
     match isolation {
@@ -151,6 +155,9 @@ fn sandboxed(root: &Root, command: &Command, isolation: Isolation) -> Result<Com
             .arg("/"),
     };
     wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
+    for device in devices {
+        wrapped.arg("--dev-bind").arg(device).arg(device);
+    }
     wrapped.args(["--chdir", cwd.as_deref().unwrap_or("/")]);
     wrapped.arg("--clearenv");
     for (name, value) in env {
@@ -248,7 +255,7 @@ impl Effects for HostView {
     fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
         Some(
             self.host_path(root)
-                .and_then(|root| sandboxed(&Root::Dir(root), &command, Isolation::Plain)),
+                .and_then(|root| sandboxed(&Root::Dir(root), &command, (Isolation::Plain, &[]))),
         )
     }
 
@@ -321,6 +328,9 @@ pub struct StepSandbox {
     /// The secret files it is given, each its path as it sees it and where
     /// it is on the host.
     secrets: Vec<(String, PathBuf)>,
+    /// The devices bound into it, and into the sandboxes it makes, each where
+    /// it is on the host.
+    devices: Vec<PathBuf>,
 }
 
 impl StepSandbox {
@@ -352,6 +362,7 @@ impl StepSandbox {
             temps: AtomicU32::new(0),
             layers,
             secrets: Vec::new(),
+            devices: Vec::new(),
         })
     }
 
@@ -360,6 +371,14 @@ impl StepSandbox {
     #[must_use]
     pub fn with_secrets(mut self, secrets: Vec<(String, PathBuf)>) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    /// The sandbox with the devices `devices` bound into it, and into the
+    /// sandboxes it makes, each where it is.
+    #[must_use]
+    pub fn with_devices(mut self, devices: Vec<PathBuf>) -> Self {
+        self.devices = devices;
         self
     }
 
@@ -429,6 +448,9 @@ impl Effects for StepSandbox {
             .arg(self.stage.join("tmp"))
             .arg("/tmp");
         wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
+        for device in &self.devices {
+            wrapped.arg("--dev-bind").arg(device).arg(device);
+        }
         wrapped.args(["--chdir", cwd.as_deref().unwrap_or(&self.own)]);
         // Only what its `exec` sets, and the host tools' `PATH` if it sets
         // none.
@@ -459,7 +481,11 @@ impl Effects for StepSandbox {
                 Err(error) => return Some(Err(error)),
             },
         };
-        Some(sandboxed(&root, &command, Isolation::Hermetic))
+        Some(sandboxed(
+            &root,
+            &command,
+            (Isolation::Hermetic, &self.devices),
+        ))
     }
 
     fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {

@@ -444,3 +444,56 @@ fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
     let placed = dir.path().join("pekit-out/app/reads/made/out/f");
     assert_eq!(fs::read_to_string(placed).unwrap(), "inside\n");
 }
+
+#[test]
+fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("skipped: no `/dev/kvm`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let devices = |kvm: &str| {
+        format!(
+            "{kvm}#[hermetic] fn looks() -> File {{\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"if test -c /dev/kvm; then echo kvm; else echo none; fi > o\"])\n\
+             \x20   file(\"o\")\n\
+             }}\n\
+             def build looked() {{ = looks() }}\n\
+             #[device(\"floppy\")] #[hermetic] fn odd() -> File {{\n\
+             \x20   let r = exec([\"true\"])\n\
+             \x20   file(\"o\")\n\
+             }}\n\
+             def build oddly() {{ = odd() }}\n"
+        )
+    };
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let looked = |kvm: &str| {
+        write(
+            dir.path(),
+            &[("workspace.gcsl", ""), ("app/build.gcsl", &devices(kvm))],
+        );
+        let built = pekit(&app, cache.path(), &["build", "looked", "--rebuild"]);
+        assert!(built.status.success(), "{:?}", printed(&built));
+        fs::read_to_string(dir.path().join("pekit-out/app/looked/looks/o")).unwrap()
+    };
+    assert_eq!(looked(""), "none\n");
+    assert_eq!(looked("#[device(\"kvm\")] "), "kvm\n");
+    // Built again, it is found: the attribute is in its code, which keys it,
+    // and the device itself adds nothing to its key.
+    let again = pekit(&app, cache.path(), &["build", "looked"]);
+    assert!(
+        printed(&again).0.contains("0 steps run, 1 found"),
+        "{:?}",
+        printed(&again)
+    );
+    let odd = pekit(&app, cache.path(), &["build", "oddly"]);
+    assert!(!odd.status.success());
+    assert!(
+        printed(&odd)
+            .1
+            .contains("pekit gives a step no device `floppy`: the one it knows is `kvm`"),
+        "{:?}",
+        printed(&odd)
+    );
+}

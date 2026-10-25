@@ -271,6 +271,23 @@ changes whenever a package is installed, upgraded, or removed. Pekit
 knows the package databases of dpkg, rpm, apk, and pacman. On a host it
 can't identify, pekit warns, and doesn't reuse steps from the store.
 
+## Devices
+
+A step sees no device of the machine but the usual few, such as
+`/dev/null`. A step that runs a virtual machine can ask for KVM with
+`#[device("kvm")]`, so the machine runs at speed:
+
+```text
+#[device("kvm")]
+#[hermetic]
+fn boots(iso: File, vm: QemuToolchain) -> File { ... }
+```
+
+A device changes how fast a step runs, never what it gives, so it's no
+part of the step's key, and on a machine without it the step runs
+anyway, more slowly if the program falls back to emulation. `kvm` is the
+only device pekit gives: asking for another fails the step.
+
 ## Strict builds
 
 `--strict` builds as a release should: from what the workspace pins, and

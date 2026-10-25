@@ -1,0 +1,136 @@
+# Example 10: an OS image
+
+Example 10 is the real Peios loop: build every package, assemble a bootable
+ISO from them with `peiso`, and boot it in QEMU to check that it comes up.
+This note designs how it runs through pekit2: what pekit2 gains for it,
+what the libraries gain, and what of Peios it can build today. Jack's draft
+is `examples/10/build.gcsl`. As built, the fixture is
+`tests/fixtures/examples/10/`.
+
+## Spikes
+
+Three facts the design rests on, checked by hand before writing it:
+
+1. **An ISO boots with busybox alone.** `peiso build` makes an ISO from
+   `pkgs/_artifacts`' kernel and busybox, with `[initramfs] symlinks =
+   {"init" = ":bin/busybox"}` and `dirs = ["proc", "sys", "tmp", "dev"]`, in
+   under a second. Booted under OVMF with KVM, busybox's init reaches
+   "Please press Enter to activate this console." on `ttyS0`. So a real
+   boot test needs neither prelude nor the live-boot hook, which aren't
+   built anywhere yet.
+2. **QEMU runs in a step's sandbox.** `qemu-system-x86_64 -enable-kvm`
+   boots that ISO inside a bubblewrap with `--unshare-all`, the host's
+   `/usr` read-only, and `--dev-bind /dev/kvm /dev/kvm`. OVMF's firmware is
+   `/usr/share/OVMF/`, in the host snapshot.
+3. **A package's identity is its manifest's digest.** `ppk fetch --from DIR
+   NAME@VERSION?arch=ARCH --artifact-dir OUT` copies a package from one
+   artifact directory into another and prints `sha256:<digest>`, the
+   digest of its manifest, which names every blob by its digest. The
+   manifest is TOML, which GCSL can't read.
+
+`mkirf` and `mkuki`, which peiso runs, are peiosutils' `pu_mkirf` and
+`pu_mkuki`, built here with Cargo into `local/pekit2-data/`.
+
+## Decisions
+
+### I1. The image is a build, and its tools are toolchains
+
+As Jack decided, the ISO is an ordinary `def build`. A library,
+`gcslib/peiso`, gives `peiso.iso(...)`: a hermetic step given the packed
+packages, which collects them into one artifact directory with `ppk fetch`,
+writes peiso's TOML spec from the GCSL description, and runs `peiso build`.
+The spec's keys are GCSL's: a kernel package and command line, packages
+each with `liveboot` and `initramfs`, and the layouts.
+
+peiso's tools are a toolchain, `Toolchain::Peiso`, of `peiso`, `mkirf` and
+`mkuki`, as ppk is `Toolchain::Ppk`. Nothing publishes them yet, so the
+library pins none, and a workspace registers the ones it has, as the ppk
+example does. Building them from source waits for a Rust library (I6).
+
+### I2. QEMU is a toolchain, and a device is an attribute
+
+`gcslib/qemu` declares `Toolchain::Qemu`: the system emulator and the UEFI
+firmware's code and variables. `system_qemu` is the host's, under `/usr`
+and so in the host snapshot. A pinned QEMU comes later, as the pinned C
+toolchains did after `system_c`.
+
+A step that needs `/dev/kvm` says so with `#[device("kvm")]`, an
+attribute the prelude declares. It changes how fast a step runs, never
+what it gives, so it is not on the receipt, as `#[retry]` and `#[timeout]`
+are not. A machine with `/dev/kvm` binds it into the sandbox; one without
+runs the step anyway, and the library falls back to emulation. A device
+pekit doesn't know is an error.
+
+### I3. The boot test is a test, and `pekit run` boots interactively
+
+The boot test is a `def test` given the ISO and QEMU, which runs QEMU
+until busybox's prompt appears, with no network and a timeout. It is
+hermetic, so it reruns only when the ISO or QEMU changes. `qemu.launcher`
+builds a small program that boots an ISO with the terminal, for `pekit run
+boot`, which runs any build that gives a program.
+
+### I4. Packages from outside come from a repository in the workspace
+
+An image takes packages it doesn't build from an artifact directory, a
+*repository*. Today that is a directory in the workspace:
+`ppk.from_repository(repo, NAME, VERSION)` is a hermetic step given the
+repository's tree, so it is keyed by its contents, and it gives the
+package's own artifact directory, as `ppk.pack` gives one. Jack's draft
+names `https://pkgs.peios.org`, which doesn't exist yet, and peiso refuses
+a repository by URL until Peios can serve one. When it can, `pekit lock`
+pins each package from it by name, version and manifest digest in a
+`packages` section of `pekit.lock`, and a build fetches the manifest and
+each blob it names by digest, as `fetch` fetches a file. That design needs
+a repository protocol, ppk's to define, so it waits for one.
+
+### I5. Which of example 10's rows the fixture checks
+
+| Row | Checked by |
+|---|---|
+| A fresh clone, after CI built `main`, downloads the ISO | layer F: the remote cache (F5) |
+| A change to one package rebuilds it, the ISO and the boot test, and no other package | the fixture, with a package built in the workspace standing for busybox |
+| A change to the kernel command line rebuilds the ISO and the boot test, and no package | the fixture |
+| Nothing changed in 1,000 packages finishes in under a second | layer F: the evaluation cache and the daemon (F4, F8) |
+| A broken compiler on one laptop reaches no one else | layer F: who may write the shared cache (F5) |
+
+### I6. Peios's own packages are a phase of their own
+
+Building prelude, ppk, the live-boot root and peiosutils needs a Rust
+library: a pinned `rustc` with the musl target, and each crate a fetch
+pinned by its checksum in `Cargo.lock`, as Bazel's `rules_rust` does.
+prelude and peiosutils build with Bazel today, and ppk with Cargo from a
+vendored tree. The kernel builds through its own Docker-based runner,
+which can't run in a step: how it is to build under pekit2 is Jack's to
+decide. Until then the kernel comes from a repository. The recipes are
+ported under the example 10 fixture, since `pkgs` is Jack's.
+
+## Steps
+
+1. **X1, `#[device]`:** the prelude's attribute, and pekit binding
+   `/dev/kvm` when it is there.
+2. **X2, `gcslib/qemu`:** `Toolchain::Qemu`, `system_qemu`, and
+   `launcher`.
+3. **X3, `gcslib/peiso`:** `Toolchain::Peiso` and `peiso.iso`.
+4. **X4, packages from a repository:** `ppk.from_repository`.
+5. **X5, the fixture:** a workspace package, the kernel and busybox from a
+   repository seeded from `local/pekit2-data`, the ISO, the boot test and
+   `pekit run boot`, and the rows of I5 it checks.
+6. **X6, a Rust library and Peios's packages,** with the kernel waiting on
+   Jack.
+
+## Decisions taken without Jack (to surface)
+
+- I1: peiso's tools registered by the workspace, as ppk's are.
+- I2: `#[device("kvm")]`, a string naming the device, rather than the
+  draft's bare `kvm`, since an attribute's argument is a value.
+- I4: a repository in the workspace for now, and the lock's `packages`
+  waiting for a repository protocol.
+- I6: the kernel from a repository until its build under pekit2 is
+  decided.
+
+## As built
+
+- X1: `#[device("kvm")]`, `type device = {name: String}` in GCSL's
+  prelude, binds `/dev/kvm` with `--dev-bind` into the step's sandbox, and
+  into each `Dir.sandbox` it makes, where the machine has it; `kvm` is the
+  only device known, another failing the step at its call.
