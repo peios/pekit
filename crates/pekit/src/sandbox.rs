@@ -435,6 +435,16 @@ impl StepSandbox {
         self.seen.lock().ok()
     }
 
+    /// Seals its sealed compositions again, once a program found in the
+    /// store has had them placed again as copies.
+    ///
+    /// # Errors
+    ///
+    /// That one could not be made read-only.
+    pub fn reseal(&self) -> io::Result<()> {
+        self.layers.reseal()
+    }
+
     /// Its sealed compositions, on the host.
     #[must_use]
     pub fn sealed(&self) -> Vec<PathBuf> {

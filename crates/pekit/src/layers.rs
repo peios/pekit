@@ -248,6 +248,21 @@ impl Layers {
         Ok(())
     }
 
+    /// Seals each sealed composition again, as it was placed again from the
+    /// store as copies, which are writable (see `design/additive.md`, F1).
+    ///
+    /// # Errors
+    ///
+    /// That one could not be made read-only.
+    pub fn reseal(&self) -> io::Result<()> {
+        for (_, host) in self.sealed() {
+            if present(&host) {
+                seal(&host)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The sealed compositions, each as GCSL code names it and on the host:
     /// what every command binds read-only.
     #[must_use]

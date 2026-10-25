@@ -163,7 +163,8 @@ This is the point at which the system is functional.
 
 ### F. Additive features
 
-These come after the functional system, roughly in this order:
+These come after the functional system, roughly in this order, as
+`design/additive.md` designs them:
 
 1. per-`exec` caching;
 2. `#[scratch]`;

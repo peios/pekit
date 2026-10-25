@@ -51,7 +51,12 @@ therefore cached each on its own.
   A record whose contents are not all in the store is no hit.
 - **Trust:** a replayed program leaves the world as its recorded run did,
   which holds as a step's record holds: a program's result and writes are
-  a function of what it is given and can see.
+  a function of what it is given and can see. As the store keeps a tree,
+  a replay puts back contents, links and executable bits, and not
+  modification times or which files were hard links of one another, as a
+  step's outputs are put back: a `make` after a replay sees every file
+  new. Sealed compositions are sealed again, read-only as a run leaves
+  them.
 - **What can't be captured:** an entry that is neither a file, a directory
   nor a link, as an overlay's whiteout is, or one an overlay's attributes
   mark, as an opaque directory is, stops the step's programs being cached
@@ -61,6 +66,10 @@ therefore cached each on its own.
 
 ### F1 as built
 
+- **Where the step writes:** the view starts from the step's own output
+  directory, where its programs run, since a compiler names its working
+  directory in what it writes: two targets' steps of one function and
+  input find each other's programs no more than each other's results.
 - **Where the work is done:** the engine keeps each step's view and the
   writable trees' digests while it knows them (`engine/programs.rs`). A
   program is sent to the pool as a `Work::Program`, and the thread that
@@ -73,8 +82,8 @@ therefore cached each on its own.
   size, mode, and modification and change times (`store.rs`, "Trees seen
   before"). A file whose stamp is the same is not read again. A stamp is
   trusted only if its change time is before the put that took it began,
-  by the file system's own clock, as git trusts its index, so a file
-  changed in the same tick is read again. A file that is a hard link to a
+  by the clock of the tree's own file system, as git trusts its index, so
+  a file changed in the same tick is read again. A file that is a hard link to a
   blob this process linked, by device and inode, is that blob, and not
   read. A file read is hashed before it is copied, and copied only if its
   blob is not there.
@@ -100,7 +109,9 @@ its runs, at `/pekit-scratch`, for a tool that does less on a second run,
 such as Kbuild's or Cargo's own state. It is the step's, by its definition's
 directory and its name, whatever its inputs, and it keys nothing: a step
 must give what it would give with an empty one, a contract it keeps, as
-Bazel's persistent workers keep theirs. Two builds running one step at once
+Bazel's persistent workers keep theirs. It is bound from
+outside the step's own directory and its `/tmp`, so that F1's programs
+neither capture nor put it back. Two builds running one step at once
 take turns with it, by a lock. A strict build gives each run an empty one,
 so a release depends on nothing a scratch directory kept.
 
@@ -163,7 +174,9 @@ A daemon keeps a workspace loaded and its evaluation cache in memory, and
 watches the workspace's files, so that a build with nothing changed
 re-reads nothing. `pekit` talks to it over a socket in the state directory,
 and runs alone when there is none. A daemon is per workspace and exits
-when idle.
+when idle. What a store remembers for the life of a process, the blobs it
+linked files to (F1), is bounded for a daemon's, by forgetting it after
+each build.
 
 ## F9. The web view
 

@@ -200,8 +200,7 @@ fn replay(
             return Ok(false);
         }
     }
-    // Its sealed compositions, if it placed the own directory again, are
-    // copies now.
+    // Its sealed compositions, if they are placed again, are copies.
     if let Some(mut seen) = sandbox.seen() {
         seen.changed();
     }
@@ -215,6 +214,11 @@ fn replay(
                 )
             })?;
     }
+    // Its sealed compositions, if they were placed again, are read-only
+    // again, as a run would have left them.
+    sandbox.reseal().map_err(|error| {
+        format!("cannot seal again what a program found in the store left: {error}")
+    })?;
     Ok(true)
 }
 

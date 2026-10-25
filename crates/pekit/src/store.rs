@@ -35,7 +35,8 @@
 //! changed since has another stamp, since its change time is the time of
 //! the change, unless it was changed in the same tick of the file system's
 //! clock as it was stamped, which a stamp taken in the tick a put begins in,
-//! or after, is not trusted for: as git keeps its index. A file that is a
+//! or after, by the clock of the tree's own file system, is not trusted
+//! for: as git keeps its index. A file that is a
 //! link to a blob this process linked, by its device and inode, is that
 //! blob, and is not read. A file read is hashed before it is copied, and
 //! not copied if its blob is there. A directory said to be fixed, such as a
@@ -547,8 +548,9 @@ impl Store {
         seen: &mut Seen,
         refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
     ) -> io::Result<Option<Digest>> {
-        // Now, as the file system's clock tells it.
-        let probe = self.temp_path();
+        // Now, as the clock of the file system the tree is on tells it, as
+        // coarsely as that file system keeps times.
+        let probe = path.with_file_name(format!(".pekit-probe-{}", std::process::id()));
         File::create(&probe)?;
         let now = fs::symlink_metadata(&probe).map(|meta| (meta.ctime(), meta.ctime_nsec()));
         fs::remove_file(&probe)?;

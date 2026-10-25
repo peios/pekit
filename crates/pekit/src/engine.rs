@@ -1888,7 +1888,7 @@ impl Run<'_> {
             .map_err(BuildError::Engine)?;
         let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices), &keyed)?;
         let started = Instant::now();
-        let programs = Programs::starting(&self.settings.platform, &given);
+        let programs = Programs::starting((&self.settings.platform, &own), &given);
         self.steps.insert(
             id,
             StepRun {
@@ -2381,7 +2381,7 @@ impl Run<'_> {
             &step.keyed,
         )?;
         self.graph.forget_unit(STEP_UNITS + id.number());
-        let programs = Programs::starting(&self.settings.platform, &step.given);
+        let programs = Programs::starting((&self.settings.platform, &own), &step.given);
         self.steps.insert(
             id,
             StepRun {

@@ -40,9 +40,11 @@ pub(super) struct Programs {
 
 impl Programs {
     /// A step's, as an attempt of it starts: its view the platform
-    /// `platform` and each input `given` staged at its start.
-    pub(super) fn starting(platform: &str, given: &[(String, Kept)]) -> Self {
-        let start = Digest::of(format!("pekit-programs-1\0{platform}").as_bytes());
+    /// `platform`, its own output directory `own`, where its programs run
+    /// and which a compiler names in what it writes, and each input `given`
+    /// staged at its start.
+    pub(super) fn starting((platform, own): (&str, &str), given: &[(String, Kept)]) -> Self {
+        let start = Digest::of(format!("pekit-programs-1\0{platform}\0{own}").as_bytes());
         Self {
             on: true,
             view: with_staged(&start, given),

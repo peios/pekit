@@ -77,8 +77,9 @@ code: editing a comment in the file that declares it, or in a library
 whose functions it calls, makes it run. Most of the programs it runs
 then see what they saw before, so pekit records each program a step runs
 as well, keyed by what that program can see: every file the step was
-given or has staged, the step's own output directory and its `/tmp` as
-they are before the program runs, and everything the step did before it.
+given or has staged, where the step writes, its own output directory
+and its `/tmp` as they are before the program runs, and everything the
+step did before it.
 A program found is not run. Pekit puts back what it wrote, as it was
 when it was recorded, and the step goes on:
 
@@ -89,8 +90,9 @@ built app/hello: 1 step run (2 programs found), 0 found in the store
 A program after the first one that sees something new runs, along with
 each program after it that sees what it wrote. A step given a secret has
 none of its programs recorded, from the moment it is given one. Nor does
-a step whose sandbox has removed a file from a directory it composed,
-since that removal isn't something the store can hold.
+a step once one of its sandboxes removes a file of the directory the
+sandbox was made of, since that removal isn't something the store can
+hold.
 
 `--rebuild` and `--check-reproducible`'s second build run every program
 again.

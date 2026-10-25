@@ -295,3 +295,72 @@ fn a_program_sees_what_the_step_wrote_before_it() {
     assert_eq!(counts(&back), (1, 1, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "one");
 }
+
+#[test]
+fn a_program_is_keyed_by_where_its_step_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "workspace.gcsl",
+                "#[hermetic] def here(src: File) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"pwd > out; cat {src.path} >> out\"])\n\
+                 \x20   = file(\"out\")\n\
+                 }\n",
+            ),
+            ("app/name.txt", "n\n"),
+            (
+                "app/build.gcsl",
+                "def build one() { = here(file(\"name.txt\")) }\n\
+                 def build two() { = here(file(\"name.txt\")) }\n",
+            ),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "one").unwrap();
+    // The same step of another target: the same program, but run where
+    // that target's step writes, which it names.
+    let two = build_in(dir.path(), state.path(), "two").unwrap();
+    assert_eq!(counts(&two), (1, 0, 0));
+    let out = dir.path().join("pekit-out/app/two/here/out");
+    assert_eq!(
+        fs::read_to_string(out).unwrap(),
+        "/pekit-out/app/two/here\nn\n"
+    );
+}
+
+#[test]
+fn a_composition_placed_again_is_sealed_as_a_run_leaves_it() {
+    let text = |word: &str| {
+        format!(
+            "import fs\n\
+             #[hermetic] def modes(src: File, word: String) -> File {{\n\
+             \x20   let d = fs.compose_dir({{\"in/x\" = src}})\n\
+             \x20   let a = exec([\"sh\", \"-c\", \"cat {{d.path}}/in/x > out\"])\n\
+             \x20   let b = exec([\"sh\", \"-c\", \"stat -c %a {{d.path}}/in/x >> out; echo {{word}} >> out\"])\n\
+             \x20   = file(\"out\")\n\
+             }}\n\
+             def build both() {{ = modes(file(\"x.txt\"), \"{word}\") }}\n"
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("app/x.txt", "x\n"),
+            ("app/build.gcsl", &text("a")),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let out = dir.path().join("pekit-out/app/both/modes/out");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "x\n444\na\n");
+    // The first program found, the composition placed again with it is as
+    // read-only to the second, run, as a run left it.
+    write(dir.path(), &[("app/build.gcsl", &text("b"))]);
+    let again = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!(counts(&again), (1, 1, 0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "x\n444\nb\n");
+}
