@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use pekit::engine::{BuildError, Built, Settings, build_observed};
+use pekit::engine::{BuildError, Built, Reuse, Settings, build_observed};
 use pekit::events::Event;
 use pekit::load::load;
 use pekit::platform::ExecutionPlatform;
@@ -17,13 +17,16 @@ pub fn host_tools() -> HostTools {
 }
 
 /// How a test builds: on the execution platform's architecture `arch`,
-/// with the keychain's profile `profile`.
+/// with the keychain's profile `profile`, and strictly or not.
 #[derive(Clone, Copy, Debug)]
 pub struct Options<'a> {
     /// The execution platform's architecture.
     pub arch: &'a str,
     /// The keychain's profile.
     pub profile: &'a str,
+    /// Whether it builds as `pekit build --strict` does: steps borrow no
+    /// host tools, and a target's own code runs no program.
+    pub strict: bool,
 }
 
 impl Default for Options<'_> {
@@ -31,6 +34,7 @@ impl Default for Options<'_> {
         Self {
             arch: "x86_64",
             profile: "dev",
+            strict: false,
         }
     }
 }
@@ -50,11 +54,12 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
             os: "linux".to_owned(),
         },
         host_tools: host_tools(),
-        reuse: true,
+        reuse: Reuse::Store,
         profile: profile.to_owned(),
         state: state.join("state"),
         building_for: None,
         no_dynamic: false,
+        strict: false,
     }
 }
 
@@ -69,7 +74,11 @@ pub fn observed_with(
     root: &Path,
     state: &Path,
     name: &str,
-    Options { arch, profile }: Options<'_>,
+    Options {
+        arch,
+        profile,
+        strict,
+    }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
     let arch = arch.to_owned();
     let profile = profile.to_owned();
@@ -88,7 +97,12 @@ pub fn observed_with(
                 Ok(target) => target,
                 Err(error) => return (Err(error.message()), events),
             };
-            let settings = settings(&root, &state, (&arch, &profile));
+            let mut settings = settings(&root, &state, (&arch, &profile));
+            if strict {
+                settings.strict = true;
+                settings.host_tools = HostTools::default();
+                settings.platform.push_str(" no-host-tools");
+            }
             let built = build_observed(&mut loaded, &target, &settings, &mut |event| {
                 events.push(event.clone());
             });

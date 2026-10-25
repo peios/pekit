@@ -37,6 +37,7 @@
 //! dependency, fails there.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -59,7 +60,7 @@ use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::receipt::{ReceiptOf, receipt};
-use crate::record::{Kept, StepRecord, StoreError, keep_files, stored};
+use crate::record::{Kept, StepRecord, StoreError, Stored, differences, keep_files, stored};
 use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Store, TreeEntry};
 use crate::target::Target;
@@ -82,6 +83,50 @@ const KEYCHAIN_KEYS: &str = "keychain_keys";
 
 /// The context the `packaging` module lists the packagers in.
 const PACKAGERS: &str = "packagers";
+
+/// Why a strict build refuses `job`, an effect of a target's own code, if it
+/// does (see [`Settings::strict`]): it runs a program, writes, or reads a
+/// path outside the workspace and the build's outputs, any of which could
+/// make a release depend on the machine that built it.
+fn strict_refusal(job: &EffectJob) -> Option<String> {
+    let builtin = job.builtin();
+    match builtin {
+        Builtin::Fetch
+        | Builtin::ArchiveUnpack
+        | Builtin::KeychainString
+        | Builtin::KeychainFile => None,
+        Builtin::FsExists
+        | Builtin::FsRead
+        | Builtin::File
+        | Builtin::FileRead
+        | Builtin::Dir
+        | Builtin::DirFiles => {
+            let path = match job.args().first() {
+                Some(Plain::Str(path) | Plain::File { path, .. } | Plain::Dir { path, .. }) => {
+                    path.as_str()
+                }
+                _ => "",
+            };
+            let inside = |root: &str| {
+                path == root
+                    || path
+                        .strip_prefix(root)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            };
+            (!inside(WORKSPACE) && !inside(OUTPUTS)).then(|| {
+                format!(
+                    "a strict build reads only the workspace and the build's outputs, and this \
+                     reads `{path}`"
+                )
+            })
+        }
+        _ => Some(format!(
+            "a strict build refuses a target's own `{}`: a release's targets run programs and \
+             write files only in steps",
+            builtin.name()
+        )),
+    }
+}
 
 /// The context only a run of a script binds (see the prelude's `script`).
 const SCRIPT_SESSION: &str = "script_session";
@@ -153,11 +198,8 @@ pub struct Settings {
     /// not hermetic: a host snapshot's, or a test's. None for a hermetic
     /// build.
     pub host_tools: HostTools,
-    /// Whether a step found in the store is reused: not when nothing says
-    /// when the tools steps run with change (see
-    /// [The host snapshot](crate::host#the-host-snapshot)). Every step that
-    /// succeeds is recorded either way.
-    pub reuse: bool,
+    /// What becomes of a step whose receipt has a record ([`Reuse`]).
+    pub reuse: Reuse,
     /// The keychain's profile, set as `^keychain_profile` where the
     /// workspace declares it (see [Secrets](crate::keychain#secrets)).
     pub profile: String,
@@ -170,6 +212,28 @@ pub struct Settings {
     /// Whether a target that waits for a step's result, a dynamic
     /// dependency, fails where it would wait.
     pub no_dynamic: bool,
+    /// Whether the build is strict, as a release's is: a target's own
+    /// effects may fetch, unpack, ask the keychain and read the workspace
+    /// and the build's outputs, and nothing else (see [Building](#building)).
+    /// The host tools a step borrows are the caller's to leave out.
+    pub strict: bool,
+}
+
+/// What becomes of a step whose receipt has a record (see
+/// [Building](#building)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reuse {
+    /// Its record is its result, and it is not run.
+    Store,
+    /// It runs, and is recorded, as every step that succeeds is: when
+    /// nothing says when the tools steps run with change (see [The host
+    /// snapshot](crate::host#the-host-snapshot)), or a build asks to run
+    /// every step.
+    Rerun,
+    /// It runs, and its result is compared with its record's, not
+    /// recorded: one that differs is one of [`Outcomes::mismatches`], and
+    /// the record stays as it was.
+    Compare,
 }
 
 /// What building a target came to.
@@ -200,6 +264,19 @@ pub struct Outcomes {
     pub flaky: Vec<String>,
     /// What became of each step that was found in the store or passed.
     pub steps: Vec<StepReport>,
+    /// Each step that, with [`Reuse::Compare`], gave another result than
+    /// its record holds for the same receipt.
+    pub mismatches: Vec<Mismatch>,
+}
+
+/// A step that gave another result than its record holds for the same
+/// inputs: one that is not reproducible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mismatch {
+    /// The step, by its directory under `/pekit-out` and name.
+    pub step: String,
+    /// What differs ([`differences`]).
+    pub differences: Vec<String>,
 }
 
 /// What became of one step of a build that was found in the store or
@@ -229,6 +306,8 @@ pub enum BuildError {
     /// The target waited for a step's result, a dynamic dependency, which
     /// the build forbids: where it waited.
     Dynamic(Diagnostic),
+    /// Built again from the same inputs, these steps gave other results.
+    NotReproducible(Vec<Mismatch>),
 }
 
 impl BuildError {
@@ -244,6 +323,28 @@ impl BuildError {
             }
             BuildError::Engine(message) => format!("error: {message}\n"),
             BuildError::Dynamic(diagnostic) => loaded.render(std::slice::from_ref(diagnostic)),
+            BuildError::NotReproducible(mismatches) => {
+                let mut shown = format!(
+                    "error: {} not reproducible: run again with the same inputs, {} other \
+                     outputs\n",
+                    match mismatches.len() {
+                        1 => "a step is".to_owned(),
+                        many => format!("{many} steps are"),
+                    },
+                    if mismatches.len() == 1 {
+                        "it gave"
+                    } else {
+                        "they gave"
+                    },
+                );
+                for mismatch in mismatches {
+                    let _ = writeln!(shown, "  {}", mismatch.step);
+                    for difference in &mismatch.differences {
+                        let _ = writeln!(shown, "    {difference}");
+                    }
+                }
+                shown
+            }
         }
     }
 }
@@ -474,6 +575,7 @@ fn build_roots(
         cached: 0,
         flaky: Vec::new(),
         reports: Vec::new(),
+        mismatches: Vec::new(),
     };
     run.drive()?;
     let mut outcomes = Vec::with_capacity(run.roots.len());
@@ -497,6 +599,7 @@ fn build_roots(
         cached: run.cached,
         flaky: std::mem::take(&mut run.flaky),
         steps: std::mem::take(&mut run.reports),
+        mismatches: std::mem::take(&mut run.mismatches),
     })
 }
 
@@ -702,6 +805,8 @@ struct Run<'a> {
     flaky: Vec<String>,
     /// What became of each step that was found in the store or passed.
     reports: Vec<StepReport>,
+    /// The steps that gave another result than their records hold.
+    mismatches: Vec<Mismatch>,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -1014,6 +1119,14 @@ impl Run<'_> {
         {
             let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
             self.finish_now(id, Err(Diagnostic::error(keychain::IN_A_STEP, span)));
+            return Ok(());
+        }
+        if step.is_none()
+            && self.settings.strict
+            && let Some(refused) = strict_refusal(&job)
+        {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            self.finish_now(id, Err(Diagnostic::error(refused, span)));
             return Ok(());
         }
         // A fetch is pekit's to answer, and never a step's.
@@ -1379,7 +1492,7 @@ impl Run<'_> {
             };
             receipt(of, &mut contents).map_err(BuildError::Engine)?
         };
-        let found = if self.settings.reuse {
+        let found = if self.settings.reuse == Reuse::Store {
             self.store
                 .record::<StepRecord>(&receipt)
                 .map_err(|error| engine(&error))?
@@ -1646,17 +1759,7 @@ impl Run<'_> {
             self.expose(path, *entry)?;
         }
         match stored(&plain, &kept) {
-            Ok(result) => {
-                let record = StepRecord {
-                    receipt: step.receipt,
-                    result,
-                    duration_ms: u64::try_from(step.started.elapsed().as_millis())
-                        .unwrap_or(u64::MAX),
-                };
-                self.store
-                    .put_record(&step.receipt, &record)
-                    .map_err(|error| engine(&error))?;
-            }
+            Ok(result) => self.keep_record(id, step, result)?,
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
             Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
@@ -1671,6 +1774,38 @@ impl Run<'_> {
         let step = self.step_name(id);
         self.emit(EventKind::Finished { step });
         Ok(())
+    }
+
+    /// Records `result`, what the step `step`, the node `id`, gave, by its
+    /// receipt; or, with [`Reuse::Compare`] and a record there already,
+    /// compares it with that record's, noting a step that gave another.
+    fn keep_record(
+        &mut self,
+        id: NodeId,
+        step: &StepRun,
+        result: Stored,
+    ) -> Result<(), BuildError> {
+        if self.settings.reuse == Reuse::Compare
+            && let Some(first) = self
+                .store
+                .record::<StepRecord>(&step.receipt)
+                .map_err(|error| engine(&error))?
+        {
+            if first.result != result {
+                let differences = differences(&self.store, &first.result, &result);
+                let step = format!("{}/{}", self.step_dir(id), self.step_name(id));
+                self.mismatches.push(Mismatch { step, differences });
+            }
+            return Ok(());
+        }
+        let record = StepRecord {
+            receipt: step.receipt,
+            result,
+            duration_ms: u64::try_from(step.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        };
+        self.store
+            .put_record(&step.receipt, &record)
+            .map_err(|error| engine(&error))
     }
 
     /// The step `id` failed with `failure`: run again afresh if its

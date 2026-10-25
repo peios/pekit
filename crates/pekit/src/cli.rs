@@ -45,7 +45,7 @@ use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
 use crate::engine::{
-    BuildError, Outcomes, Packing, Settings, build_all_observed, package_all_observed,
+    BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed, package_all_observed,
     program_command, run_script_observed,
 };
 use crate::events::{Event, EventKind};
@@ -53,6 +53,7 @@ use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
 use crate::layers::remove_tree;
 use crate::load::{Loaded, load};
+use crate::sandbox::HostTools;
 use crate::target::{Target, TargetError, select};
 use crate::trace::Trace;
 
@@ -173,6 +174,30 @@ struct BuildArgs {
     shared: Shared,
 }
 
+/// Builds `targets` of `loaded`'s workspace once with `settings`, or does
+/// with them what `doing` says, `events` seeing it as it goes.
+///
+/// # Errors
+///
+/// What [`build_all_observed`], [`package_all_observed`] or
+/// [`run_script_observed`] fails with.
+fn build_once(
+    (loaded, targets, doing): (&mut Loaded, &[Target], Doing<'_>),
+    settings: &Settings,
+    events: &mut dyn FnMut(&Event),
+) -> Result<Outcomes, BuildError> {
+    match (doing, targets) {
+        (Doing::Build, _) => build_all_observed(loaded, targets, settings, events),
+        (Doing::Pack(packing), _) => {
+            package_all_observed(loaded, targets, (settings, packing), events)
+        }
+        (Doing::Script(args), [script]) => {
+            run_script_observed(loaded, script, (settings, args), events)
+        }
+        (Doing::Script(_), _) => Err(BuildError::Engine("a script is run alone".to_owned())),
+    }
+}
+
 /// The flags every command that builds takes (see [Commands](#commands)).
 #[derive(Debug, clap::Args)]
 struct Shared {
@@ -188,12 +213,37 @@ struct Shared {
     /// The platform to build for, `ARCH` or `ARCH-OS`: `aarch64-linux`.
     #[arg(long, value_name = "PLATFORM")]
     platform: Option<String>,
+    /// Whether steps are taken from the store.
+    #[command(flatten)]
+    reuse: ReuseFlags,
+    /// What the build allows.
+    #[command(flatten)]
+    allows: AllowFlags,
+}
+
+/// The shared flags of what is taken from the store (see [`Shared`]).
+#[derive(Debug, clap::Args)]
+struct ReuseFlags {
     /// Run every step, reusing nothing from the store.
     #[arg(long)]
     rebuild: bool,
+    /// Build, then run every step again and fail if one gives other outputs
+    /// from the same inputs.
+    #[arg(long)]
+    check_reproducible: bool,
+}
+
+/// The shared flags of what a build allows (see [`Shared`]).
+#[derive(Debug, clap::Args)]
+struct AllowFlags {
     /// Fail a target that waits for a step's result, a dynamic dependency.
     #[arg(long)]
     no_dynamic: bool,
+    /// Build as a release does: steps borrow no host tools, and a
+    /// target's own code only fetches, unpacks, asks the keychain and reads
+    /// the workspace and the build's outputs.
+    #[arg(long)]
+    strict: bool,
 }
 
 /// Where the command writes: what it shows, its warnings and errors, and
@@ -313,7 +363,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     if targets.len() > 1 {
         let _ = writeln!(terminal.out, "{counts}");
     }
-    if outcomes.ran > 0 {
+    if outcomes.ran > 0 && !settings.host_tools.bind.is_empty() {
         let _ = writeln!(
             terminal.err,
             "note: steps ran with the host's own tools, so this build is not hermetic"
@@ -413,6 +463,9 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
 /// executable file it gives with the arguments `ARG`, exiting as the
 /// program does.
 fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    if args.shared.reuse.check_reproducible {
+        return changes_the_world("run", terminal);
+    }
     let mut loaded = match load(cwd) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -478,6 +531,17 @@ fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitC
     }
 }
 
+/// `--check-reproducible` refused for the command `pekit COMMAND`, whose
+/// effects change the world and would be done twice.
+fn changes_the_world(command: &str, terminal: &mut Terminal<'_>) -> ExitCode {
+    let _ = writeln!(
+        terminal.err,
+        "error: `pekit {command}` changes the world, so it cannot be checked by doing it twice: \
+         check what it builds with `pekit build --check-reproducible`"
+    );
+    ExitCode::FAILURE
+}
+
 /// The script, or failing one the build, that `name` names in `loaded`'s
 /// workspace from its directory, with whether it is a script.
 ///
@@ -527,6 +591,9 @@ fn package_command(
     cwd: &Path,
     terminal: &mut Terminal<'_>,
 ) -> ExitCode {
+    if shared.reuse.check_reproducible && matches!(packing, Packing::Publish { .. }) {
+        return changes_the_world("publish", terminal);
+    }
     let mut loaded = match load(cwd) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -728,7 +795,8 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
     let cache = cache_dir();
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
-    if host.fingerprint.is_none() {
+    let strict = shared.allows.strict;
+    if host.fingerprint.is_none() && !strict {
         let _ = writeln!(
             terminal.err,
             "warning: the host's packages cannot be identified, so no step is reused \
@@ -760,14 +828,30 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         jobs: shared.jobs.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
         }),
-        platform: host.platform(&execution.describe()),
+        // A strict build's steps see nothing of the host, so their results
+        // are those of any machine of the platform, and keyed apart from
+        // a build's that borrowed its tools.
+        platform: if strict {
+            format!("{} no-host-tools", execution.describe())
+        } else {
+            host.platform(&execution.describe())
+        },
         execution,
-        reuse: host.fingerprint.is_some() && !shared.rebuild,
-        host_tools: host.tools(),
+        reuse: if (strict || host.fingerprint.is_some()) && !shared.reuse.rebuild {
+            Reuse::Store
+        } else {
+            Reuse::Rerun
+        },
+        host_tools: if strict {
+            HostTools::default()
+        } else {
+            host.tools()
+        },
         profile: shared.profile.clone(),
         state: state_dir(),
         building_for,
-        no_dynamic: shared.no_dynamic,
+        no_dynamic: shared.allows.no_dynamic,
+        strict,
     })
 }
 
@@ -796,15 +880,22 @@ fn build_targets(
                 progress.show(event, err);
             }
         };
-        match (doing, targets) {
-            (Doing::Build, _) => build_all_observed(loaded, targets, settings, &mut events),
-            (Doing::Pack(packing), _) => {
-                package_all_observed(loaded, targets, (settings, packing), &mut events)
+        let first = build_once((loaded, targets, doing), settings, &mut events);
+        match first {
+            Ok(first) if shared.reuse.check_reproducible => {
+                let again = Settings {
+                    reuse: Reuse::Compare,
+                    ..settings.clone()
+                };
+                build_once((loaded, targets, doing), &again, &mut events).and_then(|again| {
+                    if again.mismatches.is_empty() {
+                        Ok(first)
+                    } else {
+                        Err(BuildError::NotReproducible(again.mismatches))
+                    }
+                })
             }
-            (Doing::Script(args), [script]) => {
-                run_script_observed(loaded, script, (settings, args), &mut events)
-            }
-            (Doing::Script(_), _) => Err(BuildError::Engine("a script is run alone".to_owned())),
+            other => other,
         }
     };
     if live {

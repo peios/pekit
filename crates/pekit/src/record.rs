@@ -23,7 +23,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::value::Quantity;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{Digest, FileEntry, Store};
+use crate::store::{Digest, FileEntry, Store, Tree, TreeEntry};
 
 /// A step's record (see [Records](#records)).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,4 +257,95 @@ pub enum Kept {
     File(FileEntry),
     /// A directory, by its tree.
     Dir(Digest),
+}
+
+/// What differs between `first` and `again`, two results of one step given
+/// the same inputs, as `--check-reproducible` reports it: each file whose
+/// contents or mode differ, by its path, each file a directory holds in one
+/// and not the other, or differently, found through `store`'s trees, and
+/// `the value` for a difference in no file. Empty if they are the same.
+#[must_use]
+pub fn differences(store: &Store, first: &Stored, again: &Stored) -> Vec<String> {
+    let mut found = Vec::new();
+    differ(store, (first, again), &mut found);
+    found.dedup();
+    found
+}
+
+/// Adds to `found` what differs between `first` and `again`
+/// ([`differences`]).
+fn differ(store: &Store, (first, again): (&Stored, &Stored), found: &mut Vec<String>) {
+    match (first, again) {
+        (Stored::File(path, _, one), Stored::File(other_path, _, two)) if path == other_path => {
+            if one != two {
+                found.push(path.clone());
+            }
+        }
+        (Stored::Dir(path, _, one), Stored::Dir(other_path, _, two)) if path == other_path => {
+            if one != two {
+                trees_differ(store, path, (one, two), found);
+            }
+        }
+        (Stored::Record(one), Stored::Record(two))
+            if one.len() == two.len() && one.iter().zip(two).all(|((a, _), (b, _))| a == b) =>
+        {
+            for ((_, a), (_, b)) in one.iter().zip(two) {
+                differ(store, (a, b), found);
+            }
+        }
+        (Stored::List(one), Stored::List(two)) if one.len() == two.len() => {
+            for (a, b) in one.iter().zip(two) {
+                differ(store, (a, b), found);
+            }
+        }
+        _ => {
+            if first != again {
+                found.push("the value".to_owned());
+            }
+        }
+    }
+}
+
+/// Adds to `found` each path under `path` at which the trees `one` and
+/// `two` differ: a file of one only, or of both with other contents; the
+/// directory itself if either tree cannot be read.
+fn trees_differ(
+    store: &Store,
+    path: &str,
+    (one, two): (&Digest, &Digest),
+    found: &mut Vec<String>,
+) {
+    let (Ok(one), Ok(two)) = (store.read_tree(one), store.read_tree(two)) else {
+        found.push(path.to_owned());
+        return;
+    };
+    let mut names: Vec<&str> = one
+        .entries
+        .iter()
+        .chain(&two.entries)
+        .map(TreeEntry::name)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let at = format!("{path}/{name}");
+        let find = |tree: &Tree| {
+            tree.entries
+                .iter()
+                .find(|entry| entry.name() == name)
+                .cloned()
+        };
+        match (find(&one), find(&two)) {
+            (Some(TreeEntry::Dir { tree: a, .. }), Some(TreeEntry::Dir { tree: b, .. })) => {
+                if a != b {
+                    trees_differ(store, &at, (&a, &b), found);
+                }
+            }
+            (a, b) => {
+                if a != b {
+                    found.push(at);
+                }
+            }
+        }
+    }
 }

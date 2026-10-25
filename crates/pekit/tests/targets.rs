@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use gcsl::eval::plain::Plain;
-use pekit::engine::{Outcomes, Settings, build_all_observed};
+use pekit::engine::{Outcomes, Reuse, Settings, build_all_observed};
 use pekit::load::load;
 use pekit::platform::ExecutionPlatform;
 use pekit::target::{Target, select};
@@ -216,7 +216,7 @@ fn platform_sets_what_is_built_for_and_rebuild_reruns_every_step() {
     let (_, counts) = build_all(dir.path(), state.path(), &["out"], |_| {});
     assert_eq!(counts, (0, 1));
     let (_, counts) = build_all(dir.path(), state.path(), &["out"], |settings| {
-        settings.reuse = false;
+        settings.reuse = Reuse::Rerun;
     });
     assert_eq!(counts, (1, 0));
 }

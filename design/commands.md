@@ -223,3 +223,18 @@ its own piece of work, after layer E.
   came with it, to keep a script's builds those of `pekit build`: steps
   keyed by the context they can read, and named under the definition
   whose call made them (`engine.md`, as built in E4).
+- E5: `--check-reproducible` builds, then builds again with every step
+  run and compared, not recorded, where its receipt has a record
+  (`Settings::compare`): only steps given the same inputs are compared,
+  so one difference is one report, each differing file named, a
+  directory's looked into through its trees. `pekit run` and `pekit
+  publish` refuse it, since their effects would be done twice.
+  `--strict` gives steps no host tools and keys them apart, `<platform>
+  no-host-tools` and no host fingerprint, so their records are any
+  machine's of the platform; a target's own effects may fetch, unpack,
+  ask the keychain and read `/w` and `/pekit-out`, and nothing else,
+  `which` among the refused, so the host toolchains fail a strict build.
+  Reads and secrets are allowed beyond M2's "fetches and unpacks": reads
+  of the workspace and outputs are fixed by the build's inputs (example
+  9 needs them), and a release signs. `#[scratch]` is not built yet, so
+  there is no scratch directory to start empty.

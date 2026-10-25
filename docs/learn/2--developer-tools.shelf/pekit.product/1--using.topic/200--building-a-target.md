@@ -225,3 +225,38 @@ pekit keys every step by a fingerprint of the host's packages, which
 changes whenever a package is installed, upgraded, or removed. Pekit
 knows the package databases of dpkg, rpm, apk, and pacman. On a host it
 can't identify, pekit warns, and doesn't reuse steps from the store.
+
+## Strict builds
+
+`--strict` builds as a release should: from what the workspace pins, and
+nothing of the machine it runs on. Its steps see none of the host's
+tools, so a step must run its programs from a pinned toolchain or
+environment. A target's own code, outside its steps, can fetch and
+unpack files, ask the keychain for secrets, and read the workspace and
+the build's outputs. It can't run a program, write a file, or read
+anything else of the host: each of these fails where the target does it.
+The host's own toolchains, such as `system_c`, look for the host's
+compiler, so they fail a strict build.
+
+A strict build's steps are keyed apart from a build's that borrowed the
+host's tools, and not by the host's packages, so their results are the
+same on any machine of the platform.
+
+## Checking that a build is reproducible
+
+`--check-reproducible` builds, then runs every step again, reusing
+nothing from the store, and compares what each gave with what it gave
+first. A step that gives other outputs from the same inputs fails the
+command, named with each file that differs:
+
+```text
+error: a step is not reproducible: run again with the same inputs, it gave other outputs
+  app/drift/stamp
+    /pekit-out/app/drift/stamp/out/sub/t
+```
+
+Only steps given the same inputs both times are compared, so a step
+downstream of one that differed isn't reported as well. A step's first
+record stays in the store. `pekit run` and `pekit publish` change the
+world outside the build, so they can't be checked by doing them twice:
+check what they build with `pekit build --check-reproducible`.

@@ -11,7 +11,7 @@ use std::process::Command;
 use gcsl::eval::plain::Plain;
 use pekit::store::Store;
 
-use building::build_in;
+use building::{Options, build_in, observed_with};
 
 /// The repository's root.
 fn repository() -> PathBuf {
@@ -544,6 +544,46 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
     assert_eq!(
         run(dir.path(), file_of(&built.value, Some("x86_64"))),
         "Hello from a file that was turned into code during the build.\n"
+    );
+}
+
+#[test]
+fn the_pinned_toolchains_build_strictly_with_nothing_of_the_host() {
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) = seeded(&names) else {
+        eprintln!("skipped: what the builds fetch is not on this machine");
+        return;
+    };
+    let strict = Options {
+        strict: true,
+        ..Options::default()
+    };
+    for (n, target, prints) in [(1, "hello", "Hello from pekit2\n"), (4, "app", ZLIB)] {
+        let dir = example(n, PINNED);
+        let (built, _) = observed_with(dir.path(), state.path(), target, strict);
+        let built = built.unwrap();
+        assert_eq!(
+            run(dir.path(), file_of(&built.value, None)),
+            prints,
+            "example {n}"
+        );
+    }
+    let dir = example(8, PINNED);
+    let built = observed_with(dir.path(), state.path(), "app", strict)
+        .0
+        .unwrap();
+    assert_eq!(
+        run_python(dir.path(), file_of(&built.value, None)),
+        "Hello, pekit2\n"
+    );
+    // The host's own toolchain is refused: its definition looks for the
+    // host's `cc`.
+    let dir = example(1, HOST);
+    let (built, _) = observed_with(dir.path(), state.path(), "hello", strict);
+    let error = built.unwrap_err();
+    assert!(
+        error.contains("a strict build refuses a target's own `which`"),
+        "{error}"
     );
 }
 

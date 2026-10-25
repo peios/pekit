@@ -298,3 +298,114 @@ fn clean_removes_the_outputs_and_with_cache_the_store() {
     assert!(nothing.status.success());
     assert_eq!(printed(&nothing).0, "");
 }
+
+/// Steps of which one writes the time, and so gives other outputs each
+/// time it runs, and one gives the same.
+const DRIFTING: &str = "#[hermetic] fn stamp() -> Dir {\n\
+                        \x20   let r = exec([\"sh\", \"-c\", \"mkdir -p out/sub; echo same > out/a; \
+                        date +%s%N > out/sub/t\"])\n\
+                        \x20   dir(\"out\")\n\
+                        }\n\
+                        #[hermetic] fn steady() -> File {\n\
+                        \x20   let r = exec([\"sh\", \"-c\", \"echo steady > s\"])\n\
+                        \x20   file(\"s\")\n\
+                        }\n\
+                        def build drift() { = stamp() }\n\
+                        def build calm() { = steady() }\n";
+
+#[test]
+fn check_reproducible_runs_every_step_again_and_names_what_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", DRIFTING)],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let checked = pekit(
+        &app,
+        cache.path(),
+        &["build", "calm", "--check-reproducible"],
+    );
+    let (out, err) = printed(&checked);
+    assert!(checked.status.success(), "{err}");
+    assert!(out.starts_with("built app/calm: 1 step run"), "{out}");
+    // A step whose outputs differ is named, with each file that does, the
+    // directory's own looked into.
+    let checked = pekit(
+        &app,
+        cache.path(),
+        &["build", "drift", "--check-reproducible"],
+    );
+    let (_, err) = printed(&checked);
+    assert!(!checked.status.success());
+    assert_eq!(
+        err,
+        "error: a step is not reproducible: run again with the same inputs, it gave other \
+         outputs\n  app/drift/stamp\n    /pekit-out/app/drift/stamp/out/sub/t\n"
+    );
+    // What changes the world is not done twice to check it.
+    let (_, err) = printed(&pekit(
+        &app,
+        cache.path(),
+        &["run", "calm", "--check-reproducible"],
+    ));
+    assert!(err.contains("`pekit run` changes the world"), "{err}");
+}
+
+#[test]
+fn a_strict_build_runs_no_target_effect_but_reads_and_borrows_no_host_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!(
+        "{DRIFTING}def build own() {{\n\
+         \x20   let r = exec([\"true\"])\n\
+         \x20   = steady()\n\
+         }}\n\
+         def build outside() {{ = file(\"/etc/hostname\").read() }}\n\
+         def build inside() {{ = file(\"name.txt\").read() }}\n"
+    );
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("app/build.gcsl", &text),
+            ("app/name.txt", "n\n"),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let strict = |target: &str| {
+        let built = pekit(&app, cache.path(), &["build", target, "--strict"]);
+        (built.status.success(), printed(&built).1)
+    };
+    let (ok, err) = strict("own");
+    assert!(!ok);
+    assert!(
+        err.starts_with(
+            "error: a strict build refuses a target's own `exec`: a release's targets run \
+             programs and write files only in steps\n"
+        ),
+        "{err}"
+    );
+    let (ok, err) = strict("outside");
+    assert!(!ok);
+    assert!(
+        err.starts_with(
+            "error: a strict build reads only the workspace and the build's outputs, and this \
+             reads `/etc/hostname`\n"
+        ),
+        "{err}"
+    );
+    // The workspace's own files it reads.
+    let (ok, err) = strict("inside");
+    assert!(ok, "{err}");
+    // A step sees nothing of the host: no `sh` to run, and no note that the
+    // build was not hermetic.
+    let (ok, err) = strict("calm");
+    assert!(!ok);
+    assert!(
+        err.contains("execvp sh: No such file or directory"),
+        "{err}"
+    );
+    assert!(!err.contains("not hermetic"), "{err}");
+}
