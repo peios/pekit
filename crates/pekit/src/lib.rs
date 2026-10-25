@@ -20,6 +20,7 @@ pub mod pool;
 pub mod query;
 pub mod receipt;
 pub mod record;
+pub mod release;
 pub mod sandbox;
 pub mod store;
 pub mod target;

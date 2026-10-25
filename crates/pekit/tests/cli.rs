@@ -409,3 +409,38 @@ fn a_strict_build_runs_no_target_effect_but_reads_and_borrows_no_host_tool() {
     );
     assert!(!err.contains("not hermetic"), "{err}");
 }
+
+#[test]
+fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "#[hermetic] fn made() -> Dir {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; echo inside > out/f\"])\n\
+                 \x20   dir(\"out\")\n\
+                 }\n\
+                 def build reads() { = made().file(\"f\").read() }\n",
+            ),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let first = pekit(&app, cache.path(), &["build", "reads"]);
+    assert!(first.status.success(), "{:?}", printed(&first));
+    // With `pekit-out/` gone, the step is found in the store, and what the
+    // target reads of it is put back.
+    assert!(pekit(&app, cache.path(), &["clean"]).status.success());
+    let again = pekit(&app, cache.path(), &["build", "reads"]);
+    let (out, err) = printed(&again);
+    assert!(again.status.success(), "{err}");
+    assert!(
+        out.starts_with("built app/reads: 0 steps run, 1 found"),
+        "{out}"
+    );
+    let placed = dir.path().join("pekit-out/app/reads/made/out/f");
+    assert_eq!(fs::read_to_string(placed).unwrap(), "inside\n");
+}

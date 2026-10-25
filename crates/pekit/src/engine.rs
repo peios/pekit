@@ -1721,8 +1721,12 @@ impl Run<'_> {
             None
         };
         if let Some(record) = found {
+            // Its outputs placed as a step's that ran are, since a target's
+            // own code reads `/pekit-out` mid-build: after `pekit clean`, or
+            // in a release's tree, nothing else would put them there.
             for (path, kept) in record.result.files() {
                 self.outputs.insert(path.to_owned(), kept);
+                self.expose(path, kept)?;
             }
             let value = self.loaded.workspace.from_plain(&record.result.plain());
             self.graph.resolve(id, Ok(value));

@@ -274,3 +274,21 @@ its own piece of work, after layer E.
   `--strict` fails on that, on an imported library not pinned, on no
   lock, and on `$GCSL_LIBRARY_PATH` set. The pinning of packages from a
   repository (example 10) waits for example 10.
+- E8: `pekit release PACKAGE --to STORE [--jobs] [--trace]`: the workspace
+  must be in a git repository and match `HEAD` but for `pekit-out/` and
+  `.gcsl/`; `HEAD`'s tree of the workspace is exported with `git archive`
+  into the cache's scratch, and built there with `--strict`,
+  `--check-reproducible` and the `release` profile, the package's value
+  giving its name and version. The tag `NAME@VERSION`, a lightweight one,
+  needing no identity, is checked before publishing: on another commit,
+  an error, nothing published; on `HEAD`, published again, not tagged
+  again. Publishing is a target's own effect, which strict refuses, so
+  the publishing pass keeps the strict build's step settings, no host
+  tools and its platform key, so that its steps are found in the store,
+  and allows the target's effects, already checked by the strict pass.
+- Found with E8: a step found in the store had its outputs recorded but
+  not placed in `pekit-out/`, so after `pekit clean`, or in a release's
+  fresh tree, a target's own code reading one, or publishing it, found
+  nothing. They are placed now, as a step's that ran are. A follow-up:
+  placing every cached step's outputs re-links them on every build,
+  whether or not they are already there.

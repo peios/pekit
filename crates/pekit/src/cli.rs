@@ -54,6 +54,7 @@ use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
 use crate::layers::remove_tree;
 use crate::load::{LoadError, Loaded, load};
+use crate::release::Repository;
 use crate::lock;
 use crate::store::Store;
 use crate::sandbox::HostTools;
@@ -89,6 +90,26 @@ enum Command {
     Clean(CleanArgs),
     /// Pin the libraries the workspace imports in `pekit.lock`.
     Lock(LockArgs),
+    /// Build a package from `HEAD` strictly, publish it, and tag it.
+    Release(ReleaseArgs),
+}
+
+/// `pekit release`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct ReleaseArgs {
+    /// The package, named as `pekit package` names one.
+    #[arg(value_name = "PACKAGE")]
+    package: String,
+    /// The store to publish into: a path or a URL, as each packager reads
+    /// it.
+    #[arg(long, value_name = "STORE")]
+    to: String,
+    /// How many programs may run at once.
+    #[arg(long, short)]
+    jobs: Option<usize>,
+    /// Write a Chrome trace of the build to this file.
+    #[arg(long, value_name = "FILE")]
+    trace: Option<PathBuf>,
 }
 
 /// `pekit lock`'s arguments (see [Commands](#commands)).
@@ -357,6 +378,7 @@ pub fn run(
         }
         Command::Clean(args) => clean_command(&args, cwd, terminal),
         Command::Lock(args) => lock_command(&args, cwd, terminal),
+        Command::Release(args) => release_command(&args, cwd, terminal),
     }
 }
 
@@ -733,6 +755,210 @@ fn lock_command(args: &LockArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
         Err(error) => {
             let _ = write!(terminal.err, "{}", error.render());
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `pekit release PACKAGE --to STORE` (see [Releases](crate::release#releases)):
+/// builds the package from `HEAD`, strictly, with the `release` profile,
+/// each step checked to be reproducible; publishes it into `STORE`; and tags
+/// `HEAD` `NAME@VERSION`, refusing a tag of that name on another commit
+/// before anything is published.
+fn release_command(args: &ReleaseArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let Some(root) = workspace_root(cwd, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let fail = |terminal: &mut Terminal<'_>, message: &str| {
+        let _ = writeln!(terminal.err, "error: {message}");
+        ExitCode::FAILURE
+    };
+    let repository = match Repository::of(&root) {
+        Ok(repository) => repository,
+        Err(message) => return fail(terminal, &message),
+    };
+    match repository.unclean(&root) {
+        Ok(unclean) if unclean.is_empty() => {}
+        Ok(unclean) => {
+            let _ = writeln!(
+                terminal.err,
+                "error: a release is built from `HEAD`, and the workspace differs from it: \
+                 commit or remove each of"
+            );
+            for line in unclean {
+                let _ = writeln!(terminal.err, "  {line}");
+            }
+            return ExitCode::FAILURE;
+        }
+        Err(message) => return fail(terminal, &message),
+    }
+    let tree = cache_dir()
+        .join("scratch")
+        .join(format!("release-{}", std::process::id()));
+    if let Err(message) = repository.export(&tree) {
+        let _ = remove_tree(&tree);
+        return fail(terminal, &message);
+    }
+    let here = cwd
+        .canonicalize()
+        .ok()
+        .and_then(|cwd| cwd.strip_prefix(&root).ok().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let released = released(args, (&tree.join(here), &repository), terminal);
+    let _ = remove_tree(&tree);
+    released
+}
+
+/// [`release_command`]'s build, publishing and tag, in the workspace `HEAD`
+/// was exported into, from its directory `at`.
+fn released(
+    args: &ReleaseArgs,
+    (at, repository): (&Path, &Repository),
+    terminal: &mut Terminal<'_>,
+) -> ExitCode {
+    let shared = |check_reproducible| Shared {
+        jobs: args.jobs,
+        trace: args.trace.clone(),
+        profile: "release".to_owned(),
+        platform: None,
+        reuse: ReuseFlags {
+            rebuild: false,
+            check_reproducible,
+        },
+        allows: AllowFlags {
+            no_dynamic: false,
+            strict: true,
+        },
+    };
+    let (checked, publishing) = (shared(true), shared(false));
+    let Some(mut loaded) = load_for(at, &checked, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let names = [args.package.as_str()];
+    let package = match select(&loaded.workspace, "package", &names, &loaded.here) {
+        Ok(mut packages) if packages.len() == 1 => packages.remove(0),
+        Ok(_) => {
+            let _ = writeln!(
+                terminal.err,
+                "error: `pekit release` releases one package, which `{}` does not name",
+                args.package
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{}", error.message());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(settings) = settings_for(&checked, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let packages = [package];
+    let built = build_targets(
+        (&mut loaded, &packages, Doing::Build),
+        &settings,
+        &checked,
+        terminal,
+    );
+    let value = match built.map(|mut outcomes| outcomes.targets.remove(0)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) | Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(&loaded));
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(tag) = release_tag(&value) else {
+        let _ = writeln!(
+            terminal.err,
+            "error: `{}` gives no package's name and version",
+            packages[0].qualified()
+        );
+        return ExitCode::FAILURE;
+    };
+    let tagged = match repository.tagged(&tag) {
+        Ok(Some(commit)) if commit != repository.head => {
+            let _ = writeln!(
+                terminal.err,
+                "error: the tag `{tag}` is on {commit}, not on `HEAD`, {}: a version is released \
+                 once, so give this one a version of its own",
+                repository.head
+            );
+            return ExitCode::FAILURE;
+        }
+        Ok(found) => found.is_some(),
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let publish = Settings {
+        strict: false,
+        ..settings.clone()
+    };
+    if !publish_release(
+        (&mut loaded, &packages),
+        (&tag, &args.to),
+        (&publish, &publishing),
+        terminal,
+    ) {
+        return ExitCode::FAILURE;
+    }
+    if !tagged && let Err(message) = repository.tag(&tag) {
+        let _ = writeln!(terminal.err, "error: published, but not tagged: {message}");
+        return ExitCode::FAILURE;
+    }
+    let _ = writeln!(terminal.out, "tagged {tag} at {}", repository.head);
+    ExitCode::SUCCESS
+}
+
+/// The tag of the release of the package whose value is `value`, a
+/// `Package`: `NAME@VERSION`; `None` for any other value.
+fn release_tag(value: &Plain) -> Option<String> {
+    let field = |name: &str| match value {
+        Plain::Record(fields) => fields.iter().find_map(|(field, value)| match value {
+            Plain::Str(text) if field == name => Some(text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    Some(format!("{}@{}", field("name")?, field("version")?))
+}
+
+/// Publishes the release `tag` of `packages`, the one package of `loaded`'s
+/// workspace, into the store `to`, with `settings`, the strict build's but
+/// allowing the target's own effects, since publishing is one, already
+/// checked by that build, and its steps found in the store; `shared` for
+/// its progress. Whether it was published, said on `terminal`.
+fn publish_release(
+    (loaded, packages): (&mut Loaded, &[Target]),
+    (tag, to): (&str, &str),
+    (settings, shared): (&Settings, &Shared),
+    terminal: &mut Terminal<'_>,
+) -> bool {
+    let packing = Packing::Publish { to: to.to_owned() };
+    let published = build_targets(
+        (loaded, packages, Doing::Pack(&packing)),
+        settings,
+        shared,
+        terminal,
+    );
+    match published.map(|mut outcomes| outcomes.targets.remove(0)) {
+        Ok(Ok(Plain::List(packed))) if !packed.is_empty() => {
+            for each in &packed {
+                let (by, _) = packed_by(each);
+                let _ = writeln!(terminal.out, "published {tag} with {by} into {to}");
+            }
+            true
+        }
+        Ok(Ok(_)) => {
+            let _ = writeln!(
+                terminal.err,
+                "error: `{tag}` was packed by no packager: list one in `pekitconf.packagers`"
+            );
+            false
+        }
+        Ok(Err(error)) | Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(loaded));
+            false
         }
     }
 }
