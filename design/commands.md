@@ -258,3 +258,19 @@ its own piece of work, after layer E.
   so key, depended on what else was built. Work two targets share is
   shared by putting it in a build both call, as Bazel's actions belong
   to their targets. A decision taken without Jack, to surface.
+- E7: `pekit.lock` is JSON, written by `pekit lock`: `sources`, a prefix of
+  import paths each with a git repository, the directory in it holding
+  the prefix's libraries and the revision followed, editable by hand,
+  and `libraries`, each pinned by path, repository, directory, commit
+  and the digest of its exported tree. A library no source names follows
+  Go's convention, `HOST/OWNER/REPO` the repository `https://HOST/OWNER/REPO`
+  at `HEAD`, its source added to the lock. Repositories are bare clones
+  in the cache's `git/`, fetched only to resolve a revision or for a
+  commit missing; a library is exported with `git archive` into
+  `.gcsl/libraries/PATH`, whole or as it was. `pekit lock` pins what is
+  not pinned, `--update` everything, and drops what is no longer
+  imported, its directory with it. Every command that builds first puts
+  back a pinned library that is missing, and warns of one that differs;
+  `--strict` fails on that, on an imported library not pinned, on no
+  lock, and on `$GCSL_LIBRARY_PATH` set. The pinning of packages from a
+  repository (example 10) waits for example 10.

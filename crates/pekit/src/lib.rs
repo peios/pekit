@@ -14,6 +14,7 @@ pub mod host;
 pub mod keychain;
 pub mod layers;
 pub mod load;
+pub mod lock;
 pub mod platform;
 pub mod pool;
 pub mod query;

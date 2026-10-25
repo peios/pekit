@@ -145,6 +145,45 @@ workspace's root. A library's steps are keyed by its path and contents,
 never by where it was found, so the same library in another place gives
 the same results from the store.
 
+## Pinning libraries
+
+`pekit lock` pins each library the workspace imports, and each library
+those import, at a commit of the git repository it comes from, in
+`pekit.lock` at the workspace's root:
+
+```text
+$ pekit lock
+pinned github.com/gcslib/gcc at 4834d15186dbf67463ca1410d67bc578faca1f4e
+```
+
+It exports each into `.gcsl/libraries/`. Commit `pekit.lock` and every
+checkout builds with the same libraries: any command that builds puts
+back a pinned library that isn't there, from the commit it pins, and
+warns of one there that differs from it. `pekit lock` pins only what
+isn't pinned yet, and drops each library that nothing imports. `pekit
+lock --update` pins every library again, at what its repository holds
+now.
+
+By default, a library's repository follows Go's convention: the library
+`github.com/gcslib/gcc` is the repository `https://github.com/gcslib/gcc`,
+at its `HEAD`. To take libraries from elsewhere, give their prefix a
+source in `pekit.lock`: a repository, the directory in it that holds the
+prefix's libraries, and the branch, tag, or commit to follow.
+
+```json
+{
+  "sources": [
+    {"prefix": "github.com/gcslib", "git": "https://example.org/gcslib.git", "dir": "libs", "rev": "main"}
+  ]
+}
+```
+
+Repositories are kept in pekit's cache directory and fetched only when
+pekit needs a commit it doesn't have, so a workspace whose libraries are
+pinned builds offline. A strict build, `--strict`, fails unless its
+libraries are exactly those `pekit.lock` pins: every library it imports
+pinned, none differing from its pin, and `$GCSL_LIBRARY_PATH` unset.
+
 ## Fetching files
 
 `fetch(url, sha256)` is the only part of a build that uses the network.

@@ -53,7 +53,9 @@ use crate::events::{Event, EventKind};
 use crate::host::HostSnapshot;
 use crate::platform::ExecutionPlatform;
 use crate::layers::remove_tree;
-use crate::load::{Loaded, load};
+use crate::load::{LoadError, Loaded, load};
+use crate::lock;
+use crate::store::Store;
 use crate::sandbox::HostTools;
 use crate::target::{Target, TargetError, select};
 use crate::trace::Trace;
@@ -85,6 +87,17 @@ enum Command {
     Publish(PublishArgs),
     /// Remove what builds left: `pekit-out/`, and with `--cache` the store.
     Clean(CleanArgs),
+    /// Pin the libraries the workspace imports in `pekit.lock`.
+    Lock(LockArgs),
+}
+
+/// `pekit lock`'s arguments (see [Commands](#commands)).
+#[derive(Debug, clap::Args)]
+struct LockArgs {
+    /// Pin every library again at its source's revision, not only those
+    /// not pinned yet.
+    #[arg(long)]
+    update: bool,
 }
 
 /// `pekit run`'s arguments (see [Commands](#commands)).
@@ -343,17 +356,14 @@ pub fn run(
             package_command((&args.packages, &packing), &args.shared, cwd, terminal)
         }
         Command::Clean(args) => clean_command(&args, cwd, terminal),
+        Command::Lock(args) => lock_command(&args, cwd, terminal),
     }
 }
 
 /// `pekit build TARGET...` (see [Commands](#commands)).
 fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
-    let mut loaded = match load(cwd) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render());
-            return ExitCode::FAILURE;
-        }
+    let Some(mut loaded) = load_for(cwd, &args.shared, terminal) else {
+        return ExitCode::FAILURE;
     };
     let names: Vec<&str> = args.targets.iter().map(String::as_str).collect();
     let targets = match select(&loaded.workspace, "build", &names, &loaded.here) {
@@ -425,12 +435,8 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
 
 /// `pekit test [TEST...]` (see [Commands](#commands)).
 fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
-    let mut loaded = match load(cwd) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render());
-            return ExitCode::FAILURE;
-        }
+    let Some(mut loaded) = load_for(cwd, &args.shared, terminal) else {
+        return ExitCode::FAILURE;
     };
     let mut names: Vec<&str> = args.tests.iter().map(String::as_str).collect();
     if names.is_empty() {
@@ -513,12 +519,8 @@ fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitC
     if args.shared.reuse.check_reproducible {
         return changes_the_world("run", terminal);
     }
-    let mut loaded = match load(cwd) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render());
-            return ExitCode::FAILURE;
-        }
+    let Some(mut loaded) = load_for(cwd, &args.shared, terminal) else {
+        return ExitCode::FAILURE;
     };
     let (target, script) = match runnable(&loaded, &args.name) {
         Ok(found) => found,
@@ -669,13 +671,7 @@ fn query(
     shared: &Shared,
     terminal: &mut Terminal<'_>,
 ) -> Option<(Loaded, Vec<Result<TargetDeps, BuildError>>)> {
-    let mut loaded = match load(cwd) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render());
-            return None;
-        }
-    };
+    let mut loaded = load_for(cwd, shared, terminal)?;
     let targets = match select(&loaded.workspace, kind, names, &loaded.here) {
         Ok(targets) => targets,
         Err(error) => {
@@ -708,6 +704,119 @@ fn absolute(cwd: &Path, path: &Path) -> PathBuf {
         }
     }
     absolute
+}
+
+/// `pekit lock [--update]` (see [Commands](#commands)): pins the libraries
+/// the workspace imports, saying which it pinned anew and which it dropped.
+fn lock_command(args: &LockArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let Some(root) = workspace_root(cwd, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let cache = cache_dir();
+    let store = match Store::open(&cache.join("store")) {
+        Ok(store) => store,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "error: cannot open the store: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match lock::lock(&root, (&cache, &store), args.update) {
+        Ok(locked) => {
+            for (path, commit) in &locked.pinned {
+                let _ = writeln!(terminal.out, "pinned {path} at {commit}");
+            }
+            for path in &locked.dropped {
+                let _ = writeln!(terminal.out, "dropped {path}, no longer imported");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The root of the workspace `cwd` is in, or `None`, said on `terminal`.
+fn workspace_root(cwd: &Path, terminal: &mut Terminal<'_>) -> Option<PathBuf> {
+    let found = cwd
+        .canonicalize()
+        .ok()
+        .and_then(|cwd| gcsl_disk::find_root(&cwd).map(Path::to_path_buf));
+    if found.is_none() {
+        let _ = write!(
+            terminal.err,
+            "{}",
+            LoadError::NoWorkspace {
+                dir: cwd.to_path_buf()
+            }
+            .render()
+        );
+    }
+    found
+}
+
+/// The workspace `cwd` is in, loaded as a command that builds as `shared`
+/// says loads it, or `None`, said on `terminal` (see [The
+/// lock](crate::lock#the-lock)): each library its lock pins that is not
+/// there put back first; then, under `--strict`, failing unless its
+/// libraries are those the lock pins, and otherwise warning of each that
+/// differs.
+fn load_for(cwd: &Path, shared: &Shared, terminal: &mut Terminal<'_>) -> Option<Loaded> {
+    let root = workspace_root(cwd, terminal)?;
+    let cache = cache_dir();
+    let differ = Store::open(&cache.join("store"))
+        .map_err(|error| lock::LockError::Io(format!("cannot open the store: {error}")))
+        .and_then(|store| lock::restore(&root, (&cache, &store)));
+    let differ = match differ {
+        Ok(differ) => differ,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return None;
+        }
+    };
+    let loaded = match load(cwd) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render());
+            return None;
+        }
+    };
+    if shared.allows.strict {
+        let prefix = format!("{}/", gcsl::workspace::LIBRARIES);
+        let mut libraries: Vec<String> = loaded
+            .names
+            .iter()
+            .filter_map(|name| name.strip_prefix(prefix.as_str()))
+            .filter_map(|rest| rest.rsplit_once('/').map(|(library, _)| library.to_owned()))
+            .collect();
+        libraries.sort();
+        libraries.dedup();
+        match lock::check_strict(&root, &libraries, differ) {
+            Ok(problems) if problems.is_empty() => {}
+            Ok(problems) => {
+                let _ = write!(
+                    terminal.err,
+                    "{}",
+                    lock::LockError::Strict(problems).render()
+                );
+                return None;
+            }
+            Err(error) => {
+                let _ = write!(terminal.err, "{}", error.render());
+                return None;
+            }
+        }
+    } else {
+        for difference in differ {
+            let _ = writeln!(
+                terminal.err,
+                "warning: {difference}: remove it to have the pinned one put back, or commit \
+                 the change to its repository and run `pekit lock --update`"
+            );
+        }
+    }
+    Some(loaded)
 }
 
 /// `--check-reproducible` refused for the command `pekit COMMAND`, whose
@@ -773,12 +882,8 @@ fn package_command(
     if shared.reuse.check_reproducible && matches!(packing, Packing::Publish { .. }) {
         return changes_the_world("publish", terminal);
     }
-    let mut loaded = match load(cwd) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            let _ = write!(terminal.err, "{}", error.render());
-            return ExitCode::FAILURE;
-        }
+    let Some(mut loaded) = load_for(cwd, shared, terminal) else {
+        return ExitCode::FAILURE;
     };
     let mut names: Vec<&str> = given.iter().map(String::as_str).collect();
     if names.is_empty() {
