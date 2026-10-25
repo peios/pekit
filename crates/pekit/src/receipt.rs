@@ -7,10 +7,10 @@
 //!
 //! - its code: the path and contents' digest of every file whose source
 //!   makes it, in order;
-//! - its arguments, its function's captures and the context it can read,
-//!   as GCSL gives it, every context bound where it was made but those with
-//!   no default that its function does not need, as plain data, each
-//!   record's fields sorted by name, since GCSL compares
+//! - its arguments and its function's captures, and, of the context it was
+//!   made in, each context it read as it ran, by its key, with its value,
+//!   or that it was unbound, a default read (see `design/engine.md`, R2),
+//!   as plain data, each record's fields sorted by name, since GCSL compares
 //!   records so, a float by its bits, every NaN one and `-0.0` as `0.0`;
 //! - each file it is given by its path *and* the digest of its contents,
 //!   and each directory by its path and its tree's digest: the path stays,
@@ -46,8 +46,10 @@ pub struct ReceiptOf<'a> {
     pub args: &'a [Plain],
     /// Its function's captures.
     pub captures: &'a [Plain],
-    /// The context it runs in, by key, sorted.
-    pub context: &'a [(String, Plain)],
+    /// The contexts it read, by key, sorted, each with its value, or `None`
+    /// for one unbound: none for a step's *base*, the receipt its manifest
+    /// is found by.
+    pub context: &'a [(String, Option<Plain>)],
     /// Its own output directory, logically.
     pub own: &'a str,
     /// The name and contents' digest of the file of each input number, by
@@ -75,7 +77,7 @@ pub fn receipt(
         contents,
         code_of: of.code_of,
     };
-    out.text("pekit-receipt-2");
+    out.text("pekit-receipt-3");
     out.count(of.code.len());
     for (path, digest) in of.code {
         out.text(path);
@@ -90,7 +92,14 @@ pub fn receipt(
     out.count(of.context.len());
     for (key, plain) in of.context {
         out.text(key);
-        out.plain(plain)?;
+        // Unbound is told apart from every value by its tag.
+        match plain {
+            Some(plain) => {
+                out.bytes(&[1]);
+                out.plain(plain)?;
+            }
+            None => out.bytes(&[0]),
+        }
     }
     out.text(of.own);
     out.text(of.platform);

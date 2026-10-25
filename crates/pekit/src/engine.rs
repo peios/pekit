@@ -46,7 +46,9 @@ use std::time::Instant;
 
 use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
-use gcsl::eval::graph::{EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS};
+use gcsl::eval::graph::{
+    EffectJob, Graph, GraphHost, Node, NodeId, NodeKind, NodeState, STEP_UNITS, StepReads,
+};
 use gcsl::eval::plain::Plain;
 use gcsl::workspace::graph::{PreparedCall, RootField, RootWrap};
 use gcsl::workspace::{Given, InvokeError, Progress, StepInputs};
@@ -61,8 +63,10 @@ use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{ReceiptOf, receipt};
-use crate::record::{Kept, StepRecord, StoreError, Stored, differences, keep_files, stored};
-use crate::sandbox::{HostTools, HostView, OUTPUTS, StepSandbox, WORKSPACE};
+use crate::record::{
+    Kept, Manifest, StepRecord, StoreError, Stored, differences, keep_files, manifest_key, stored,
+};
+use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Store, TreeEntry};
 use crate::target::Target;
 
@@ -771,6 +775,23 @@ fn hermetic(attributes: &[Attribute]) -> bool {
     })
 }
 
+/// The keys of the contexts the step `step`'s last run read, sorted: each it
+/// read, and, if it read every one its context binds, each of those.
+fn read_keys(step: &StepRun) -> Vec<String> {
+    let mut keys: Vec<String> = step.reads.keys.iter().map(|(key, _)| key.clone()).collect();
+    if step.reads.all {
+        keys.extend(
+            step.keyed
+                .contexts
+                .iter()
+                .map(|context| context.key.clone()),
+        );
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 /// The directory under `/pekit-out` of the steps of `definition`: its
 /// qualified name, a library's under `.libraries/`, which no directory of a
 /// workspace can be, and one made with a variant under its def-type and
@@ -855,8 +876,12 @@ struct StepRun {
     secrets: Vec<SecretFile>,
     /// Its attempt's number, from 0.
     attempt: u32,
-    /// Its receipt.
-    receipt: Digest,
+    /// What keys it but the contexts it reads.
+    keyed: Keyed,
+    /// Its base, its receipt with no context, which its manifest is kept by.
+    base: Digest,
+    /// What its unit's last run read of its context.
+    reads: StepReads,
     /// When its first attempt began.
     started: Instant,
     /// When its attempts must end, by its `#[timeout]`.
@@ -867,6 +892,33 @@ struct StepRun {
     failed_once: bool,
     /// The effect its unit stopped for, if it did.
     waiting: Option<NodeId>,
+}
+
+/// What a step is keyed by but the contexts it reads (see
+/// `design/engine.md`, R2).
+#[derive(Debug)]
+struct Keyed {
+    /// Its inputs, as GCSL gives them.
+    inputs: StepInputs,
+    /// The path and contents' digest of each file whose source makes its
+    /// code.
+    code: Vec<(String, Digest)>,
+    /// Its own output directory, logically.
+    own: String,
+    /// Each context it can read, as keying and staging it need it.
+    contexts: Vec<ContextInput>,
+}
+
+/// A context a step can read (see `design/engine.md`, R3): its key, its value,
+/// and what the step is given once it reads it.
+#[derive(Clone, Debug)]
+struct ContextInput {
+    /// Its declaration's key's text.
+    key: String,
+    /// Its value.
+    plain: Plain,
+    /// What it gives the step once the step reads it.
+    pending: Pending,
 }
 
 /// One build's state (see [Building](#building)).
@@ -945,6 +997,9 @@ fn foreign_file<'a>(plain: &'a Plain, step: &StepRun) -> Option<&'a str> {
             .iter()
             .any(|kind| within(path, &format!("{OUTPUTS}/{kind}")))
     };
+    // What it was given: its arguments' and captures' files, and those of
+    // the contexts it read.
+    let staged = step.sandbox.staged();
     plain
         .files()
         .into_iter()
@@ -952,10 +1007,14 @@ fn foreign_file<'a>(plain: &'a Plain, step: &StepRun) -> Option<&'a str> {
         .find(|path| {
             !within(path, own)
                 && !shared(path)
-                && !step.given.iter().any(|(given, kept)| match kept {
-                    Kept::File(_) => path == given,
-                    Kept::Dir(_) => within(path, given),
-                })
+                && !step
+                    .given
+                    .iter()
+                    .chain(&staged)
+                    .any(|(given, kept)| match kept {
+                        Kept::File(_) => path == given,
+                        Kept::Dir(_) => within(path, given),
+                    })
         })
 }
 
@@ -1666,24 +1725,22 @@ impl Run<'_> {
             .unwrap_or_else(|| format!("step-{}", id.number()))
     }
 
-    /// The secret files `inputs` hold, in their arguments, captures or
-    /// context, at any depth, each by its path as a step sees it and where
-    /// it is on the host: bound into the step's sandbox, never staged, since
-    /// staging stores (see [Secrets](crate::keychain#secrets)). A
-    /// keychain's file is where the keychain found it, and a workspace
+    /// The secret files `values`, a step's arguments and captures, or a
+    /// context's value, hold, at any depth, each by its path as a step sees
+    /// it and where it is on the host: bound into the step's sandbox, never
+    /// staged, since staging stores (see [Secrets](crate::keychain#secrets)).
+    /// A keychain's file is where the keychain found it, and a workspace
     /// file where it is in the workspace.
     ///
     /// # Errors
     ///
     /// A secret's file that is neither.
-    fn secret_files(&self, inputs: &StepInputs) -> Result<Vec<SecretFile>, String> {
+    fn secret_files<'p>(
+        &self,
+        values: impl Iterator<Item = &'p Plain>,
+    ) -> Result<Vec<SecretFile>, String> {
         let mut found: Vec<SecretFile> = Vec::new();
-        let mut pending: Vec<&Plain> = inputs
-            .args
-            .iter()
-            .chain(&inputs.captures)
-            .chain(inputs.context.iter().map(|(_, value)| value))
-            .collect();
+        let mut pending: Vec<&Plain> = values.collect();
         while let Some(plain) = pending.pop() {
             let value = match plain {
                 Plain::Secret { value, .. } => value,
@@ -1757,41 +1814,20 @@ impl Run<'_> {
         let name = self.step_name(id);
         let own = format!("{}/{name}", self.step_dir(id));
         let own_path = format!("{OUTPUTS}/{own}");
+        let keyed = Keyed {
+            code,
+            own: own_path,
+            contexts: self.contexts_of(&inputs).map_err(BuildError::Engine)?,
+            inputs,
+        };
         let mut given: Vec<(String, Kept)> = Vec::new();
-        let table = Rc::clone(&self.code_table);
-        let code_of = move |input: u32| table.get(input as usize).cloned();
-        let of = ReceiptOf {
-            code: &code,
-            args: &inputs.args,
-            captures: &inputs.captures,
-            context: &inputs.context,
-            own: &own_path,
-            code_of: &code_of,
-            platform: &self.settings.platform,
-        };
-        let receipt = {
-            let mut contents = |path: &str, dir: bool| -> Result<Digest, String> {
-                // The host snapshot's own, which every step binds already,
-                // keyed by its path on top of the snapshot's fingerprint.
-                if self.is_host_path(path) {
-                    return Ok(Digest::of(format!("host-snapshot:{path}").as_bytes()));
-                }
-                let kept = self.input(path, dir)?;
-                given.push((path.to_owned(), kept));
-                Ok(match kept {
-                    Kept::File(entry) => entry.digest,
-                    Kept::Dir(tree) => tree,
-                })
-            };
-            receipt(of, &mut contents).map_err(BuildError::Engine)?
-        };
+        let base = self.receipt_of(&keyed, &[], Some(&mut given))?;
         let found = if self.settings.reuse == Reuse::Store {
-            self.store
-                .record::<StepRecord>(&receipt)
-                .map_err(|error| engine(&error))?
+            self.looked_up(&keyed, &base)?
         } else {
             None
         };
+        let inputs = &keyed.inputs;
         if let Some(record) = found {
             // Its outputs placed as a step's that ran are, since a target's
             // own code reads `/pekit-out` mid-build: after `pekit clean`, or
@@ -1808,8 +1844,10 @@ impl Run<'_> {
             return Ok(());
         }
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
-        let secrets = self.secret_files(&inputs).map_err(BuildError::Engine)?;
-        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices))?;
+        let secrets = self
+            .secret_files(inputs.args.iter().chain(&inputs.captures))
+            .map_err(BuildError::Engine)?;
+        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices), &keyed)?;
         let started = Instant::now();
         self.steps.insert(
             id,
@@ -1819,7 +1857,9 @@ impl Run<'_> {
                 secrets,
                 devices,
                 attempt: 0,
-                receipt,
+                keyed,
+                base,
+                reads: StepReads::default(),
                 started,
                 deadline: timeout.map(|limit| started + limit),
                 retries,
@@ -1843,6 +1883,7 @@ impl Run<'_> {
         own: &str,
         attempt: u32,
         (given, secrets, devices): (&[(String, Kept)], &[SecretFile], &[PathBuf]),
+        keyed: &Keyed,
     ) -> Result<Arc<StepSandbox>, BuildError> {
         let stage = self.stage_dir(id, attempt);
         if stage.exists() {
@@ -1853,7 +1894,15 @@ impl Run<'_> {
                 .map_err(|error| engine(&error))?
                 .with_host(&self.settings.host_tools)
                 .with_secrets(secrets.to_vec())
-                .with_devices(devices.to_vec());
+                .with_devices(devices.to_vec())
+                .with_contexts(
+                    keyed
+                        .contexts
+                        .iter()
+                        .map(|context| (context.key.clone(), context.pending.clone()))
+                        .collect(),
+                    self.store.clone(),
+                );
             // Each directory before what is in it, which it stages: so a
             // file of a staged directory is as the directory's tree has it, a
             // symbolic link a link, not the file it leads to.
@@ -1989,14 +2038,20 @@ impl Run<'_> {
             effects: &*sandbox,
         };
         match self.loaded.workspace.run_step(&mut self.graph, id, host) {
-            Ok(Progress::Paused(effect)) => {
+            Ok((Progress::Paused(effect), reads)) => {
                 if let Some(step) = self.steps.get_mut(&id) {
                     step.waiting = Some(effect);
+                    step.reads = reads;
                 }
                 let effects: Arc<dyn Effects + Send + Sync> = sandbox;
                 self.dispatch(effect, effects, deadline, Some(id))
             }
-            Ok(Progress::Done(value)) => self.succeeded(id, &value),
+            Ok((Progress::Done(value), reads)) => {
+                if let Some(step) = self.steps.get_mut(&id) {
+                    step.reads = reads;
+                }
+                self.succeeded(id, &value)
+            }
             Err(failure) => self.failed(id, failure),
         }
     }
@@ -2084,10 +2139,11 @@ impl Run<'_> {
         step: &StepRun,
         result: Stored,
     ) -> Result<(), BuildError> {
+        let receipt = self.read_receipt(step)?;
         if self.settings.reuse == Reuse::Compare
             && let Some(first) = self
                 .store
-                .record::<StepRecord>(&step.receipt)
+                .record::<StepRecord>(&receipt)
                 .map_err(|error| engine(&error))?
         {
             if first.result != result {
@@ -2098,13 +2154,155 @@ impl Run<'_> {
             return Ok(());
         }
         let record = StepRecord {
-            receipt: step.receipt,
+            receipt,
             result,
             duration_ms: u64::try_from(step.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
         self.store
-            .put_record(&step.receipt, &record)
+            .put_record(&receipt, &record)
+            .map_err(|error| engine(&error))?;
+        self.remember_reads(step)
+    }
+
+    /// Adds the set of contexts the step `step`'s last run read to the
+    /// manifest of its base, merged with what is there, so that a build
+    /// recording another set beside it loses neither.
+    fn remember_reads(&self, step: &StepRun) -> Result<(), BuildError> {
+        let keys = read_keys(step);
+        let at = manifest_key(&step.base);
+        let mut manifest = self
+            .store
+            .record::<Manifest>(&at)
+            .map_err(|error| engine(&error))?
+            .unwrap_or_default();
+        if manifest.sets.contains(&keys) {
+            return Ok(());
+        }
+        manifest.sets.push(keys);
+        self.store
+            .put_record(&at, &manifest)
             .map_err(|error| engine(&error))
+    }
+
+    /// The receipt of the step `step` by the contexts its last run read: its
+    /// base and each's value now (see `design/engine.md`, R2).
+    ///
+    /// # Errors
+    ///
+    /// That it read a context it cannot read, which would be GCSL's error,
+    /// or that a file a value names cannot be hashed.
+    fn read_receipt(&mut self, step: &StepRun) -> Result<Digest, BuildError> {
+        for (key, bound) in &step.reads.keys {
+            let readable = step
+                .keyed
+                .contexts
+                .iter()
+                .any(|context| &context.key == key);
+            if *bound != readable {
+                return Err(BuildError::Engine(format!(
+                    "a step read the context `{key}`, which it cannot read so: GCSL's needs \
+                     and its reads disagree"
+                )));
+            }
+        }
+        self.receipt_of(&step.keyed, &read_keys(step), None)
+    }
+
+    /// The step `keyed` found in the store, by each set of contexts its
+    /// manifest has for its base `base`, its receipt by each made of the
+    /// values its context gives them now, the first found.
+    fn looked_up(
+        &mut self,
+        keyed: &Keyed,
+        base: &Digest,
+    ) -> Result<Option<StepRecord>, BuildError> {
+        let manifest = self
+            .store
+            .record::<Manifest>(&manifest_key(base))
+            .map_err(|error| engine(&error))?;
+        for keys in manifest.map(|manifest| manifest.sets).unwrap_or_default() {
+            let receipt = self.receipt_of(keyed, &keys, None)?;
+            let found = self
+                .store
+                .record::<StepRecord>(&receipt)
+                .map_err(|error| engine(&error))?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The receipt of the step `keyed` by the contexts `keys`, each with the
+    /// value its context gives it, or unbound; its base if `keys` is empty.
+    /// Each file a value names is hashed as an input, and, if `given` is,
+    /// added to it to be staged.
+    fn receipt_of(
+        &mut self,
+        keyed: &Keyed,
+        keys: &[String],
+        mut given: Option<&mut Vec<(String, Kept)>>,
+    ) -> Result<Digest, BuildError> {
+        let context: Vec<(String, Option<Plain>)> = keys
+            .iter()
+            .map(|key| {
+                let value = keyed.contexts.iter().find(|context| &context.key == key);
+                (key.clone(), value.map(|context| context.plain.clone()))
+            })
+            .collect();
+        let table = Rc::clone(&self.code_table);
+        let code_of = move |input: u32| table.get(input as usize).cloned();
+        let of = ReceiptOf {
+            code: &keyed.code,
+            args: &keyed.inputs.args,
+            captures: &keyed.inputs.captures,
+            context: &context,
+            own: &keyed.own,
+            code_of: &code_of,
+            platform: &self.settings.platform,
+        };
+        let mut contents = |path: &str, dir: bool| -> Result<Digest, String> {
+            // The host snapshot's own, which every step binds already,
+            // keyed by its path on top of the snapshot's fingerprint.
+            if self.is_host_path(path) {
+                return Ok(Digest::of(format!("host-snapshot:{path}").as_bytes()));
+            }
+            let kept = self.input(path, dir)?;
+            if let Some(given) = given.as_deref_mut() {
+                given.push((path.to_owned(), kept));
+            }
+            Ok(match kept {
+                Kept::File(entry) => entry.digest,
+                Kept::Dir(tree) => tree,
+            })
+        };
+        receipt(of, &mut contents).map_err(BuildError::Engine)
+    }
+
+    /// Each context `inputs` says its step can read, with what it gives the
+    /// step once the step reads it: the files and directories its value
+    /// names, but the host snapshot's, which every step binds, each as the
+    /// store keeps it, directories first; and its secret files.
+    fn contexts_of(&mut self, inputs: &StepInputs) -> Result<Vec<ContextInput>, String> {
+        let mut found = Vec::with_capacity(inputs.context.len());
+        for (key, plain) in &inputs.context {
+            let mut placed: Vec<(&str, bool)> = plain.files();
+            placed.sort_unstable();
+            placed.dedup();
+            let mut files = Vec::new();
+            for (path, dir) in placed {
+                if !self.is_host_path(path) {
+                    files.push((path.to_owned(), self.input(path, dir)?));
+                }
+            }
+            let secrets = self.secret_files(std::iter::once(plain))?;
+            found.push(ContextInput {
+                key: key.clone(),
+                plain: plain.clone(),
+                pending: Pending { files, secrets },
+            });
+        }
+        Ok(found)
     }
 
     /// The step `id` failed with `failure`: run again afresh if its
@@ -2139,6 +2337,7 @@ impl Run<'_> {
             &own,
             attempt,
             (&step.given, &step.secrets, &step.devices),
+            &step.keyed,
         )?;
         self.graph.forget_unit(STEP_UNITS + id.number());
         self.steps.insert(

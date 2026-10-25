@@ -43,7 +43,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gcsl::eval::Effects;
@@ -326,11 +327,35 @@ pub struct StepSandbox {
     /// Its compositions and sandboxes.
     layers: Layers,
     /// The secret files it is given, each its path as it sees it and where
-    /// it is on the host.
-    secrets: Vec<(String, PathBuf)>,
+    /// it is on the host: its arguments' and captures' from its start, and
+    /// a context's once it reads it.
+    secrets: Mutex<Vec<(String, PathBuf)>>,
     /// The devices bound into it, and into the sandboxes it makes, each where
     /// it is on the host.
     devices: Vec<PathBuf>,
+    /// What each context it can read gives it once it reads it, by the
+    /// context's key, and the store they are staged from (see
+    /// `design/engine.md`, R3).
+    pending: Mutex<HashMap<String, Pending>>,
+    /// The store `pending`'s files are staged from.
+    store: Option<Store>,
+    /// Each path staged from a context it read, its file or directory as the
+    /// store keeps it.
+    staged: Mutex<Vec<(String, Kept)>>,
+    /// Why staging a context's files failed, if it did: what its next
+    /// program fails with, since a read can't.
+    unstaged: Mutex<Option<String>>,
+}
+
+/// What a context gives a step once it reads it: the files and directories
+/// its value names, each as the store keeps it, staged; and the secret files
+/// it names, bound.
+#[derive(Clone, Debug, Default)]
+pub struct Pending {
+    /// Each file and directory, by its logical path.
+    pub files: Vec<(String, Kept)>,
+    /// Each secret file, by its logical path and where it is on the host.
+    pub secrets: Vec<(String, PathBuf)>,
 }
 
 impl StepSandbox {
@@ -361,8 +386,12 @@ impl StepSandbox {
             host: HostTools::default(),
             temps: AtomicU32::new(0),
             layers,
-            secrets: Vec::new(),
+            secrets: Mutex::new(Vec::new()),
             devices: Vec::new(),
+            pending: Mutex::new(HashMap::new()),
+            store: None,
+            staged: Mutex::new(Vec::new()),
+            unstaged: Mutex::new(None),
         })
     }
 
@@ -370,8 +399,27 @@ impl StepSandbox {
     /// step sees it and where it is on the host, bound read-only.
     #[must_use]
     pub fn with_secrets(mut self, secrets: Vec<(String, PathBuf)>) -> Self {
-        self.secrets = secrets;
+        self.secrets = Mutex::new(secrets);
         self
+    }
+
+    /// The sandbox given, of each context its step can read, by its key, what
+    /// it gives the step once the step reads it, staged from `store`
+    /// ([`Effects::context_read`]).
+    #[must_use]
+    pub fn with_contexts(mut self, pending: HashMap<String, Pending>, store: Store) -> Self {
+        self.pending = Mutex::new(pending);
+        self.store = Some(store);
+        self
+    }
+
+    /// Each path staged from a context the step read, as the store keeps it.
+    #[must_use]
+    pub fn staged(&self) -> Vec<(String, Kept)> {
+        self.staged
+            .lock()
+            .map(|staged| staged.clone())
+            .unwrap_or_default()
     }
 
     /// The sandbox with the devices `devices` bound into it, and into the
@@ -440,7 +488,20 @@ impl Effects for StepSandbox {
         for (path, host) in self.layers.sealed() {
             wrapped.arg("--ro-bind").arg(host).arg(path);
         }
-        for (path, host) in &self.secrets {
+        if let Some(why) = self
+            .unstaged
+            .lock()
+            .ok()
+            .and_then(|unstaged| unstaged.clone())
+        {
+            return Err(why);
+        }
+        let secrets = self
+            .secrets
+            .lock()
+            .map(|secrets| secrets.clone())
+            .unwrap_or_default();
+        for (path, host) in &secrets {
             wrapped.arg("--ro-bind").arg(host).arg(path);
         }
         wrapped
@@ -492,6 +553,34 @@ impl Effects for StepSandbox {
         self.layers.place_file(source, target)
     }
 
+    fn context_read(&self, key: &str) {
+        let Some(pending) = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(key))
+        else {
+            return;
+        };
+        let Some(store) = &self.store else {
+            return;
+        };
+        for (path, kept) in &pending.files {
+            if let Err(error) = self.stage(store, path, *kept) {
+                if let Ok(mut unstaged) = self.unstaged.lock() {
+                    unstaged.get_or_insert_with(|| format!("cannot stage `{path}`: {error}"));
+                }
+                return;
+            }
+        }
+        if let Ok(mut staged) = self.staged.lock() {
+            staged.extend(pending.files);
+        }
+        if let Ok(mut secrets) = self.secrets.lock() {
+            secrets.extend(pending.secrets);
+        }
+    }
+
     fn composed(&self, root: &str) {
         if let Ok(host) = self.host_path(root) {
             // A composition that cannot be sealed is left as it is: it is
@@ -524,7 +613,12 @@ impl Effects for StepSandbox {
         if let Some(rest) = under(path, "/tmp") {
             return Ok(self.stage.join("tmp").join(rest));
         }
-        if let Some((_, host)) = self.secrets.iter().find(|(given, _)| given == path) {
+        let secrets = self
+            .secrets
+            .lock()
+            .map(|secrets| secrets.clone())
+            .unwrap_or_default();
+        if let Some((_, host)) = secrets.iter().find(|(given, _)| given == path) {
             return Ok(host.clone());
         }
         Err("it is outside the step".to_owned())

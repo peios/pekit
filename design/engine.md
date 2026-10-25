@@ -244,20 +244,82 @@ Each leaves pekit2 working, and tested, as far as it goes.
   `build lib()` called from another target, a test or a script gives the
   steps `pekit build lib` gives, found in the store.
 
-## Next: keying a step by the contexts it read
+## R. Keying a step by the contexts it read
 
-A context with a default still keys every step under it, though few read
-it: changing one registered toolchain rekeys every step, since every step
-is keyed by `^toolchains`. The fix is to key a step by the contexts it
-read, recorded as it ran, as GCSL's memoised calls record theirs: a
-manifest per key of everything else, listing the contexts each run read,
-and a record per manifest entry, keyed by their values too. One
-constraint makes it more than keying: staging must match. A step's
-sandbox holds the files of every context's value, so a step keyed by the
-contexts it read could reach, by a fixed path, a file of one it didn't
-read, whose contents its key would not hold. So a step must be given the
-files of a context only once it reads it, which reads before the `exec`
-that uses them make possible: each effect's binds made from the contexts
-read so far, not the step's at its start. That is a change to how
-`start_step` stages a step and to `Layers`, and wants its own design and
-commits, before layer F.
+A context with a default keys every step under it, though few read it:
+changing one registered toolchain rekeys every step, since every step is
+keyed by `^toolchains`, and the keychain's keys rekey every step too. The
+fix keys a step by the contexts it read as it ran, as GCSL's memoised calls
+are keyed.
+
+### R1. GCSL records what a step's run reads
+
+A step's unit runs from its start each time it is run, until it stops for
+a result or ends. GCSL records, for each run of a step's unit, every
+context it reads whose binding is outside the step, as its memo records
+for a running memoised call: a read whose nearest binding is a frame of the
+step's own context, or, for a read of a context's default, none. A read a
+`with` inside the step binds is no input. A memoised call found in its
+table inside the step passes its recorded reads on, as it does to running
+memoised calls, so a read is never hidden by a cache hit. Each read is the
+context's key and whether it was bound, since a step that read a default
+reads differently where the context is bound. `Workspace::run_step` gives
+the reads of the run with its progress. A run that ends has made every
+read the step makes, since it ran from the start.
+
+### R2. A step is keyed in two levels
+
+A step's *base* is its receipt with no context: its code, arguments,
+captures, own directory, platform, and the files its arguments and
+captures name. The store keeps, by its base, a *manifest*: each set of
+context keys a run of a step of that base read. A step is looked up by each
+set in its manifest in turn: its receipt is its base and, for each key of
+the set, the value the step's context gives it, or that it is unbound, the
+files those values name hashed as any input is. A record under that
+receipt is the step's result. A step that is run is recorded under the
+receipt of the set its last run read, which is added to its manifest.
+
+This is sound because a run is a function of what it reads: two runs with
+one base and the same values for the contexts the first read read the
+same contexts, in the same order, and give the same result, as any step
+must for its record to stand.
+
+### R3. A step is given a context's files only once it reads it
+
+A step's sandbox holds the files of its arguments and captures from its
+start. The files a context's value names are staged only once the step
+has read the context, before the next effect it runs, from the reads GCSL
+gives when its unit stops for an effect. So a program a step runs can't
+reach, by a path it knows, a file of a context its key doesn't hold:
+staging stays what the key says.
+
+### R4. Steps
+
+1. GCSL: the reads of a step's run, with `run_step`'s progress (R1).
+2. pekit: the base, the manifest and the two-level lookup (R2), and staging
+   by reads (R3), the receipt's encoding made `pekit-receipt-3`, so no
+   record of the old encoding is found.
+3. A test that changing one registered toolchain rekeys only the steps
+   that use it, and that a step given no files of a context can't read
+   them.
+
+### R as built
+
+- GCSL (`4a80110`): `run_step` gives `StepReads`, each key with whether it
+  was bound, and `all`, from a `GraphRun` watching the step's context; a
+  memoised call's hit replays its reads through `Lookup::Done`; the first
+  read of a run calls `Effects::context_read`. The memo's own tracking is
+  untouched.
+- pekit: a step's base is its receipt with no context, its manifest kept
+  by `manifest_key(base)`, its full receipt by the keys its final run
+  read, each with its value or unbound, tagged apart (`pekit-receipt-3`);
+  a run's set is merged into the manifest, never replacing it. Each
+  readable context's files, hashed at the step's start, and its secrets
+  are staged or bound by `StepSandbox::context_read`, at the read itself,
+  since `file` and `dir` resolve inline, before any effect; a staging
+  failure fails the step's next program. A read the needs filter does not
+  allow is an engine error, GCSL's and pekit's disagreement. A result's
+  files may be those a read staged.
+- The cost: every readable context's files are still hashed when a step
+  starts, to stage them on a read; a follow-up hashes a context's only
+  once a set names it or a read stages it.

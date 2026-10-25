@@ -62,6 +62,14 @@ Change a file a step reads, and that step runs again, along with each
 step that depends on what it gives. A step whose result holds a secret
 is never recorded, so it runs every time.
 
+Of the context a step is called in, only what it read as it ran keys it.
+Registering another toolchain, or binding a context the step never
+reads, finds it in the store all the same. A context it read where
+nothing bound it, so that it read the context's default, keys it apart
+from the same context bound, even to the same value. A step is given the
+files a context names only once it reads that context, so a program it
+runs can't reach a file its key doesn't account for.
+
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 

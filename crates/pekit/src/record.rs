@@ -349,3 +349,20 @@ fn trees_differ(
         }
     }
 }
+
+/// What the store keeps by a step's base, its receipt with no context
+/// (see `design/engine.md`, R2): each set of context keys a run of a step
+/// of that base read, sorted, by which a step's receipt is made to look it
+/// up.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Manifest {
+    /// Each set of keys read, each sorted, in the order first recorded.
+    pub sets: Vec<Vec<String>>,
+}
+
+/// The key the manifest of the steps whose base is `base` is kept by, apart
+/// from every receipt.
+#[must_use]
+pub fn manifest_key(base: &Digest) -> Digest {
+    Digest::of(format!("pekit-manifest-1:{}", base.hex()).as_bytes())
+}
