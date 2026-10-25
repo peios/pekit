@@ -17,6 +17,7 @@ pub mod load;
 pub mod lock;
 pub mod platform;
 pub mod pool;
+pub mod programs;
 pub mod query;
 pub mod receipt;
 pub mod record;

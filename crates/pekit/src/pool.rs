@@ -8,7 +8,10 @@
 //! effect of a unit to run under its effect context, until its deadline, or
 //! a `fetch` to answer from the store or the network ([Fetching](crate::fetch#fetching)).
 //! Each reports what it came to, a [`Ran`], with the thread that ran it and
-//! when, for the build's events, and the files it kept in the store.
+//! when, for the build's events, and the files it kept in the store. A
+//! step's program that may be found in the store is found or run there too,
+//! with all the hashing and placing of trees that takes
+//! ([`crate::programs`]).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -22,6 +25,8 @@ use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
 use crate::fetch::{fetch, fetched_path};
+use crate::programs::{ProgramRan, ProgramWork, perform_program};
+use crate::sandbox::StepSandbox;
 use crate::record::Kept;
 use crate::store::{FileEntry, Store};
 use crate::unpack::{unpack, unpack_key, unpacked_path};
@@ -30,6 +35,9 @@ use crate::unpack::{unpack, unpack_key, unpacked_path};
 pub enum Work {
     /// Runs an effect under its effect context.
     Effect(EffectJob, Arc<dyn Effects + Send + Sync>),
+    /// Finds or runs a program of a step in its sandbox (see [A program's
+    /// work](crate::programs#a-programs-work)).
+    Program(EffectJob, Arc<StepSandbox>, ProgramWork),
     /// Answers a `fetch` of `url` pinned by `sha256` from `store`, its call
     /// at `span`.
     Fetch {
@@ -75,6 +83,8 @@ pub struct Ran {
     /// The files it kept in the store, each by its path as GCSL code names
     /// it.
     pub kept: Vec<(String, Kept)>,
+    /// What became of it, if it was a program sent to be found or run.
+    pub program: Option<ProgramRan>,
 }
 
 /// One job: a node's work, until its deadline.
@@ -88,13 +98,22 @@ pub struct Pool {
     done: Receiver<Ran>,
 }
 
-/// Does `work`, until `deadline`: what it came to, and what it kept.
-fn perform(
-    work: Work,
-    deadline: Option<Instant>,
-) -> (Result<Plain, Diagnostic>, Vec<(String, Kept)>) {
+/// What a job came to: its outcome, what it kept, and what became of it if
+/// it was a program sent to be found or run.
+type Performed = (
+    Result<Plain, Diagnostic>,
+    Vec<(String, Kept)>,
+    Option<ProgramRan>,
+);
+
+/// Does `work`, until `deadline`: what it came to.
+fn perform(work: Work, deadline: Option<Instant>) -> Performed {
     match work {
-        Work::Effect(job, effects) => (job.run(&*effects, deadline), Vec::new()),
+        Work::Effect(job, effects) => (job.run(&*effects, deadline), Vec::new(), None),
+        Work::Program(job, sandbox, work) => {
+            let (outcome, ran) = perform_program(&job, &sandbox, &work, deadline);
+            (outcome, Vec::new(), Some(ran))
+        }
         Work::Fetch {
             url,
             sha256,
@@ -107,14 +126,14 @@ fn perform(
                     path: path.clone(),
                     identity: None,
                 };
-                (Ok(file), vec![(path, Kept::File(entry))])
+                (Ok(file), vec![(path, Kept::File(entry))], None)
             }
             Err((message, note)) => {
                 let mut error = Diagnostic::error(message, span);
                 if let Some(note) = note {
                     error = error.with_note(note);
                 }
-                (Err(error), Vec::new())
+                (Err(error), Vec::new(), None)
             }
         },
         Work::Unpack {
@@ -131,9 +150,9 @@ fn perform(
                     path: path.clone(),
                     identity: None,
                 };
-                (Ok(dir), vec![(path, Kept::Dir(tree))])
+                (Ok(dir), vec![(path, Kept::Dir(tree))], None)
             }
-            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new()),
+            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new(), None),
         },
     }
 }
@@ -155,7 +174,7 @@ impl Pool {
                         return;
                     };
                     let began = Instant::now();
-                    let (outcome, kept) = perform(work, deadline);
+                    let (outcome, kept, program) = perform(work, deadline);
                     let ran = Ran {
                         node,
                         worker,
@@ -163,6 +182,7 @@ impl Pool {
                         ended: Instant::now(),
                         outcome,
                         kept,
+                        program,
                     };
                     if report.send(ran).is_err() {
                         return;

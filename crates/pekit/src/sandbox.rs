@@ -44,7 +44,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gcsl::eval::Effects;
@@ -53,7 +53,7 @@ use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 use crate::layers::{Layers, Overlay};
 use crate::record::Kept;
 use crate::keychain::{IN_A_STEP, Keychain};
-use crate::store::Store;
+use crate::store::{Seen, Store};
 
 /// The workspace's root in the logical layout.
 pub const WORKSPACE: &str = "/w";
@@ -342,6 +342,9 @@ pub struct StepSandbox {
     /// Each path staged from a context it read, its file or directory as the
     /// store keeps it.
     staged: Mutex<Vec<(String, Kept)>>,
+    /// What each file of its writable trees was when it was last put into
+    /// the store (see [Trees seen before](crate::store#trees-seen-before)).
+    seen: Mutex<Seen>,
     /// Why staging a context's files failed, if it did: what its next
     /// program fails with, since a read can't.
     unstaged: Mutex<Option<String>>,
@@ -391,6 +394,7 @@ impl StepSandbox {
             pending: Mutex::new(HashMap::new()),
             store: None,
             staged: Mutex::new(Vec::new()),
+            seen: Mutex::new(Seen::default()),
             unstaged: Mutex::new(None),
         })
     }
@@ -411,6 +415,42 @@ impl StepSandbox {
         self.pending = Mutex::new(pending);
         self.store = Some(store);
         self
+    }
+
+    /// Its own output directory and its `/tmp`, on the host: what its
+    /// programs can write.
+    ///
+    /// # Errors
+    ///
+    /// That its own directory has no place, which a sandbox's always has.
+    pub fn writable(&self) -> Result<(PathBuf, PathBuf), String> {
+        Ok((self.host_path(&self.own)?, self.stage.join("tmp")))
+    }
+
+    /// What each file of its writable trees was when it was last put into
+    /// the store, for this thread alone while it is held; none if a thread
+    /// that held it panicked.
+    #[must_use]
+    pub fn seen(&self) -> Option<MutexGuard<'_, Seen>> {
+        self.seen.lock().ok()
+    }
+
+    /// Its sealed compositions, on the host.
+    #[must_use]
+    pub fn sealed(&self) -> Vec<PathBuf> {
+        self.layers
+            .sealed()
+            .into_iter()
+            .map(|(_, host)| host)
+            .collect()
+    }
+
+    /// Whether it binds a secret's file, at its start or by a read.
+    #[must_use]
+    pub fn binds_secrets(&self) -> bool {
+        self.secrets
+            .lock()
+            .map_or(true, |secrets| !secrets.is_empty())
     }
 
     /// Each path staged from a context the step read, as the store keeps it.

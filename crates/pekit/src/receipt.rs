@@ -247,3 +247,69 @@ impl Encoder<'_> {
         Ok(())
     }
 }
+
+/// What a program's key is made of (see `design/additive.md`, F1).
+#[derive(Clone, Copy)]
+pub struct ExecOf<'a> {
+    /// The step's view: the chain of what made what it can see read-only.
+    pub view: &'a Digest,
+    /// Each input staged by the step so far, by its path, and its contents'
+    /// digest.
+    pub staged: &'a [(String, Digest)],
+    /// The digests of the trees it can write: its own output directory's and
+    /// its `/tmp`'s.
+    pub writable: (&'a Digest, &'a Digest),
+    /// The built-in, by its name.
+    pub builtin: &'a str,
+    /// Its arguments, each file named by its path alone, since its contents
+    /// are the world's.
+    pub args: &'a [Plain],
+}
+
+/// The key of a program a step runs (see `design/additive.md`, F1).
+///
+/// # Errors
+///
+/// An argument that is no data.
+pub fn exec_key(of: ExecOf<'_>) -> Result<Digest, String> {
+    let mut hasher = Sha256::new();
+    let mut by_path = |path: &str, _: bool| Ok(Digest::of(path.as_bytes()));
+    let none = |_: u32| None;
+    let mut out = Encoder {
+        hasher: &mut hasher,
+        contents: &mut by_path,
+        code_of: &none,
+    };
+    out.text("pekit-exec-1");
+    out.text(&of.view.hex());
+    out.count(of.staged.len());
+    for (path, digest) in of.staged {
+        out.text(path);
+        out.text(&digest.hex());
+    }
+    out.text(&of.writable.0.hex());
+    out.text(&of.writable.1.hex());
+    out.text(of.builtin);
+    out.count(of.args.len());
+    for arg in of.args {
+        out.plain(arg)?;
+    }
+    Ok(Digest::from_hasher(hasher))
+}
+
+/// The view `view` of a step, with the effect of the built-in `builtin` on
+/// `args` folded in (see `design/additive.md`, F1).
+///
+/// # Errors
+///
+/// An argument that is no data.
+pub fn folded(view: &Digest, builtin: &str, args: &[Plain]) -> Result<Digest, String> {
+    let none = Digest::of(b"");
+    exec_key(ExecOf {
+        view,
+        staged: &[],
+        writable: (&none, &none),
+        builtin: &format!("fold:{builtin}"),
+        args,
+    })
+}

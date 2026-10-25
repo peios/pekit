@@ -71,6 +71,16 @@ pub enum EventKind {
         /// What it runs ([`effect_label`]).
         effect: String,
     },
+    /// A program a step runs was found in the store, and not run (see
+    /// `design/additive.md`, F1).
+    EffectFound {
+        /// Its node's number.
+        node: u32,
+        /// The step it is of.
+        step: String,
+        /// What it runs ([`effect_label`]).
+        effect: String,
+    },
     /// An effect ran.
     EffectRan {
         /// Its node's number.

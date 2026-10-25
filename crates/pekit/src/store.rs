@@ -25,16 +25,99 @@
 //! A file is put into the store by hashing it as it is copied ([`Store::put_file`]),
 //! and taken out by a hard link to its blob, or a copy where a link cannot
 //! be made, as across file systems ([`Store::materialise_file`]).
+//!
+//! # Trees seen before
+//!
+//! A tree put into the store again and again, as a step's writable trees
+//! are around each of its programs, is mostly what it was: [`Store::put_tree_seen`]
+//! keeps what each file was, its [`Stamp`], when it was last put, and reads
+//! again only a file whose stamp differs, or whose blob is gone. A file
+//! changed since has another stamp, since its change time is the time of
+//! the change, unless it was changed in the same tick of the file system's
+//! clock as it was stamped, which a stamp taken in the tick a put begins in,
+//! or after, is not trusted for: as git keeps its index. A file that is a
+//! link to a blob this process linked, by its device and inode, is that
+//! blob, and is not read. A file read is hashed before it is copied, and
+//! not copied if its blob is there. A directory said to be fixed, such as a
+//! sealed composition, is walked once until it is said to have changed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+
+/// What a file was when it was put into the store (see [Trees seen
+/// before](#trees-seen-before)): its device and inode, size, mode, and the
+/// times it was modified and changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    /// Its device and inode.
+    node: (u64, u64),
+    /// Its size.
+    size: u64,
+    /// Its mode.
+    mode: u32,
+    /// When it was modified, in seconds and nanoseconds.
+    modified: (i64, i64),
+    /// When it was changed, in seconds and nanoseconds.
+    changed: (i64, i64),
+}
+
+impl Stamp {
+    /// The stamp of the file whose metadata is `meta`.
+    #[must_use]
+    pub fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            node: (meta.dev(), meta.ino()),
+            size: meta.size(),
+            mode: meta.mode(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
+}
+
+/// What each file was when it was last put into the store, by its path,
+/// and the digests of the directories that cannot change, while they can't
+/// (see [Trees seen before](#trees-seen-before)).
+#[derive(Clone, Debug, Default)]
+pub struct Seen {
+    /// Each file's stamp, and what the store keeps of it.
+    files: HashMap<PathBuf, (Stamp, FileEntry)>,
+    /// The directories that cannot change.
+    fixed: Vec<PathBuf>,
+    /// The digest of each of them put, by its path.
+    dirs: HashMap<PathBuf, Digest>,
+}
+
+impl Seen {
+    /// Says that the directories `fixed` cannot change, until
+    /// [`Seen::changed`] says they did.
+    pub fn fix(&mut self, fixed: Vec<PathBuf>) {
+        self.fixed = fixed;
+    }
+
+    /// Says that the directories said to be fixed could have changed.
+    pub fn changed(&mut self) {
+        self.dirs.clear();
+    }
+}
+
+/// A walk of a tree being put into the store by [`Store::put_tree_seen`].
+struct Walk<'a> {
+    /// What each file was when it was last put.
+    seen: &'a mut Seen,
+    /// Whether an entry makes the tree one that can't be kept.
+    refuse: &'a dyn Fn(&Path, &fs::Metadata) -> bool,
+    /// When the put began, by the file system's clock.
+    now: (i64, i64),
+}
 
 /// A SHA-256 digest, of a file's contents, a tree or a receipt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -182,6 +265,9 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub struct Store {
     /// Its directory.
     root: PathBuf,
+    /// Each blob this process linked a file to, by the device and inode it
+    /// shares with every link (see [Trees seen before](#trees-seen-before)).
+    linked: Arc<Mutex<HashMap<(u64, u64), FileEntry>>>,
 }
 
 impl Store {
@@ -197,6 +283,7 @@ impl Store {
         }
         Ok(Self {
             root: root.to_path_buf(),
+            linked: Arc::default(),
         })
     }
 
@@ -267,7 +354,9 @@ impl Store {
                 out.write_all(chunk)?;
                 size += read as u64;
             }
-            out.sync_all()?;
+            if std::env::var_os("PEKIT_NO_SYNC").is_none() {
+                out.sync_all()?;
+            }
         }
         let digest = Digest::from_hasher(hasher);
         self.settle(&temp, &digest, executable)?;
@@ -362,6 +451,9 @@ impl Store {
             fs::create_dir_all(parent)?;
         }
         if link && fs::hard_link(&blob, at).is_ok() {
+            if let (Ok(meta), Ok(mut linked)) = (fs::metadata(&blob), self.linked.lock()) {
+                linked.insert((meta.dev(), meta.ino()), *entry);
+            }
             return Ok(());
         }
         fs::copy(&blob, at)?;
@@ -439,6 +531,153 @@ impl Store {
         }
         entries.sort_by(|a, b| a.name().cmp(b.name()));
         self.put_tree_of(&Tree { entries })
+    }
+
+    /// [`Store::put_tree`], reading only the files `seen` does not know
+    /// unchanged, or links to blobs, and asking `refuse` of every other
+    /// entry whether the tree can't be kept: `None` if it can't (see [Trees
+    /// seen before](#trees-seen-before)).
+    ///
+    /// # Errors
+    ///
+    /// That something under `path` cannot be read, or the store written.
+    pub fn put_tree_seen(
+        &self,
+        path: &Path,
+        seen: &mut Seen,
+        refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
+    ) -> io::Result<Option<Digest>> {
+        // Now, as the file system's clock tells it.
+        let probe = self.temp_path();
+        File::create(&probe)?;
+        let now = fs::symlink_metadata(&probe).map(|meta| (meta.ctime(), meta.ctime_nsec()));
+        fs::remove_file(&probe)?;
+        let mut walk = Walk {
+            seen,
+            refuse,
+            now: now?,
+        };
+        let meta = fs::symlink_metadata(path)?;
+        if refuse(path, &meta) {
+            return Ok(None);
+        }
+        self.tree_seen(path, &mut walk)
+    }
+
+    /// [`Store::put_tree_seen`] of `path`, as `walk` has it.
+    fn tree_seen(&self, path: &Path, walk: &mut Walk<'_>) -> io::Result<Option<Digest>> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|name| {
+                io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
+            })?;
+            let at = entry.path();
+            let meta = fs::symlink_metadata(&at)?;
+            let kind = meta.file_type();
+            entries.push(if kind.is_symlink() {
+                if (walk.refuse)(&at, &meta) {
+                    return Ok(None);
+                }
+                let target = fs::read_link(&at)?.to_string_lossy().into_owned();
+                TreeEntry::Link { name, target }
+            } else if kind.is_dir() {
+                if let Some(tree) = walk.seen.dirs.get(&at) {
+                    TreeEntry::Dir { name, tree: *tree }
+                } else {
+                    if (walk.refuse)(&at, &meta) {
+                        return Ok(None);
+                    }
+                    let Some(tree) = self.tree_seen(&at, walk)? else {
+                        return Ok(None);
+                    };
+                    if walk.seen.fixed.contains(&at) {
+                        walk.seen.dirs.insert(at, tree);
+                    }
+                    TreeEntry::Dir { name, tree }
+                }
+            } else {
+                let Some(file) = self.file_seen(&at, &meta, walk)? else {
+                    return Ok(None);
+                };
+                TreeEntry::File { name, file }
+            });
+        }
+        entries.sort_by(|a, b| a.name().cmp(b.name()));
+        self.put_tree_of(&Tree { entries }).map(Some)
+    }
+
+    /// The file at `path`, of metadata `meta`, put into the store, unread if
+    /// it is a link to a blob or `walk` knows it unchanged.
+    fn file_seen(
+        &self,
+        path: &Path,
+        meta: &fs::Metadata,
+        walk: &mut Walk<'_>,
+    ) -> io::Result<Option<FileEntry>> {
+        if let Some(entry) = self.blob_linked(meta) {
+            return Ok(Some(entry));
+        }
+        let stamp = Stamp::of(meta);
+        if let Some((known, entry)) = walk.seen.files.get(path)
+            && *known == stamp
+            && self.blob_path(&entry.digest, entry.executable).is_file()
+        {
+            return Ok(Some(*entry));
+        }
+        if (walk.refuse)(path, meta) {
+            return Ok(None);
+        }
+        let entry = self.put_file_once(path)?;
+        if stamp.changed < walk.now {
+            walk.seen.files.insert(path.to_path_buf(), (stamp, entry));
+        } else {
+            walk.seen.files.remove(path);
+        }
+        Ok(Some(entry))
+    }
+
+    /// The blob the file of metadata `meta` is a link to, if this process
+    /// linked it, and it is that blob still.
+    fn blob_linked(&self, meta: &fs::Metadata) -> Option<FileEntry> {
+        if meta.nlink() < 2 {
+            return None;
+        }
+        let node = (meta.dev(), meta.ino());
+        let entry = *self.linked.lock().ok()?.get(&node)?;
+        let blob = fs::metadata(self.blob_path(&entry.digest, entry.executable)).ok()?;
+        ((blob.dev(), blob.ino()) == node).then_some(entry)
+    }
+
+    /// [`Store::put_file`], hashing the file first, and copying it only if
+    /// the store lacks its blob.
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be read, or the store written.
+    pub fn put_file_once(&self, path: &Path) -> io::Result<FileEntry> {
+        let executable = fs::metadata(path)?.permissions().mode() & 0o111 != 0;
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut source = File::open(path)?;
+        let mut buffer = vec![0u8; 1 << 16];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size += read as u64;
+        }
+        let digest = Digest::from_hasher(hasher);
+        if self.blob_path(&digest, executable).is_file() {
+            return Ok(FileEntry {
+                digest,
+                size,
+                executable,
+            });
+        }
+        self.put_file(path)
     }
 
     /// Puts `tree` into the store as its canonical encoding: its digest.

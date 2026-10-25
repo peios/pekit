@@ -418,7 +418,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
             return ExitCode::FAILURE;
         }
     };
-    let counts = steps_counted(outcomes.ran, outcomes.cached);
+    let counts = steps_counted(&outcomes);
     let mut failed = false;
     for (target, outcome) in targets.iter().zip(&outcomes.targets) {
         match outcome {
@@ -1184,11 +1184,7 @@ fn package_command(
             }
         }
     }
-    let _ = writeln!(
-        terminal.out,
-        "{}",
-        steps_counted(outcomes.ran, outcomes.cached)
-    );
+    let _ = writeln!(terminal.out, "{}", steps_counted(&outcomes));
     if failed {
         ExitCode::FAILURE
     } else {
@@ -1291,10 +1287,17 @@ fn quoted(names: &[&str]) -> String {
     quoted.join(", ")
 }
 
-/// How many steps ran and how many were found, as a build shows them.
-fn steps_counted(ran: usize, cached: usize) -> String {
+/// How many steps ran, how many of their programs were found, and how many
+/// steps were found, as a build shows them.
+fn steps_counted(outcomes: &Outcomes) -> String {
+    let (ran, cached) = (outcomes.ran, outcomes.cached);
     let steps = if ran == 1 { "step" } else { "steps" };
-    format!("{ran} {steps} run, {cached} found in the store")
+    let programs = match outcomes.programs_found {
+        0 => String::new(),
+        1 => " (1 program found)".to_owned(),
+        found => format!(" ({found} programs found)"),
+    };
+    format!("{ran} {steps} run{programs}, {cached} found in the store")
 }
 
 /// The settings a command builds `loaded`'s workspace with, as `shared`

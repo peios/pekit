@@ -56,6 +56,11 @@ impl Trace {
                 "name": format!("{step} (found in the store)"), "cat": "step",
                 "ph": "i", "s": "t", "ts": ts, "pid": PID, "tid": STEPS_ROW,
             })),
+            EventKind::EffectFound { step, effect, .. } => self.events.push(json!({
+                "name": format!("{effect} (found in the store)"), "cat": "effect",
+                "ph": "i", "s": "t", "ts": ts, "pid": PID, "tid": STEPS_ROW,
+                "args": { "step": step },
+            })),
             EventKind::Started { step, attempt } => {
                 self.events.push(step_span("b", step, *attempt));
             }

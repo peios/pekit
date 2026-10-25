@@ -103,6 +103,28 @@ fn opaque(path: &Path) -> bool {
         .any(|name| matches!(xattr::get(path, name), Ok(Some(value)) if value == b"y"))
 }
 
+/// Whether the entry at `path`, of metadata `meta`, is what a store's tree
+/// can't keep, or a copy of it would lose: neither a file, a directory nor
+/// a symbolic link, as an overlay's whiteout is, or marked by an overlay's
+/// attributes, as an opaque directory is, but for those that say only where
+/// it came from or which layer it is.
+#[must_use]
+pub fn unkeepable(path: &Path, meta: &fs::Metadata) -> bool {
+    let kind = meta.file_type();
+    if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
+        return true;
+    }
+    xattr::list(path).is_ok_and(|mut names| {
+        names.any(|name| {
+            let name = name.to_string_lossy();
+            let own = name
+                .strip_prefix("user.overlay.")
+                .or_else(|| name.strip_prefix("trusted.overlay."));
+            own.is_some_and(|own| !matches!(own, "origin" | "impure" | "uuid"))
+        })
+    })
+}
+
 /// Whether there is an entry at `path`, a whiteout as much as a file.
 fn present(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()

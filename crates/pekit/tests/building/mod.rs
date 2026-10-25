@@ -27,6 +27,8 @@ pub struct Options<'a> {
     /// Whether it builds as `pekit build --strict` does: steps borrow no
     /// host tools, and a target's own code runs no program.
     pub strict: bool,
+    /// How it reuses what the store holds.
+    pub reuse: Reuse,
 }
 
 impl Default for Options<'_> {
@@ -35,6 +37,7 @@ impl Default for Options<'_> {
             arch: "x86_64",
             profile: "dev",
             strict: false,
+            reuse: Reuse::Store,
         }
     }
 }
@@ -78,6 +81,7 @@ pub fn observed_with(
         arch,
         profile,
         strict,
+        reuse,
     }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
     let arch = arch.to_owned();
@@ -98,6 +102,7 @@ pub fn observed_with(
                 Err(error) => return (Err(error.message()), events),
             };
             let mut settings = settings(&root, &state, (&arch, &profile));
+            settings.reuse = reuse;
             if strict {
                 settings.strict = true;
                 settings.host_tools = HostTools::default();

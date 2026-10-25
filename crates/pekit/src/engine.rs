@@ -70,6 +70,10 @@ use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPA
 use crate::store::{Digest, Store, TreeEntry};
 use crate::target::Target;
 
+mod programs;
+
+use programs::{Before, Programs};
+
 /// The workspace's root file, whose `pekitconf` registers its toolchains.
 const WORKSPACE_FILE: &str = "workspace.gcsl";
 
@@ -250,6 +254,9 @@ pub struct Built {
     pub ran: usize,
     /// How many steps were found in the store.
     pub cached: usize,
+    /// How many programs the steps that ran found in the store (see
+    /// `design/additive.md`, F1).
+    pub programs_found: usize,
     /// The steps that passed only on a retry, by name.
     pub flaky: Vec<String>,
 }
@@ -265,6 +272,9 @@ pub struct Outcomes {
     pub ran: usize,
     /// How many steps were found in the store.
     pub cached: usize,
+    /// How many programs the steps that ran found in the store (see
+    /// `design/additive.md`, F1).
+    pub programs_found: usize,
     /// The steps that passed only on a retry, by name.
     pub flaky: Vec<String>,
     /// What became of each step that was found in the store or passed.
@@ -391,6 +401,7 @@ pub fn build_observed(
         value,
         ran: outcomes.ran,
         cached: outcomes.cached,
+        programs_found: outcomes.programs_found,
         flaky: outcomes.flaky,
     })
 }
@@ -557,6 +568,7 @@ fn build_roots(
         targets: outcomes,
         ran: run.ran,
         cached: run.cached,
+        programs_found: run.programs_found,
         flaky: std::mem::take(&mut run.flaky),
         steps: std::mem::take(&mut run.reports),
         mismatches: std::mem::take(&mut run.mismatches),
@@ -649,6 +661,7 @@ fn new_run<'a>(
         code_table,
         ran: 0,
         cached: 0,
+        programs_found: 0,
         flaky: Vec::new(),
         reports: Vec::new(),
         mismatches: Vec::new(),
@@ -892,6 +905,9 @@ struct StepRun {
     failed_once: bool,
     /// The effect its unit stopped for, if it did.
     waiting: Option<NodeId>,
+    /// What its attempt's programs are keyed by (see `design/additive.md`,
+    /// F1).
+    programs: Programs,
 }
 
 /// What a step is keyed by but the contexts it reads (see
@@ -972,6 +988,8 @@ struct Run<'a> {
     ran: usize,
     /// How many steps were found in the store.
     cached: usize,
+    /// How many programs the steps that ran found in the store.
+    programs_found: usize,
     /// The steps that passed only on a retry, by name.
     flaky: Vec<String>,
     /// What became of each step that was found in the store or passed.
@@ -1036,6 +1054,10 @@ struct InFlight {
     step: Option<String>,
     /// What it runs ([`effect_label`]).
     effect: String,
+    /// The built-in and arguments to fold into its step's view once it has
+    /// run, if it is one its step's programs see (see `design/additive.md`,
+    /// F1).
+    fold: Option<(Builtin, Vec<Plain>)>,
 }
 
 /// A target the build evaluates (see [Building](#building)).
@@ -1449,10 +1471,11 @@ impl Run<'_> {
             .workspace
             .effect_job(&self.graph, id)
             .map_err(BuildError::Engine)?;
-        let running = InFlight {
+        let mut running = InFlight {
             of: step,
             step: step.map(|step| self.step_name(step)),
             effect: effect_label(&job),
+            fold: None,
         };
         // A step is given its secrets, and never asks the keychain itself.
         if step.is_some()
@@ -1472,6 +1495,20 @@ impl Run<'_> {
             let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
             self.finish_now(id, Err(Diagnostic::error(refused, span)));
             return Ok(());
+        }
+        let mut program = None;
+        if let Some(of) = step {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            match self.program_before(of, &job, span) {
+                Before::Program(work) => {
+                    program = self
+                        .steps
+                        .get(&of)
+                        .map(|run| (Arc::clone(&run.sandbox), work));
+                }
+                Before::Fold(builtin, args) => running.fold = Some((builtin, args)),
+                Before::Plain => {}
+            }
         }
         // A fetch is pekit's to answer, and never a step's.
         let work = if job.builtin() == Builtin::Fetch {
@@ -1499,6 +1536,8 @@ impl Run<'_> {
                     return Ok(());
                 }
             }
+        } else if let Some((sandbox, work)) = program {
+            Work::Program(job, sandbox, work)
         } else {
             Work::Effect(job, effects)
         };
@@ -1849,10 +1888,12 @@ impl Run<'_> {
             .map_err(BuildError::Engine)?;
         let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices), &keyed)?;
         let started = Instant::now();
+        let programs = Programs::starting(&self.settings.platform, &given);
         self.steps.insert(
             id,
             StepRun {
                 sandbox,
+                programs,
                 given,
                 secrets,
                 devices,
@@ -2340,10 +2381,12 @@ impl Run<'_> {
             &step.keyed,
         )?;
         self.graph.forget_unit(STEP_UNITS + id.number());
+        let programs = Programs::starting(&self.settings.platform, &step.given);
         self.steps.insert(
             id,
             StepRun {
                 sandbox,
+                programs,
                 attempt,
                 retries: step.retries - 1,
                 failed_once: true,
@@ -2363,22 +2406,29 @@ impl Run<'_> {
     fn finished_effect(&mut self, ran: Ran) {
         let node = ran.node;
         let of = self.in_flight.get(&node).and_then(|running| running.of);
-        if let Some(running) = self.in_flight.remove(&node) {
+        let mut fold = None;
+        if let Some(mut running) = self.in_flight.remove(&node) {
+            fold = running.fold.take();
             let at = ran.ended.saturating_duration_since(self.began);
-            (self.events)(&Event {
-                at,
-                kind: EventKind::EffectRan {
+            let kind = match (ran.program, running.step) {
+                (Some(program), Some(step)) if program.found => EventKind::EffectFound {
                     node: node.number(),
-                    step: running.step,
+                    step,
+                    effect: running.effect,
+                },
+                (_, step) => EventKind::EffectRan {
+                    node: node.number(),
+                    step,
                     effect: running.effect,
                     worker: ran.worker,
                     began: ran.began.saturating_duration_since(self.began),
                     ok: ran.outcome.is_ok(),
                 },
-            });
+            };
+            (self.events)(&Event { at, kind });
         }
         let mut outcome = ran.outcome;
-        for (path, kept) in ran.kept {
+        for (path, kept) in ran.kept.iter().cloned() {
             // What a step unpacked is in its own sandbox; what the target
             // fetched or unpacked is under the output directory.
             let placed = match of.and_then(|step| self.steps.get(&step)) {
@@ -2392,6 +2442,14 @@ impl Run<'_> {
                 outcome = Err(Diagnostic::error(message, Span::new(0, 0)));
             }
             self.outputs.insert(path, kept);
+        }
+        if let Some(step) = of {
+            if let Some((builtin, args)) = &fold {
+                self.program_folded(step, (*builtin, args), &ran.kept);
+            }
+            if let Some(program) = ran.program {
+                self.program_ran(step, program, &outcome);
+            }
         }
         let value = outcome.map(|plain| self.loaded.workspace.from_plain(&plain));
         self.finish_now(node, value);

@@ -366,3 +366,17 @@ pub struct Manifest {
 pub fn manifest_key(base: &Digest) -> Digest {
     Digest::of(format!("pekit-manifest-1:{}", base.hex()).as_bytes())
 }
+
+/// A program a step ran, as the store keeps it by its key (see
+/// `design/additive.md`, F1): what it gave, and the digests of the trees it
+/// could write as it left them, the step's own output directory and its
+/// `/tmp`, whose contents the store holds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExecRecord {
+    /// What it gave.
+    pub result: Stored,
+    /// The own output directory's tree after it.
+    pub own: Digest,
+    /// `/tmp`'s tree after it.
+    pub tmp: Digest,
+}
