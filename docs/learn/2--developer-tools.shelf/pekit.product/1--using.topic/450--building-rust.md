@@ -74,8 +74,8 @@ buildenv library's pinned environment. Register it with the gcc
 library's toolchain:
 
 ```text
-import * from "github.com/gcslib/gcc"
-import * from "github.com/gcslib/rust"
+import Toolchain::C gcc_x86_64 from "github.com/gcslib/gcc"
+import Toolchain::Rust rust_1_98 from "github.com/gcslib/rust"
 import Toolchain from toolchain
 
 pekitconf = {toolchains = [Toolchain::C gcc_x86_64, Toolchain::Rust rust_1_98]}

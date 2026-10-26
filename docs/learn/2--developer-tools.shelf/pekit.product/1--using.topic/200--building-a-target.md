@@ -137,8 +137,8 @@ compilers, and the buildenv library a build environment for upstream
 build systems:
 
 ```text
-import * from "github.com/gcslib/gcc"
-import * from "github.com/gcslib/buildenv"
+import Toolchain::* from "github.com/gcslib/gcc"
+import Toolchain::* from "github.com/gcslib/buildenv"
 import Toolchain from toolchain
 
 pekitconf = {toolchains = [
@@ -147,6 +147,10 @@ pekitconf = {toolchains = [
     Toolchain::BuildEnv busybox_x86_64,
 ]}
 ```
+
+`import Toolchain::* from` a library brings in every toolchain it
+defines, and nothing else of it. To bring in one, name it: `import
+Toolchain::C gcc_x86_64 from "github.com/gcslib/gcc"`.
 
 Pekit sets the `toolchains` context from `pekitconf.toolchains` for every
 target it builds, and the first registered toolchain that fits the

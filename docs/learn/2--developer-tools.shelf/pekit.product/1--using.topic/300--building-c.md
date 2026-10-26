@@ -81,7 +81,7 @@ To use the host's own tools instead, register `host_tools` from the
 buildenv library and `system_c` from the `toolchain` module:
 
 ```text
-import * from "github.com/gcslib/buildenv"
+import Toolchain::BuildEnv host_tools from "github.com/gcslib/buildenv"
 import * from toolchain
 
 pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::BuildEnv host_tools]}

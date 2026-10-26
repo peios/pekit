@@ -45,7 +45,7 @@ workspace registers one, as it does a C compiler (see
 ~pekit/building-a-target):
 
 ```text
-import * from "github.com/gcslib/python"
+import Toolchain::Python python_3_14 from "github.com/gcslib/python"
 import Toolchain from toolchain
 
 pekitconf = {toolchains = [Toolchain::Python python_3_14]}
