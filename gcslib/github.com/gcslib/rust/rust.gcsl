@@ -38,7 +38,11 @@
 #   from the crates of `vendor`, for `target`, by default
 #   `x86_64-unknown-linux-musl`, as static position-independent programs,
 #   which need nothing of the system they run on: a directory of each by its
-#   name. A hermetic step: Cargo runs in a sandbox of the toolchain's
+#   name. The C a crate compiles through `cc`, `zstd-sys`'s say, is compiled
+#   for the target by `target_c`, by default the gcc library's musl
+#   toolchain, which a static musl program needs. `beside` are directories
+#   the source takes by their paths, each placed at its path, `at`, beside
+#   the source as `../AT` reaches it: another repository's crate, say. A hermetic step: Cargo runs in a sandbox of the toolchain's
 #   runtime, with the toolchain, the source and the crates, and nothing else.
 import fs
 import unpack from archive
@@ -63,6 +67,9 @@ let DIST = "https://static.rust-lang.org/dist"
 let OPT_RUST = "/opt/rust"
 
 let OPT_CC = "/opt/cc"
+
+# Where a build's sandbox has the C toolchain of its target.
+let OPT_TARGET_CC = "/opt/target-cc"
 
 def Toolchain::Rust rust_1_98() {
     let gcc = (Toolchain::C gcc_x86_64)()
@@ -288,7 +295,9 @@ def cargo_build(
     target: String = "x86_64-unknown-linux-musl",
     packages: List<String> = [],
     rustflags: List<String> = ["-Crelocation-model=pic", "-Clink-self-contained=yes", "-Clink-arg=-static-pie"],
+    beside: List<{at: String, place: Dir}> = [],
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
+    target_c: toolchain.CToolchain = musl_x86_64(),
 ) -> Dir {
     let home = dir(".").path
     let config = "{home}/config.toml"
@@ -311,16 +320,25 @@ def cargo_build(
         }
         git_sources := "{git_sources}[source.\"{each.source}\"]\ngit = \"{each.url}\"\n{query}replace-with = \"vendored\"\n"
     }
+    # The C of a crate for the target, its build script's through `cc`,
+    # compiled by the target's own C toolchain, musl's for a musl target, and
+    # for the build's own machine by the one that links.
+    let target_cc = "{OPT_TARGET_CC}/{target_c.cc.path.strip_prefix(target_c.root.path).strip_prefix("/")}"
+    let target_ar = "{OPT_TARGET_CC}/{target_c.ar.path.strip_prefix(target_c.root.path).strip_prefix("/")}"
+    let target_var = target.split("-").join("_")
     let written = fs.write(
         config,
         "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n\
-         [target.{target}]\nlinker = \"{cc}\"\n[target.x86_64-unknown-linux-gnu]\nlinker = \"{cc}\"\n",
+         [target.{target}]\nlinker = \"{cc}\"\n[target.x86_64-unknown-linux-gnu]\nlinker = \"{cc}\"\n\
+         [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n",
     )
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = rust.runtime},
         {at = OPT_RUST; place = rust.root},
         {at = OPT_CC; place = rust.cc_root},
+        {at = OPT_TARGET_CC; place = target_c.root},
         {at = "/work/src"; place = src},
+        ...(for each in beside { = {at = "/work/{each.at}"; place = each.place} }),
         {at = "/work/vendor"; place = vendor.crates},
         {at = "/work/home/config.toml"; place = file(config)},
     ]

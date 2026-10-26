@@ -211,6 +211,26 @@ workspace's lock.
   `Tool::C gcc`, and pekit puts a library's under `.libraries/` and a
   variant's under its def-type, `.libraries/github.com/gcslib/buildenv/
   Toolchain.BuildEnv/busybox_x86_64/assemble`.
+- X6c: example 10's tools are built from source too. `ppk`, `peiso`, and
+  peiosutils' `mkirf` and `mkuki` are each built by the rust library from
+  its committed tree, and registered as `Toolchain::Ppk` and
+  `Toolchain::Peiso`. Only QEMU, its firmware and the ISO tools peiso runs
+  come from the host. What it took:
+  - git crates (I7), for peiosutils' lock;
+  - the gcc library's musl toolchain, `musl_x86_64()`, which compiles a
+    crate's C for a static musl program, `zstd-sys`'s (`cargo_build`'s
+    `target_c`, given to `cc` through Cargo's `[env]`); pekit's `mkirf`
+    makes archives byte for byte as a host Cargo build of it does;
+  - `cargo_build`'s `beside`, for peiso's `ppk = { path = "../ppk" }`;
+  - registering a toolchain after those its definition is built with:
+    `toolchain.get` runs each registered definition before it checks its
+    kind, so a `Toolchain::Ppk` built with `Toolchain::Rust` and registered
+    before it would wait on itself. GCSL's `toolchain` module checking an
+    entry's kind before running it, as Bazel resolves a toolchain by
+    constraints declared apart from it, is a follow-up.
+
+  The example's test takes about 370 s rather than 75 s, most of it
+  compiling peiosutils' crates.
 - Next of I6: prelude needs the Peios SDK, built from `peios-sdk` at a
   pinned commit by prelude's `tools/prepare-sdk.py`, a crate from a git
   repository, `peios-rs` pinned by commit, which the rust library refuses

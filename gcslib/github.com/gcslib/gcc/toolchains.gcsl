@@ -7,13 +7,19 @@
 # - `gcc_x86_64_to_aarch64`: GCC for aarch64 Linux with glibc, running on
 #   x86-64 Linux. Its tools are x86-64 programs, so they run on the x86-64
 #   toolchain's sysroot, which it fetches too.
+# - `musl_x86_64()`: GCC for x86-64 Linux with musl, running on x86-64 Linux
+#   on the glibc toolchain's sysroot, as the aarch64 one does: what compiles
+#   the C of a static musl program, the C of a Rust crate say. It is no
+#   `Toolchain::C` to register, since a platform is an architecture and a
+#   system, and musl and glibc are both Linux's: whoever needs it asks for
+#   it by name.
 import unpack from archive
 import toolchain
 import Toolchain from toolchain
 
 let BOOTLIN = "https://toolchains.bootlin.com/downloads/releases/toolchains"
 
-let RELEASE = "glibc--stable-2026.08-1"
+let RELEASE = "stable-2026.08-1"
 
 def Toolchain::C gcc_x86_64() {
     let files = x86_64_install()
@@ -31,7 +37,7 @@ def Toolchain::C gcc_x86_64() {
 
 def Toolchain::C gcc_x86_64_to_aarch64() {
     let files = install(
-        "aarch64",
+        "aarch64--glibc",
         "0213efac9b5577f20d58de9431960a191347ffc2257b27ffe7250522bf1f7867",
     )
     host_platform = {arch = "x86_64"; os = "linux"}
@@ -46,15 +52,31 @@ def Toolchain::C gcc_x86_64_to_aarch64() {
     }
 }
 
-fn x86_64_install() -> Dir {
-    = install("x86-64", "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3")
+def musl_x86_64() -> toolchain.CToolchain {
+    let files = install(
+        "x86-64--musl",
+        "78d3a4683d6ac47b5ee73bd5bce210b55eb93dff1b137c61298af97eb0d2b5a6",
+    )
+    = {
+        root = files
+        runtime = x86_64_install().dir("x86_64-buildroot-linux-gnu/sysroot")
+        cc = files.file("bin/x86_64-linux-gcc")
+        ar = files.file("bin/x86_64-linux-ar")
+        ld = files.file("bin/x86_64-linux-ld")
+        sysroot = files.dir("x86_64-buildroot-linux-musl/sysroot")
+    }
 }
 
-# Bootlin's toolchain for the architecture `arch`, by its name in their
-# URLs, of the release `RELEASE`, pinned by `sha256`: its install, the
-# directory its archive holds.
-fn install(arch: String, sha256: String) -> Dir {
-    let name = "{arch}--{RELEASE}"
+fn x86_64_install() -> Dir {
+    = install("x86-64--glibc", "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3")
+}
+
+# Bootlin's toolchain `kind`, its architecture and C library, `x86-64--glibc`
+# say, by its name in their URLs, of the release `RELEASE`, pinned by
+# `sha256`: its install, the directory its archive holds.
+fn install(kind: String, sha256: String) -> Dir {
+    let arch = kind.split("--")[0]
+    let name = "{kind}--{RELEASE}"
     let unpacked = unpack(fetch("{BOOTLIN}/{arch}/tarballs/{name}.tar.xz", sha256 = sha256))
     = unpacked.dir(name)
 }

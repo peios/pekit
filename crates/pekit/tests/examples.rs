@@ -421,10 +421,14 @@ const HOST: &str = "import * from \"github.com/gcslib/buildenv\"\n\
 
 /// Each file the libraries and examples fetch, by its name in the
 /// directory of [`downloads`], with its pin.
-const DOWNLOADS: [(&str, &str); 6] = [
+const DOWNLOADS: [(&str, &str); 7] = [
     (
         "x86-64--glibc--stable-2026.08-1.tar.xz",
         "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3",
+    ),
+    (
+        "x86-64--musl--stable-2026.08-1.tar.xz",
+        "78d3a4683d6ac47b5ee73bd5bce210b55eb93dff1b137c61298af97eb0d2b5a6",
     ),
     (
         "aarch64--glibc--stable-2026.08-1.tar.xz",
@@ -461,6 +465,12 @@ fn downloads() -> PathBuf {
 fn seeded(names: &[&str]) -> Option<tempfile::TempDir> {
     let state = tempfile::tempdir().unwrap();
     let store = Store::open(&state.path().join("store")).unwrap();
+    // The git repositories the builds fetch commits of, as pekit keeps
+    // them, so that nothing is fetched.
+    let repositories = downloads().join("git");
+    if repositories.is_dir() {
+        copy_tree(&repositories, &state.path().join("store/git"));
+    }
     for name in names {
         let (_, pin) = DOWNLOADS.iter().find(|(file, _)| file == name)?;
         let path = downloads().join(name);
@@ -666,68 +676,62 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      import * from toolchain\n\
                      import fileroot\n\
                      import path\n\
+                     fn built(at: String, bins: List<String>, packages: List<String>) -> Dir {\n\
+                     \x20   let src = path.join(fileroot.this, \"example/{at}\")\n\
+                     \x20   let ppk = {at = \"ppk\"; place = dir(path.join(fileroot.this, \"example/ppk\"))}\n\
+                     \x20   = cargo_build(dir(src), vendored(file(\"{src}/Cargo.lock\")), bins = bins, packages = packages, beside = [ppk])\n\
+                     }\n\
                      def Toolchain::Ppk workspace_ppk() {\n\
-                     \x20   let tools = dir(path.join(fileroot.this, \"tools\"))\n\
+                     \x20   let tools = built(\"ppk\", [\"ppk\"], [])\n\
                      \x20   host_platform = ^host_platform\n\
                      \x20   platform = {}\n\
                      \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
                      }\n\
                      def Toolchain::Peiso workspace_peiso() {\n\
-                     \x20   let tools = dir(path.join(fileroot.this, \"tools\"))\n\
+                     \x20   let peiso = built(\"peiso\", [\"peiso\"], [])\n\
+                     \x20   let utils = built(\"peiosutils\", [\"mkirf\", \"mkuki\"], [\"pu_mkirf\", \"pu_mkuki\"])\n\
                      \x20   host_platform = ^host_platform\n\
                      \x20   platform = {}\n\
-                     \x20   provides = {root = tools; runtime = dir(\"/\"); peiso = tools.file(\"peiso\"); \
-                     mkirf = tools.file(\"mkirf\"); mkuki = tools.file(\"mkuki\")}\n\
+                     \x20   provides = {root = peiso; runtime = dir(\"/\"); peiso = peiso.file(\"peiso\"); \
+                     mkirf = utils.file(\"mkirf\"); mkuki = utils.file(\"mkuki\")}\n\
                      }\n\
-                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk, \
-                     Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu, \
-                     Toolchain::Rust rust_1_98]}\n";
+                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Rust rust_1_98, \
+                     Toolchain::Qemu system_qemu, Toolchain::Ppk workspace_ppk, \
+                     Toolchain::Peiso workspace_peiso]}\n";
 
-/// The programs example 10 needs, each by its name in the workspace's
-/// `tools/` and where it is: ppk and peiso from `PATH`, and peiosutils'
-/// `mkirf` and `mkuki` built into `local/pekit2-data` (see
-/// `design/image.md`); `None` if one is missing, or QEMU or its firmware
-/// is.
-fn image_tools() -> Option<Vec<(&'static str, PathBuf)>> {
-    let on_path = |name: &str| {
-        let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(name))
-            .find(|candidate| candidate.is_file())
-    };
-    let built = downloads().join("peiosutils-target/release");
-    let host = [
+/// Whether the host has what example 10 takes of it: QEMU, its firmware,
+/// and the tools peiso makes an ISO with. ppk, peiso and peiosutils' `mkirf`
+/// and `mkuki` are built from their sources.
+fn image_host() -> bool {
+    [
         "/usr/bin/qemu-system-x86_64",
         "/usr/share/OVMF/OVMF_CODE_4M.fd",
         "/usr/share/OVMF/OVMF_VARS_4M.fd",
         "/usr/bin/xorriso",
         "/usr/sbin/mkfs.vfat",
         "/usr/bin/mcopy",
-    ];
-    if !host.iter().all(|path| Path::new(path).is_file()) {
-        return None;
-    }
-    let tools = vec![
-        ("ppk", on_path("ppk")?),
-        ("peiso", on_path("peiso")?),
-        ("mkirf", built.join("mkirf")),
-        ("mkuki", built.join("mkuki")),
-    ];
-    tools
-        .iter()
-        .all(|(_, path)| path.is_file())
-        .then_some(tools)
+    ]
+    .iter()
+    .all(|path| Path::new(path).is_file())
 }
 
 #[test]
 fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
-    let source = repository().join("../ppk");
+    let sources =
+        ["ppk", "peiso", "peiosutils"].map(|name| (name, repository().join("..").join(name)));
     let packages = downloads().join("peios-repository");
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
-    let ready = packages.is_dir() && rust.len() > 4 && source.join("Cargo.lock").is_file();
-    let (Some(tools), Some(state)) = (image_tools(), seeded(&names).filter(|_| ready)) else {
-        eprintln!("skipped: example 10's tools, its repository, Rust or ppk's source are not here");
+    let ready = packages.is_dir()
+        && rust.len() > 4
+        && image_host()
+        && sources
+            .iter()
+            .all(|(_, source)| source.join("Cargo.lock").is_file());
+    let Some(state) = seeded(&names).filter(|_| ready) else {
+        eprintln!(
+            "skipped: example 10's host tools, its repository, Rust or a source are not here"
+        );
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -735,10 +739,10 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
         store.put_file(path).unwrap();
     }
     let dir = example(10, IMAGE);
-    committed(&source, &dir.path().join("example/ppk"));
-    fs::create_dir_all(dir.path().join("tools")).unwrap();
-    for (name, path) in &tools {
-        fs::copy(path, dir.path().join("tools").join(name)).unwrap();
+    // ppk, peiso and peiosutils as their committed trees, as a release
+    // would build them.
+    for (name, source) in &sources {
+        committed(source, &dir.path().join("example").join(name));
     }
     copy_tree(&packages, &dir.path().join("example/repository"));
     // The kernel and busybox from the repository, ppk built from its source
