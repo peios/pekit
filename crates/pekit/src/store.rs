@@ -297,6 +297,12 @@ pub struct Store {
     /// What it was used for since it was opened: each record found or
     /// written, by its key, and each scratch directory held, by its name.
     used: Arc<Mutex<Used>>,
+    /// Each tree this process read, by its digest: a tree's blob never
+    /// changes.
+    trees: Arc<Mutex<HashMap<Digest, Tree>>>,
+    /// Each tree this process found it holds every content of: nothing is
+    /// evicted while a process has the store open.
+    complete: Arc<Mutex<HashSet<Digest>>>,
 }
 
 /// What a store was used for (see [`Store::used`]).
@@ -331,6 +337,8 @@ impl Store {
             linked: Arc::default(),
             held: Arc::new(held),
             used: Arc::default(),
+            trees: Arc::default(),
+            complete: Arc::default(),
         })
     }
 
@@ -369,14 +377,25 @@ impl Store {
     /// depth.
     #[must_use]
     pub fn holds_tree(&self, digest: &Digest) -> bool {
+        if self
+            .complete
+            .lock()
+            .is_ok_and(|complete| complete.contains(digest))
+        {
+            return true;
+        }
         let Ok(tree) = self.read_tree(digest) else {
             return false;
         };
-        tree.entries.iter().all(|entry| match entry {
+        let holds = tree.entries.iter().all(|entry| match entry {
             TreeEntry::File { file, .. } => self.has(&file.digest),
             TreeEntry::Dir { tree, .. } => self.holds_tree(tree),
             TreeEntry::Link { .. } => true,
-        })
+        });
+        if holds && let Ok(mut complete) = self.complete.lock() {
+            complete.insert(*digest);
+        }
+        holds
     }
 
     /// The store's directory.
@@ -819,8 +838,86 @@ impl Store {
     ///
     /// That the store does not hold it, or holds no tree under it.
     pub fn read_tree(&self, digest: &Digest) -> io::Result<Tree> {
+        if let Some(tree) = self
+            .trees
+            .lock()
+            .ok()
+            .and_then(|trees| trees.get(digest).cloned())
+        {
+            return Ok(tree);
+        }
         let bytes = self.read_blob(digest)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
+        let tree: Tree = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if let Ok(mut trees) = self.trees.lock() {
+            trees.insert(*digest, tree.clone());
+        }
+        Ok(tree)
+    }
+
+    /// Whether the directory at `at` is the tree `digest` as
+    /// [`Store::materialise_tree`] makes it, and nothing more: each file
+    /// the first of its blob a link to it, any other a read-only copy of its
+    /// contents, each directory and symbolic link as the tree has it. A
+    /// link can't be changed without its blob, which is read-only, and a
+    /// file put in its place is another; a copy is read again.
+    #[must_use]
+    pub fn is_materialised(&self, digest: &Digest, at: &Path) -> bool {
+        self.materialised_with(digest, at, &mut HashSet::new())
+            .unwrap_or(false)
+    }
+
+    /// [`Store::is_materialised`], `linked` the blobs, by digest and mode,
+    /// that a file of the tree is a link to already.
+    fn materialised_with(
+        &self,
+        digest: &Digest,
+        at: &Path,
+        linked: &mut HashSet<(Digest, bool)>,
+    ) -> io::Result<bool> {
+        let tree = self.read_tree(digest)?;
+        let mut names = HashSet::new();
+        for entry in fs::read_dir(at)? {
+            names.insert(entry?.file_name());
+        }
+        if names.len() != tree.entries.len() {
+            return Ok(false);
+        }
+        for entry in &tree.entries {
+            let path = at.join(entry.name());
+            if !names.contains(path.file_name().unwrap_or_default()) {
+                return Ok(false);
+            }
+            let meta = fs::symlink_metadata(&path)?;
+            let same = match entry {
+                TreeEntry::File { file, .. } => {
+                    let first = linked.insert((file.digest, file.executable));
+                    meta.is_file()
+                        && (meta.permissions().mode() & 0o111 != 0) == file.executable
+                        && meta.permissions().mode() & 0o222 == 0
+                        && meta.len() == file.size
+                        && if first {
+                            fs::metadata(self.blob_path(&file.digest, file.executable)).is_ok_and(
+                                |blob| (blob.dev(), blob.ino()) == (meta.dev(), meta.ino()),
+                            )
+                        } else {
+                            self.put_file_once(&path)
+                                .is_ok_and(|read| read.digest == file.digest)
+                        }
+                }
+                TreeEntry::Dir { tree, .. } => {
+                    meta.is_dir() && self.materialised_with(tree, &path, linked)?
+                }
+                TreeEntry::Link { target, .. } => {
+                    meta.file_type().is_symlink()
+                        && fs::read_link(&path)
+                            .is_ok_and(|read| read.as_os_str() == target.as_str())
+                }
+            };
+            if !same {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Makes the directory of the tree `digest` at `at`, a path that does

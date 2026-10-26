@@ -1,7 +1,7 @@
 //! Tests of the content store, receipts and records.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use gcsl::eval::plain::Plain;
@@ -94,6 +94,55 @@ fn a_tree_s_identical_files_are_materialised_as_files_of_their_own() {
 }
 
 /// The receipt of a step given `args`, its files' contents those of the
+
+#[test]
+fn a_tree_materialised_is_known_so_until_anything_of_it_changes() {
+    let (store, dir) = store();
+    let source = dir.path().join("source");
+    fs::create_dir_all(source.join("sub")).unwrap();
+    fs::write(source.join("a"), "same").unwrap();
+    fs::write(source.join("sub/b"), "same").unwrap();
+    fs::write(source.join("c"), "other").unwrap();
+    std::os::unix::fs::symlink("a", source.join("l")).unwrap();
+    let tree = store.put_tree(&source).unwrap();
+    let fresh = || {
+        let at = dir.path().join("made");
+        let _ = pekit::layers::remove_tree(&at);
+        store.materialise_tree(&tree, &at).unwrap();
+        at
+    };
+    let at = fresh();
+    assert!(store.is_materialised(&tree, &at));
+    // Something more.
+    fs::write(at.join("extra"), "x").unwrap();
+    assert!(!store.is_materialised(&tree, &at));
+    // A file put in a link's place, of the same contents.
+    let at = fresh();
+    fs::remove_file(at.join("c")).unwrap();
+    fs::write(at.join("c"), "other").unwrap();
+    fs::set_permissions(at.join("c"), fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(!store.is_materialised(&tree, &at));
+    // A copy, the second file of a blob, changed and made read-only again.
+    let at = fresh();
+    let copy = ["a", "sub/b"]
+        .into_iter()
+        .map(|name| at.join(name))
+        .find(|path| fs::metadata(path).unwrap().nlink() == 1)
+        .unwrap();
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&copy, "sane").unwrap();
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(!store.is_materialised(&tree, &at));
+    // A link that leads elsewhere.
+    let at = fresh();
+    fs::remove_file(at.join("l")).unwrap();
+    std::os::unix::fs::symlink("c", at.join("l")).unwrap();
+    assert!(!store.is_materialised(&tree, &at));
+    // Gone.
+    let _ = pekit::layers::remove_tree(&at);
+    assert!(!store.is_materialised(&tree, &at));
+}
+
 /// digests of `contents`, by path.
 fn receipt_of(args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
     receipt_in("/pekit-out/app/hello/compile", args, contents)

@@ -1755,6 +1755,13 @@ impl Run<'_> {
         let Some(at) = output_path(&self.settings.outputs, path) else {
             return Ok(());
         };
+        // Left as it is if it is that already, as a build that changed
+        // nothing finds each unpacked toolchain.
+        if let Kept::Dir(tree) = kept
+            && self.store.is_materialised(&tree, &at)
+        {
+            return Ok(());
+        }
         let placed = (|| {
             if fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_dir()) {
                 remove_tree(&at)?;

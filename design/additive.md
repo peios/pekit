@@ -226,6 +226,47 @@ and inode, so that an unchanged workspace is stat'ed, not read.
 - As a build ends, the stamps of files no longer there are dropped.
 - **Tests:** `tests/stamps.rs`.
 
+### F4, second part: measured, and deferred
+
+Before caching evaluation, its cost was measured on the pinned-toolchain
+zlib example (example 4: two Bootlin toolchains, buildenv, zlib), with a
+release build, the store warm:
+
+| | Before | After |
+|---|---|---|
+| `pekit query deps app` (evaluation, no step run) | 0.76 s | 0.22 s |
+| `pekit build app`, nothing changed | | 0.41 s |
+
+The 0.76 s was not GCSL's: it was the store re-exposing each unpacked
+toolchain under `pekit-out/.unpack` on every build, removing and linking
+again some 14,000 files, and checking every unpacked tree's contents
+were there by reading each of its 5,500 tree blobs. Now:
+
+- an exposed tree that already is the tree, every file the first of its
+  blob a link to it and any other a read-only copy of its contents, each
+  directory and symbolic link as the tree has it and nothing more, is
+  left as it is (`Store::is_materialised`): a link can't change without
+  its read-only blob, a file put in its place is another, and a copy is
+  read again;
+- a process reads each tree once, and checks each tree complete once,
+  since nothing is evicted while it has the store.
+
+What is left of a build that changes nothing is mostly the `stat`s of
+checking those trees. GCSL's own evaluation is a small part of 0.2 s.
+
+**Decision (to surface):** the on-disk evaluation cache is deferred.
+There is no measured cost for it to remove, and a cache that keys
+evaluation must be right the first time. Its sound key is known, should
+it be needed: the target, its platform and evaluation settings, the
+digests of its code's files, its root contexts with their files, every
+workspace path its evaluation resolved by digest or absence, each fetch
+pin and unpacking it reached, and each step it reached by receipt and the
+result digest it saw, checked present and equal on a hit; never a target
+whose own code runs `exec`, `exec_live` or `which`. Evaluation kept in
+memory is the daemon's (F8), as Bazel keeps its analysis in its server.
+The Peios port, which is the remaining core and the first real-scale
+workspace, comes next, and will say whether evaluation needs caching.
+
 ## F5. The remote cache over REAPI
 
 Bazel's Remote Execution API is spoken, so existing servers work:
