@@ -1,4 +1,10 @@
+import fs
+import toolchain
+import Toolchain from toolchain
 import "github.com/gcslib/rust"
+import "github.com/gcslib/clang"
+import * from "github.com/gcslib/gcc"
+import * from "github.com/gcslib/python"
 
 # A package built here: the message of the day, its text shouted.
 #[hermetic]
@@ -28,4 +34,87 @@ def package dev.peios.ppk() {
 def package dev.peios.live-root() {
     version = "0.1.0-1"
     files = {"libexec/prelude/hooks.d/ppk-live-root" = file("ppk/boot/ppk-live-root")}
+}
+
+# The peios-sdk commit prelude's `tools/prepare-sdk.py` records.
+let SDK_REVISION = "d56e86fbc922b83873006752600f8de7bc12cb84"
+
+fn sdk_source() -> Dir {
+    = fetch_git("https://github.com/peios/peios-sdk.git", SDK_REVISION)
+}
+
+# libpeios, the SDK's static C ABI library, its private Rust runtime renamed
+# by the SDK's own tool, so that it links into a Rust program beside that
+# program's own, as the SDK's own build makes it.
+def build libpeios() {
+    let src = sdk_source()
+    let raw = rust.cargo_build(src, rust.vendored(src.file("Cargo.lock")), bins = [], libs = ["libpeios.a"], packages = ["libpeios"])
+    = isolated(raw.file("libpeios.a"), src.file("tools/isolate-static.py"))
+}
+
+# The archive `archive` with every definition but its `peios_` API renamed,
+# by the SDK's tool `tool`, run with a pinned Python and the musl
+# toolchain's `nm` and `objcopy`.
+#[hermetic]
+fn isolated(
+    archive: File,
+    tool: File,
+    py: PythonToolchain = toolchain.get(Toolchain::Python),
+    c: toolchain.CToolchain = musl_x86_64(),
+) -> File {
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = py.runtime},
+        {at = "/opt/python"; place = py.root},
+        {at = "/opt/binutils"; place = c.root.dir("x86_64-buildroot-linux-musl/bin")},
+        {at = "/work/libpeios.a"; place = archive},
+        {at = "/work/isolate-static.py"; place = tool},
+    ]
+    let python = "/opt/python/{py.python.path.strip_prefix(py.root.path).strip_prefix("/")}"
+    let box = fs.compose(placed).sandbox(cwd = "/work", env = {PATH = "/opt/binutils"; PYTHONDONTWRITEBYTECODE = "1"})
+    let ran = box.exec(python, "/work/isolate-static.py", "/work/libpeios.a", "/work/out.a", "--prefix", "peios")
+    let made = file("libpeios.a")
+    fs.copy(box.file("/work/out.a").path, made.path)
+    = made
+}
+
+# The SDK as prelude's build takes it: libpeios's headers, the kernel's
+# `pkm` ones among them, and libpeios.
+#[hermetic]
+fn sdk_of(include: Dir, pkm: Dir, library: File) -> Dir {
+    = fs.compose([
+        {at = "include"; place = include},
+        {at = "include/pkm"; place = pkm},
+        {at = "lib/libpeios.a"; place = library},
+    ])
+}
+
+# prelude, the initramfs's PID 1, and seed-sd, which binds to libpeios and
+# so runs bindgen against its headers with a pinned libclang.
+def build prelude() {
+    let src = sdk_source()
+    let sdk = sdk_of(src.dir("libpeios/include"), src.dir("vendor/kernel/include/uapi/pkm"), build libpeios())
+    = rust.cargo_build(
+        dir("prelude"),
+        rust.vendored(file("prelude/Cargo.lock")),
+        bins = ["prelude", "seed-sd"],
+        packages = ["prelude", "seed-sd"],
+        beside = [{at = "sdk"; place = sdk}],
+        env = [
+            {name = "PEIOS_LIB_DIR"; value = "/work/sdk/lib"},
+            {name = "PEIOS_INCLUDE"; value = "/work/sdk/include"},
+            {name = "PKM_UAPI"; value = "/work/sdk/include"},
+        ],
+        libclang = [clang.libclang_18()],
+    )
+}
+
+# prelude in its own install layout, as Peios packages it. The boot test
+# keeps busybox as init, so it is carried, not run.
+def package dev.peios.prelude() {
+    version = "0.0.7-1"
+    files = {
+        "sbin/prelude" = (build prelude()).file("prelude")
+        "bin/seed-sd" = (build prelude()).file("seed-sd")
+        "libexec/prelude/hook-log.sh" = file("prelude/src/hook-log.sh")
+    }
 }

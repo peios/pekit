@@ -37,7 +37,31 @@ By default `cargo_build` builds for `x86_64-unknown-linux-musl`, as
 static, position-independent programs that need nothing of the system
 they run on. Give `target = "x86_64-unknown-linux-gnu"` and `rustflags =
 []` for programs linked against glibc instead. `packages` names the
-workspace's packages to build, as Cargo's `-p` does.
+workspace's packages to build, as Cargo's `-p` does. The library's flags
+are Cargo's `build.rustflags`, so a project's own configuration of its
+target's flags, or of its linker, takes precedence over them, as Cargo
+intends.
+
+## C, libraries and bindings
+
+C that a crate compiles through the `cc` crate, such as `zstd-sys`, is
+compiled for the target by `target_c`: by default the gcc library's
+Bootlin musl toolchain, `musl_x86_64()`, which a static musl program
+needs.
+
+`cargo_build` gives the binaries `bins` by default. To give a library a
+crate builds as well, such as a `staticlib`, name its file in `libs`,
+for example `libs = ["libpeios.a"]`. `beside` places directories next to
+the source, at `../NAME`, for a crate that takes another by a path
+outside its own tree. `env` gives every build script variables of its
+own, each a `{name; value}`, as Cargo's `[env]` table does.
+
+A build script that runs bindgen needs libclang. Give `libclang = [dir]`,
+a directory holding `libclang.so`, such as the clang library's
+`clang.libclang_18()`, a pinned build from PyPI. The build is then given
+`LIBCLANG_PATH`, and `BINDGEN_EXTRA_CLANG_ARGS` names the target C
+toolchain's own headers and sysroot, so bindgen parses as that
+toolchain's compiler would.
 
 ## The toolchain
 

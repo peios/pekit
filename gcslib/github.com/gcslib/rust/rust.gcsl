@@ -42,7 +42,12 @@
 #   for the target by `target_c`, by default the gcc library's musl
 #   toolchain, which a static musl program needs. `beside` are directories
 #   the source takes by their paths, each placed at its path, `at`, beside
-#   the source as `../AT` reaches it: another repository's crate, say. A hermetic step: Cargo runs in a sandbox of the toolchain's
+#   the source as `../AT` reaches it: another repository's crate, say.
+#   `libs` are libraries it builds to give besides the binaries,
+#   `libpeios.a` say; `env`, what Cargo gives every build script besides,
+#   each by its name; and `libclang`, a directory holding the `libclang.so`
+#   a build script's bindgen loads, for which it is given too the target C
+#   toolchain's own headers and sysroot to parse with. A hermetic step: Cargo runs in a sandbox of the toolchain's
 #   runtime, with the toolchain, the source and the crates, and nothing else.
 import fs
 import unpack from archive
@@ -70,6 +75,9 @@ let OPT_CC = "/opt/cc"
 
 # Where a build's sandbox has the C toolchain of its target.
 let OPT_TARGET_CC = "/opt/target-cc"
+
+# Where a build's sandbox has the libclang its build scripts' bindgen loads.
+let OPT_LIBCLANG = "/opt/libclang"
 
 def Toolchain::Rust rust_1_98() {
     let gcc = (Toolchain::C gcc_x86_64)().made()
@@ -287,6 +295,18 @@ fn vendor(
     = fs.compose(flat)
 }
 
+# The directory of the C compiler's own headers, `stddef.h`'s, in the C
+# toolchain `c`, from its install's root: what `cc -print-file-name=include`
+# says.
+fn builtin_headers(c: toolchain.CToolchain) -> String {
+    for each in c.root.dir("lib/gcc").files() {
+        if each.path.ends_with("/include/stddef.h") {
+            return each.path.strip_prefix(c.root.path).strip_prefix("/").strip_suffix("/stddef.h")
+        }
+    }
+    panic("the C toolchain at `{c.root.path}` has no `lib/gcc/*/include/stddef.h`")
+}
+
 #[hermetic]
 def cargo_build(
     src: Dir,
@@ -296,6 +316,9 @@ def cargo_build(
     packages: List<String> = [],
     rustflags: List<String> = ["-Crelocation-model=pic", "-Clink-self-contained=yes", "-Clink-arg=-static-pie"],
     beside: List<{at: String, place: Dir}> = [],
+    libs: List<String> = [],
+    env: List<{name: String, value: String}> = [],
+    libclang: List<Dir> = [],
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
     target_c: toolchain.CToolchain = musl_x86_64(),
 ) -> Dir {
@@ -326,17 +349,36 @@ def cargo_build(
     let target_cc = "{OPT_TARGET_CC}/{target_c.cc.path.strip_prefix(target_c.root.path).strip_prefix("/")}"
     let target_ar = "{OPT_TARGET_CC}/{target_c.ar.path.strip_prefix(target_c.root.path).strip_prefix("/")}"
     let target_var = target.split("-").join("_")
+    # The flags as the build's own, which a project's configuration of its
+    # target's flags overrides, as Cargo means it to: `RUSTFLAGS` would
+    # override the project's.
+    let quoted_flags = (for flag in rustflags { = "\"{flag}\"" }).join(", ")
+    # What a build script is given besides, and, for one that runs bindgen,
+    # the libclang it loads, and the target C toolchain's own headers and
+    # sysroot for it to parse with, as the toolchain's compiler would.
+    let mut given = ""
+    for each in env {
+        given := "{given}{each.name} = \"{each.value}\"\n"
+    }
+    for each in libclang {
+        let builtin = builtin_headers(target_c)
+        let sysroot = target_c.sysroot.path.strip_prefix(target_c.root.path)
+        given := "{given}LIBCLANG_PATH = \"{OPT_LIBCLANG}\"\n\
+                  BINDGEN_EXTRA_CLANG_ARGS = \"-isystem {OPT_TARGET_CC}/{builtin} --sysroot={OPT_TARGET_CC}{sysroot}\"\n"
+    }
     let written = fs.write(
         config,
         "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n\
          [target.{target}]\nlinker = \"{cc}\"\n[target.x86_64-unknown-linux-gnu]\nlinker = \"{cc}\"\n\
-         [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n",
+         [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n{given}\
+         [build]\nrustflags = [{quoted_flags}]\n",
     )
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = rust.runtime},
         {at = OPT_RUST; place = rust.root},
         {at = OPT_CC; place = rust.cc_root},
         {at = OPT_TARGET_CC; place = target_c.root},
+        ...(for each in libclang { = {at = OPT_LIBCLANG; place = each} }),
         {at = "/work/src"; place = src},
         ...(for each in beside { = {at = "/work/{each.at}"; place = each.place} }),
         {at = "/work/vendor"; place = vendor.crates},
@@ -349,7 +391,6 @@ def cargo_build(
             HOME = "/work/home"
             CARGO_HOME = "/work/home"
             CARGO_TARGET_DIR = "/work/target"
-            RUSTFLAGS = rustflags.join(" ")
         },
     )
     let chosen = for name in packages { = ["-p", name] }
@@ -358,5 +399,5 @@ def cargo_build(
         words := [...words, ...pair]
     }
     let built = box.exec("{OPT_RUST}/bin/cargo", ...words)
-    = fs.compose(for name in bins { = {at = name; place = box.file("/work/target/{target}/release/{name}")} })
+    = fs.compose(for name in [...bins, ...libs] { = {at = name; place = box.file("/work/target/{target}/release/{name}")} })
 }

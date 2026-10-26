@@ -233,6 +233,20 @@ workspace's lock.
 
   The example's test takes about 370 s rather than 75 s, most of it
   compiling peiosutils' crates.
+- X6d: example 10 carries `dev.peios.prelude`, as `pkgs` packages it:
+  `sbin/prelude`, `bin/seed-sd` and `libexec/prelude/hook-log.sh`, all
+  built from prelude's committed tree. `seed-sd` links `libpeios`, built
+  from peios-sdk at the commit prelude's `tools/prepare-sdk.py` records
+  (`fetch_git`), as a `staticlib` by Cargo (`cargo_build`'s `libs`), then
+  isolated by the SDK's own `tools/isolate-static.py` with the python
+  library's pinned interpreter and the musl toolchain's `nm` and
+  `objcopy`. Its bindgen loads libclang 18.1.1 from the PyPI `libclang`
+  wheel, pinned by SHA-256 (the clang library; `archive.unpack` reads zip
+  for it), and parses with the musl toolchain's own headers and sysroot
+  (`cargo_build`'s `libclang`). The prelude's own `.cargo/config.toml`
+  chooses `rust-lld`, which `RUSTFLAGS` would have overridden with a gcc
+  driver's flag: the rust library's flags are Cargo's `build.rustflags`
+  now, which a project's target flags take precedence over.
 - Next of I6: prelude needs the Peios SDK, built from `peios-sdk` at a
   pinned commit by prelude's `tools/prepare-sdk.py`, a crate from a git
   repository, `peios-rs` pinned by commit, which the rust library refuses

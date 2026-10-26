@@ -21,6 +21,7 @@ def build iso() {
         packages = [
             {package = from_repository("net.busybox.busybox", "1.37.0-1"); initramfs = true},
             {package = package dev.peios.ppk(); initramfs = true},
+            {package = package dev.peios.prelude(); initramfs = true},
             {package = package dev.peios.live-root(); liveboot = false; initramfs = true},
             {package = package dev.example.motd()},
         ],

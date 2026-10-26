@@ -421,7 +421,11 @@ const HOST: &str = "import * from \"github.com/gcslib/buildenv\"\n\
 
 /// Each file the libraries and examples fetch, by its name in the
 /// directory of [`downloads`], with its pin.
-const DOWNLOADS: [(&str, &str); 7] = [
+const DOWNLOADS: [(&str, &str); 8] = [
+    (
+        "libclang-18.1.1-py2.py3-none-manylinux2010_x86_64.whl",
+        "c533091d8a3bbf7460a00cb6c1a71da93bffe148f172c7d03b1c31fbf8aa2a0b",
+    ),
     (
         "x86-64--glibc--stable-2026.08-1.tar.xz",
         "cde893afab04ac7dcd15c46aac214ff550441b982536124c88a71146a0eeedd3",
@@ -670,6 +674,7 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
 /// The workspace configuration of example 10: the host's C toolchain and
 /// QEMU, ppk and peiso's tools at `tools/`, and the pinned Rust.
 const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
+                     import * from \"github.com/gcslib/python\"\n\
                      import * from \"github.com/gcslib/peiso\"\n\
                      import * from \"github.com/gcslib/qemu\"\n\
                      import * from \"github.com/gcslib/rust\"\n\
@@ -697,7 +702,7 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      }\n\
                      pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk, \
                      Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu, \
-                     Toolchain::Rust rust_1_98]}\n";
+                     Toolchain::Rust rust_1_98, Toolchain::Python python_3_14]}\n";
 
 /// Whether the host has what example 10 takes of it: QEMU, its firmware,
 /// and the tools peiso makes an ISO with. ppk, peiso and peiosutils' `mkirf`
@@ -717,8 +722,8 @@ fn image_host() -> bool {
 
 #[test]
 fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
-    let sources =
-        ["ppk", "peiso", "peiosutils"].map(|name| (name, repository().join("..").join(name)));
+    let sources = ["ppk", "peiso", "peiosutils", "prelude"]
+        .map(|name| (name, repository().join("..").join(name)));
     let packages = downloads().join("peios-repository");
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
