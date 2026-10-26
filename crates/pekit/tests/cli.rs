@@ -354,6 +354,110 @@ fn check_reproducible_runs_every_step_again_and_names_what_differs() {
 }
 
 #[test]
+fn check_reproducible_runs_again_what_a_top_level_or_a_memoised_call_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = format!(
+        "{DRIFTING}let made = stamp()\n\
+         def build at_top() {{ = made }}\n"
+    );
+    let memo = format!(
+        "{DRIFTING}fn once() ->> Dir {{ stamp() }}\n\
+         def build memoised() {{\n\
+         \x20   let first = once()\n\
+         \x20   = once()\n\
+         }}\n"
+    );
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("top/build.gcsl", &top),
+            ("memo/build.gcsl", &memo),
+        ],
+    );
+    // Each in a store of its own, so that its first build runs it. The
+    // second must run it too, not take what the first left in the
+    // workspace, or it compares nothing.
+    for (name, step) in [
+        ("top/at_top", "top/at_top/stamp"),
+        ("memo/memoised", "memo/memoised/stamp"),
+    ] {
+        let cache = tempfile::tempdir().unwrap();
+        let checked = pekit(
+            dir.path(),
+            cache.path(),
+            &["build", name, "--check-reproducible"],
+        );
+        let (_, err) = printed(&checked);
+        assert!(!checked.status.success(), "{name}: {err}");
+        assert!(err.contains(&format!("\n  {step}")), "{name}: {err}");
+    }
+}
+
+/// A gzipped tar archive of `tool/cc`, holding `cc`.
+fn tool_archive() -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(3);
+    header.set_mode(0o755);
+    header.set_entry_type(tar::EntryType::Regular);
+    builder
+        .append_data(&mut header, "tool/cc", &b"cc\n"[..])
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut encoder, &builder.into_inner().unwrap()).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn check_reproducible_builds_with_a_toolchain_its_definition_unpacked() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "workspace.gcsl",
+                "import unpack from archive\n\
+                 import * from toolchain\n\
+                 def Toolchain::C unpacked() {\n\
+                 \x20   let files = unpack(file(\"tool.tar.gz\"))\n\
+                 \x20   host_platform = ^host_platform\n\
+                 \x20   platform = ^host_platform\n\
+                 \x20   provides = {\n\
+                 \x20       root = files; runtime = files; sysroot = files\n\
+                 \x20       cc = files.file(\"tool/cc\"); ar = files.file(\"tool/cc\")\n\
+                 \x20       ld = files.file(\"tool/cc\")\n\
+                 \x20   }\n\
+                 }\n\
+                 pekitconf = {toolchains = [Toolchain::C unpacked]}\n",
+            ),
+            (
+                "app/build.gcsl",
+                "import toolchain\n\
+                 import Toolchain from toolchain\n\
+                 #[hermetic] fn named(c: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"cat {c.cc.path} > out.txt\"])\n\
+                 \x20   file(\"out.txt\")\n\
+                 }\n\
+                 def build cc() { = named() }\n",
+            ),
+        ],
+    );
+    fs::write(dir.path().join("tool.tar.gz"), tool_archive()).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    // The second build unpacks the archive itself: the first's unpacking,
+    // memoised in the toolchain, is none of its outputs.
+    let checked = pekit(
+        &dir.path().join("app"),
+        cache.path(),
+        &["build", "cc", "--check-reproducible"],
+    );
+    let (out, err) = printed(&checked);
+    assert!(checked.status.success(), "{err}");
+    assert!(out.starts_with("built app/cc: 1 step run"), "{out}");
+}
+
+#[test]
 fn a_strict_build_runs_no_target_effect_but_reads_and_borrows_no_host_tool() {
     let dir = tempfile::tempdir().unwrap();
     let text = format!(

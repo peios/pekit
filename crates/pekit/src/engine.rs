@@ -636,6 +636,7 @@ fn new_run<'a>(
     (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
     events: &'a mut dyn FnMut(&Event),
 ) -> Result<Run<'a>, BuildError> {
+    loaded.ready().map_err(BuildError::Engine)?;
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     let workspace_seen = (
         workspace_stamps(&store, &loaded.root),

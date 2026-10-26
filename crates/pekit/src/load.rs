@@ -15,6 +15,12 @@
 //! ([`Loaded::render`], [`LoadError::render`]). A `build` and a `script` of
 //! one name in one directory are an error, since `pekit run NAME` would run
 //! either ([`LoadError::BuildAndScript`]).
+//!
+//! A build leaves in the workspace what it evaluated: each file's top level
+//! and each memoised call's result, which name what it fetched, unpacked
+//! and built. Another build, `--check-reproducible`'s second or a release's
+//! publishing, must make those itself, so each build after the first runs in
+//! the workspace checked afresh from the same files ([`Loaded::ready`]).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -43,9 +49,32 @@ pub struct Loaded {
     pub names: Vec<String>,
     /// The checked workspace.
     pub workspace: Workspace,
+    /// What it was checked from: its files, named relative to the root, and
+    /// the nested workspaces left out, so that it can be checked afresh
+    /// ([`Loaded::ready`]).
+    checked_from: (Vec<SourceFile>, Vec<String>),
+    /// Whether a build has evaluated in `workspace`.
+    used: bool,
 }
 
 impl Loaded {
+    /// Readies `workspace` for a build (see [Loading](#loading)): as it was
+    /// checked for the first, and checked afresh from the same files for
+    /// each one after.
+    ///
+    /// # Errors
+    ///
+    /// What checking the same files again found, which it never does.
+    pub fn ready(&mut self) -> Result<(), String> {
+        if self.used {
+            let (files, nested) = &self.checked_from;
+            let (_, checked) = workspace::check_with_standard(files, nested, WORKSPACE);
+            self.workspace = checked.map_err(|diagnostics| self.render(&diagnostics))?;
+        }
+        self.used = true;
+        Ok(())
+    }
+
     /// `diagnostics`, each shown against the source of its input.
     #[must_use]
     pub fn render(&self, diagnostics: &[Diagnostic]) -> String {
@@ -146,6 +175,8 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
                 sources,
                 names,
                 workspace,
+                checked_from: (read.relative, read.nested),
+                used: false,
             })
         }
         Err(diagnostics) => Err(LoadError::Check {

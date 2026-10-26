@@ -161,6 +161,60 @@ fn a_release_is_built_from_head_published_and_tagged() {
     assert!(!store.path().join("dev.example.data-1.0").exists());
 }
 
+/// A gzipped tar archive of `data.txt`, holding `data`.
+fn data_archive() -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(5);
+    header.set_mode(0o644);
+    header.set_entry_type(tar::EntryType::Regular);
+    builder
+        .append_data(&mut header, "data.txt", &b"data\n"[..])
+        .unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut encoder, &builder.into_inner().unwrap()).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn a_release_s_checking_and_publishing_unpack_what_its_build_unpacked() {
+    if !has_git() {
+        eprintln!("skipped: no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    // Unpacked at the top level, which a build evaluates once and leaves
+    // in the workspace: the reproducibility check's second build and the
+    // publishing each unpack it again.
+    write(
+        &ws,
+        &[
+            ("workspace.gcsl", WORKSPACE),
+            (
+                "app/package.gcsl",
+                "import unpack from archive\n\
+                 let unpacked = unpack(file(\"data.tar.gz\"))\n\
+                 def package dev.example.data() {\n\
+                 \x20   version = \"1.0\"\n\
+                 \x20   files = {\"share/data.txt\" = unpacked.file(\"data.txt\")}\n\
+                 }\n",
+            ),
+        ],
+    );
+    fs::write(ws.join("app/data.tar.gz"), data_archive()).unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "one"]);
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let released = pekit(&ws, cache.path(), &["release", "dev.example.data", &to]);
+    assert!(released.status.success(), "{:?}", shown(&released));
+    let published = store.path().join("dev.example.data-1.0/share/data.txt");
+    assert_eq!(fs::read_to_string(published).unwrap(), "data\n");
+}
+
 #[test]
 fn a_release_needs_a_commit() {
     if !has_git() {
