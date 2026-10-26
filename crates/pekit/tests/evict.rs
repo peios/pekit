@@ -141,3 +141,20 @@ fn a_scratch_directory_is_evicted_whole_unless_a_run_holds_it() {
         .unwrap();
     assert_eq!(count(), 0);
 }
+
+#[test]
+fn a_store_within_its_limit_reads_nothing_more() {
+    let dir = workspace();
+    let state = tempfile::tempdir().unwrap();
+    assert_eq!(built(dir.path(), state.path(), Some(DEFAULT_LIMIT)), (2, 0));
+    // What it used is journalled for an eviction that does something, and
+    // no eviction kept anything.
+    let store = state.path().join("store");
+    let journals = fs::read_dir(store.join("usage")).unwrap().count();
+    assert_eq!(journals, 1);
+    assert!(!store.join("eviction.json").exists());
+    // An eviction that does something reads them.
+    assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
+    assert!(store.join("eviction.json").exists());
+    assert_eq!(fs::read_dir(store.join("usage")).unwrap().count(), 0);
+}

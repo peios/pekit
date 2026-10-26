@@ -24,6 +24,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::evict::size_under;
 use crate::layers::remove_tree;
 use crate::store::Digest;
 
@@ -111,6 +112,11 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         if self.lock.is_none() {
             let _ = remove_tree(&self.dir);
+            return;
         }
+        // Its size as this run leaves it, for an eviction to read rather
+        // than walk it: written before its lock is let go of.
+        let size = size_under(&self.dir);
+        let _ = fs::write(self.dir.with_extension("size"), size.to_string());
     }
 }

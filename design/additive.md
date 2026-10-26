@@ -186,9 +186,16 @@ store is below nine tenths of it, by GreedyDual-Size.
 - A step record whose outputs aren't all there, and an unpacking whose
   tree isn't, are misses (`holds_all`, `Store::holds_tree`); a program's
   record whose trees aren't is a miss already, as its replay fails.
-- Every scan reads every blob's size, and, over the limit, every record:
-  fine for a store of thousands of records, and to be kept as a running
-  total if stores grow far larger.
+- **Cheap within the limit:** a build stats every blob, and reads each
+  scratch directory's size from the `.size` file its last run wrote as
+  it let go of it; if the store is within its limit, nothing more is read
+  and the journals wait. Only an eviction that does something reads every
+  record, and a blob is parsed as a tree only if its first bytes are a
+  tree's, so a fetched archive is never read through to find it isn't.
+  The stat of every blob is to become a running total if stores grow far
+  larger.
+- A lock that fails to become exclusive has been let go of, as `flock`
+  changes locks, so the shared lock is taken again either way.
 - **Tests:** `tests/evict.rs`.
 
 ## F4. The on-disk evaluation cache

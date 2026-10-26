@@ -184,8 +184,16 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
     journal(store.root(), used)?;
     match store.held().try_lock() {
         Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(TryLockError::Error(error)) => return Err(error),
+        Err(TryLockError::WouldBlock) => {
+            // A lock that failed to change has been let go of: held shared
+            // again, as every process that has the store holds it.
+            store.held().lock_shared()?;
+            return Ok(None);
+        }
+        Err(TryLockError::Error(error)) => {
+            store.held().lock_shared()?;
+            return Err(error);
+        }
     }
     let evicted = evict_held(store, limit);
     // Held shared again, as every process that has the store holds it.
@@ -224,13 +232,20 @@ fn journal(root: &Path, used: &Used) -> io::Result<()> {
 /// [`evict`], its lock held exclusively.
 fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     let root = store.root();
+    let blobs = blobs_of(root)?;
+    let scratch = scratch_of(root)?;
+    let total: u64 = blobs.values().map(|blob| blob.size).sum::<u64>()
+        + scratch.values().map(|(_, size)| size).sum::<u64>();
+    // Within its limit, nothing more is read: the journals wait for an
+    // eviction that does something.
+    if total <= limit {
+        return Ok(None);
+    }
     let state_path = root.join("eviction.json");
     let mut state: Priorities = fs::read(&state_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    let blobs = blobs_of(root)?;
-    let scratch = scratch_of(root)?;
     let records = records_of(store, &blobs)?;
     let (journals, used) = journals_of(root)?;
     // What was used is live again, and weighed as now.
@@ -257,25 +272,16 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     for name in &used.scratch {
         state.scratch.insert(name.clone(), state.inflation);
     }
-    let total: u64 = blobs.values().map(|blob| blob.size).sum::<u64>()
-        + scratch.values().map(|(_, size)| size).sum::<u64>();
-    let mut evicted = None;
-    if total > limit {
-        let low = limit / 10 * 9;
-        let after = evict_to(
-            &StoreSeen {
-                blobs: &blobs,
-                scratch: &scratch,
-                records: &records,
-            },
-            &mut state,
-            (total, low),
-        );
-        evicted = Some(Evicted {
-            before: total,
-            after,
-        });
-    }
+    let low = limit / 10 * 9;
+    let after = evict_to(
+        &StoreSeen {
+            blobs: &blobs,
+            scratch: &scratch,
+            records: &records,
+        },
+        &mut state,
+        (total, low),
+    );
     // Only what is still there is remembered.
     state.records.retain(|hex, _| records.contains_key(hex));
     state.scratch.retain(|name, _| scratch.contains_key(name));
@@ -288,7 +294,10 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     for journal in journals {
         let _ = fs::remove_file(journal);
     }
-    Ok(evicted)
+    Ok(Some(Evicted {
+        before: total,
+        after,
+    }))
 }
 
 /// A priority's `cost / size`, of a cost in milliseconds and a size in
@@ -401,6 +410,7 @@ fn remove_scratch(dir: &Path) -> io::Result<bool> {
         Err(TryLockError::Error(error)) => return Err(error),
     }
     remove_tree(dir)?;
+    let _ = fs::remove_file(dir.with_extension("size"));
     let _ = fs::remove_file(dir.with_extension("lock"));
     Ok(true)
 }
@@ -437,14 +447,20 @@ fn scratch_of(root: &Path) -> io::Result<HashMap<String, (PathBuf, u64)>> {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            found.insert(name, (entry.path(), size_under(&entry.path())));
+            // Its size as the last run that held it left it, else as it is.
+            let size = fs::read_to_string(entry.path().with_extension("size"))
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .unwrap_or_else(|| size_under(&entry.path()));
+            found.insert(name, (entry.path(), size));
         }
     }
     Ok(found)
 }
 
 /// The size of everything under `path`, in bytes, of what can be read.
-fn size_under(path: &Path) -> u64 {
+#[must_use]
+pub fn size_under(path: &Path) -> u64 {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return 0;
     };
@@ -534,7 +550,10 @@ fn named_blobs(
         found.extend(known.iter().cloned());
         return;
     }
-    let Some(tree) = Digest::from_hex(digest).and_then(|digest| store.read_tree(&digest).ok())
+    // A tree's encoding begins so; a file's is not read to find it isn't one.
+    let Some(tree) = Digest::from_hex(digest)
+        .filter(|digest| looks_like_tree(store, digest))
+        .and_then(|digest| store.read_tree(&digest).ok())
     else {
         trees.insert(digest.to_owned(), Vec::new());
         return;
@@ -545,6 +564,16 @@ fn named_blobs(
     }
     found.extend(within.iter().cloned());
     trees.insert(digest.to_owned(), within);
+}
+
+/// Whether the blob `digest` of `store` begins as a tree's encoding does,
+/// read no further.
+fn looks_like_tree(store: &Store, digest: &Digest) -> bool {
+    const BEGINNING: &[u8] = b"{\"entries\":";
+    let mut start = [0u8; BEGINNING.len()];
+    File::open(store.blob_path(digest, false))
+        .and_then(|mut file| io::Read::read_exact(&mut file, &mut start))
+        .is_ok_and(|()| start == BEGINNING)
 }
 
 /// The digests a tree's entries name.
