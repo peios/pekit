@@ -29,6 +29,8 @@ pub struct Options<'a> {
     pub strict: bool,
     /// How it reuses what the store holds.
     pub reuse: Reuse,
+    /// How large the store may be as it ends, if it has a limit.
+    pub cache_limit: Option<u64>,
 }
 
 impl Default for Options<'_> {
@@ -38,6 +40,7 @@ impl Default for Options<'_> {
             profile: "dev",
             strict: false,
             reuse: Reuse::Store,
+            cache_limit: None,
         }
     }
 }
@@ -63,6 +66,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         building_for: None,
         no_dynamic: false,
         strict: false,
+        cache_limit: None,
     }
 }
 
@@ -82,6 +86,7 @@ pub fn observed_with(
         profile,
         strict,
         reuse,
+        cache_limit,
     }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
     let arch = arch.to_owned();
@@ -103,6 +108,7 @@ pub fn observed_with(
             };
             let mut settings = settings(&root, &state, (&arch, &profile));
             settings.reuse = reuse;
+            settings.cache_limit = cache_limit;
             if strict {
                 settings.strict = true;
                 settings.host_tools = HostTools::default();

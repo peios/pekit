@@ -135,17 +135,61 @@ directory kept.
 
 ## F3. Eviction by GreedyDual-Size
 
-The store grows until something removes from it. A workspace says how
-large its store may be, `pekitconf.local_cache = {max_size = 50GiB}`, and
-each build, as it ends, evicts contents until the store fits, by
-GreedyDual-Size: each blob's priority is `L + cost / size`, its cost the
-time it took to make, the duration of the step or fetch that gave it, and
-`L` the priority of the last evicted, so that what is cheap to make again
-and large goes first, and what was used lately last. Records stay: a
-record whose contents are gone is no hit, so its step runs again and puts
-them back, and a downstream receipt is still computable. Scratch
-directories are evicted whole, least recently used first. `pekit clean
---cache` still removes everything.
+The store grows until something removes from it. A store may be as
+large as its machine says, `PEKIT_CACHE_LIMIT` (`50GiB` by default, `0`
+for no limit), and each build, as it ends, evicts contents until the
+store is below nine tenths of it, by GreedyDual-Size.
+
+- **The limit is the machine's.** The store is shared by every workspace
+  of a user, so a workspace's `pekitconf` can't say how large it may be:
+  two would disagree. (The first design said `pekitconf.local_cache`.)
+- **What is evicted is a record's contents, together.** Each record, a
+  step's, a program's, an unpacking's or a fetch's, names the blobs and
+  trees it holds; a record is *live* while every one is there. Records
+  stay when their contents go: a record whose contents are not all there
+  is no hit, so its step, program, unpacking or fetch runs again and puts
+  them back, and a downstream receipt is still computable. A blob is
+  removed once no live record names it. Blobs no record names, a
+  workspace's files hashed for a build, say, cost nothing to make again,
+  and go first.
+- **The order:** each record's priority is `L + cost / size`, set when it
+  is used: its cost the time its step, program, unpacking or download
+  took, its size its contents', and `L` the priority of the last evicted,
+  so that what is cheap to make again and large goes first, and what was
+  used lately last. A scratch directory is evicted whole, by the same
+  order, its cost nothing, since a step must do without it, and never
+  while a run holds it.
+- **Used:** a store notes each record found or written, and a build
+  appends them to a journal in the store as it ends; the eviction reads
+  every journal, sets the priorities, and keeps them, with `L`, in the
+  store.
+- **Concurrency:** every process holds the store by a shared lock while
+  it has it open. An eviction takes it exclusively, without waiting: if
+  another process has the store, this build evicts nothing, and a later
+  one will.
+- **A miss, not a failure:** a step found in the store whose outputs are
+  not all there runs again, as does an unpacking whose tree isn't.
+
+### F3 as built
+
+- `evict.rs`. A store notes each record found or written and each
+  scratch directory held (`Store::used`); a build with a limit journals
+  them to `usage/` as it ends and calls `evict`.
+- A record's blobs are found generically: every 64-hex-digit string in
+  its JSON that names a blob, and, for a tree, every blob under it. So
+  every kind of record weighs the same way, and a string that happens to
+  name a blob only keeps it longer. Its cost is its `duration_ms`:
+  programs, unpackings and downloads now record one, and a download has
+  a record of its own (`fetch.rs`), so a fetched archive isn't taken for
+  unreferenced and fetched again.
+- Priorities are integers, cost in 2^-20 ms per byte, so no float casts.
+- A step record whose outputs aren't all there, and an unpacking whose
+  tree isn't, are misses (`holds_all`, `Store::holds_tree`); a program's
+  record whose trees aren't is a miss already, as its replay fails.
+- Every scan reads every blob's size, and, over the limit, every record:
+  fine for a store of thousands of records, and to be kept as a running
+  total if stores grow far larger.
+- **Tests:** `tests/evict.rs`.
 
 ## F4. The on-disk evaluation cache
 
@@ -214,7 +258,9 @@ release was built from.
 - F1: secrets keep a program out of the per-`exec` cache; a replayed
   program puts back the whole writable world as recorded.
 - F2: `/pekit-scratch`, a step's by its name, and keying nothing.
-- F3: the size from `pekitconf.local_cache`, and cost as the time to make.
+- F3: the size from `PEKIT_CACHE_LIMIT`, the machine's, not a
+  workspace's `pekitconf`, defaulting to 50 GiB; cost as the time to make;
+  a scratch directory as costing nothing.
 - F4: what keys a target's evaluation.
 - F6: a step runner as REAPI's command.
 - F10: SLSA provenance.

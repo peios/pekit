@@ -38,6 +38,9 @@ use crate::store::{Digest, FileEntry, Store};
 struct Unpacked {
     /// Its tree.
     tree: Digest,
+    /// How long it took, in milliseconds: what finding it saves.
+    #[serde(default)]
+    duration_ms: u64,
 }
 
 /// The number of the next directory unpacked into, in this process.
@@ -75,11 +78,13 @@ pub fn unpack(
     scratch: &Path,
 ) -> Result<Digest, String> {
     let key = unpack_key(&archive.digest, strip);
-    if let Ok(Some(Unpacked { tree })) = store.record::<Unpacked>(&key)
-        && store.read_tree(&tree).is_ok()
+    // An unpacking whose contents were evicted is done again.
+    if let Ok(Some(Unpacked { tree, .. })) = store.record::<Unpacked>(&key)
+        && store.holds_tree(&tree)
     {
         return Ok(tree);
     }
+    let began = std::time::Instant::now();
     let fail = |reason: String| format!("`archive.unpack` could not unpack `{shown}`: {reason}");
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = scratch.join(format!("unpack-{}-{number}", std::process::id()));
@@ -90,7 +95,13 @@ pub fn unpack(
     let _ = remove_tree(&dir);
     let tree = unpacked.map_err(fail)?;
     store
-        .put_record(&key, &Unpacked { tree })
+        .put_record(
+            &key,
+            &Unpacked {
+                tree,
+                duration_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            },
+        )
         .map_err(|error| fail(error.to_string()))?;
     Ok(tree)
 }

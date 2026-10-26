@@ -137,16 +137,24 @@ pub fn perform_program(
             }
         }
     }
+    let began = Instant::now();
     let outcome = job.run(sandbox, deadline);
+    let duration_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
     // What it wrote is hashed again whether it ran well or not.
     let after = captured(sandbox, &work.store);
     if let (Ok(plain), Some((own, tmp)), false) = (&outcome, after, work.reuse == Reuse::Compare)
         && let Ok(result) = stored(plain, &HashMap::new())
     {
         // A record that cannot be written is a program run again.
-        let _ = work
-            .store
-            .put_record(&key, &ExecRecord { result, own, tmp });
+        let _ = work.store.put_record(
+            &key,
+            &ExecRecord {
+                result,
+                own,
+                tmp,
+                duration_ms,
+            },
+        );
     }
     let ran = ProgramRan {
         found: false,

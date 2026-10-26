@@ -44,6 +44,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
+use crate::evict::limit_of;
 use crate::engine::{
     BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed, package_all_observed,
     program_command, query_all, run_script_observed,
@@ -419,6 +420,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         }
     };
     let counts = steps_counted(&outcomes);
+    warn_of_eviction(&outcomes, terminal);
     let mut failed = false;
     for (target, outcome) in targets.iter().zip(&outcomes.targets) {
         match outcome {
@@ -1185,6 +1187,7 @@ fn package_command(
         }
     }
     let _ = writeln!(terminal.out, "{}", steps_counted(&outcomes));
+    warn_of_eviction(&outcomes, terminal);
     if failed {
         ExitCode::FAILURE
     } else {
@@ -1287,6 +1290,17 @@ fn quoted(names: &[&str]) -> String {
     quoted.join(", ")
 }
 
+/// Warns on `terminal` that the store could not be kept within its limit,
+/// if the eviction as `outcomes`' build ended failed: which fails no build.
+fn warn_of_eviction(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
+    if let Some(Err(message)) = &outcomes.evicted {
+        let _ = writeln!(
+            terminal.err,
+            "warning: the store could not be kept within `PEKIT_CACHE_LIMIT`: {message}"
+        );
+    }
+}
+
 /// How many steps ran, how many of their programs were found, and how many
 /// steps were found, as a build shows them.
 fn steps_counted(outcomes: &Outcomes) -> String {
@@ -1306,6 +1320,13 @@ fn steps_counted(outcomes: &Outcomes) -> String {
 /// names none.
 fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -> Option<Settings> {
     let cache = cache_dir();
+    let cache_limit = match limit_of(std::env::var("PEKIT_CACHE_LIMIT").ok().as_deref()) {
+        Ok(limit) => limit,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return None;
+        }
+    };
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
     let strict = shared.allows.strict;
@@ -1365,6 +1386,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         building_for,
         no_dynamic: shared.allows.no_dynamic,
         strict,
+        cache_limit,
     })
 }
 

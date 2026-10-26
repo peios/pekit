@@ -21,6 +21,7 @@
 use std::time::Duration;
 
 use gcsl::eval::fetched_name;
+use serde::{Deserialize, Serialize};
 
 use crate::sandbox::OUTPUTS;
 use crate::store::{Digest, FileEntry, Store};
@@ -70,9 +71,13 @@ pub fn fetch(
     sha256: &str,
 ) -> Result<FileEntry, (String, Option<String>)> {
     let pin = pin_of(url, sha256).map_err(|message| (message, None))?;
-    if let Some(entry) = pin.as_ref().and_then(|pin| store.entry(pin)) {
+    if let Some(pin) = &pin
+        && let Some(entry) = store.entry(pin)
+    {
+        store.note_record(&fetch_key(pin));
         return Ok(entry);
     }
+    let began = std::time::Instant::now();
     let entry = download(store, url).map_err(|reason| {
         (
             format!("`fetch` could not download `{url}`: {reason}"),
@@ -95,8 +100,32 @@ pub fn fetch(
                     .to_owned(),
             ),
         )),
-        Some(_) => Ok(entry),
+        Some(_) => {
+            // What it took, for an eviction to weigh; a record that can't
+            // be written leaves the download first to be evicted.
+            let fetched = Fetched {
+                file: entry,
+                duration_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            };
+            let _ = store.put_record(&fetch_key(&entry.digest), &fetched);
+            Ok(entry)
+        }
     }
+}
+
+/// The record of a download: the file it gave and how long it took, for an
+/// eviction to weigh (see `design/additive.md`, F3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Fetched {
+    /// The file.
+    file: FileEntry,
+    /// How long it took, in milliseconds.
+    duration_ms: u64,
+}
+
+/// The key of the record of a download whose contents' digest is `digest`.
+fn fetch_key(digest: &Digest) -> Digest {
+    Digest::of(format!("pekit-fetch-1\0{}", digest.hex()).as_bytes())
 }
 
 /// Downloads `url` into `store`.

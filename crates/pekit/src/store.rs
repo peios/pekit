@@ -269,6 +269,21 @@ pub struct Store {
     /// Each blob this process linked a file to, by the device and inode it
     /// shares with every link (see [Trees seen before](#trees-seen-before)).
     linked: Arc<Mutex<HashMap<(u64, u64), FileEntry>>>,
+    /// Its lock, held shared for as long as it is open, which an eviction
+    /// takes exclusively (see `crate::evict`).
+    held: Arc<File>,
+    /// What it was used for since it was opened: each record found or
+    /// written, by its key, and each scratch directory held, by its name.
+    used: Arc<Mutex<Used>>,
+}
+
+/// What a store was used for (see [`Store::used`]).
+#[derive(Debug, Default)]
+pub struct Used {
+    /// Each record found or written, by its key.
+    pub records: HashSet<Digest>,
+    /// Each scratch directory held, by its name.
+    pub scratch: HashSet<String>,
 }
 
 impl Store {
@@ -282,9 +297,63 @@ impl Store {
         for part in ["cas", "records", "tmp"] {
             fs::create_dir_all(root.join(part))?;
         }
+        let held = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("lock"))?;
+        // An eviction running elsewhere is waited for.
+        held.lock_shared()?;
         Ok(Self {
             root: root.to_path_buf(),
             linked: Arc::default(),
+            held: Arc::new(held),
+            used: Arc::default(),
+        })
+    }
+
+    /// The store's lock, which this process holds shared while the store is
+    /// open.
+    #[must_use]
+    pub fn held(&self) -> &File {
+        &self.held
+    }
+
+    /// Notes that the scratch directory `name` was held.
+    pub fn note_scratch(&self, name: &str) {
+        if let Ok(mut used) = self.used.lock() {
+            used.scratch.insert(name.to_owned());
+        }
+    }
+
+    /// Notes that the record `key` was found or written.
+    pub fn note_record(&self, key: &Digest) {
+        if let Ok(mut used) = self.used.lock() {
+            used.records.insert(*key);
+        }
+    }
+
+    /// What the store was used for since it was opened, or since this was
+    /// last asked, which it forgets.
+    #[must_use]
+    pub fn used(&self) -> Used {
+        self.used
+            .lock()
+            .map(|mut used| std::mem::take(&mut *used))
+            .unwrap_or_default()
+    }
+
+    /// Whether the store holds every content of the tree `digest`, at any
+    /// depth.
+    #[must_use]
+    pub fn holds_tree(&self, digest: &Digest) -> bool {
+        let Ok(tree) = self.read_tree(digest) else {
+            return false;
+        };
+        tree.entries.iter().all(|entry| match entry {
+            TreeEntry::File { file, .. } => self.has(&file.digest),
+            TreeEntry::Dir { tree, .. } => self.holds_tree(tree),
+            TreeEntry::Link { .. } => true,
         })
     }
 
@@ -774,9 +843,11 @@ impl Store {
     /// That it cannot be read, or is no `T`.
     pub fn record<T: for<'a> Deserialize<'a>>(&self, receipt: &Digest) -> io::Result<Option<T>> {
         match fs::read(self.record_path(receipt)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(io::Error::other),
+            Ok(bytes) => {
+                let record = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                self.note_record(receipt);
+                Ok(Some(record))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -799,6 +870,8 @@ impl Store {
         out.write_all(&bytes)?;
         out.sync_all()?;
         drop(out);
-        fs::rename(temp, target)
+        fs::rename(temp, target)?;
+        self.note_record(receipt);
+        Ok(())
     }
 }

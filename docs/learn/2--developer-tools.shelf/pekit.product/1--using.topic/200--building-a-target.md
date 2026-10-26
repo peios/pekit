@@ -100,6 +100,22 @@ again.
 The store is in pekit's cache directory: `$PEKIT_CACHE_DIR` if you set
 it, else `pekit` under `$XDG_CACHE_HOME`, else `~/.cache/pekit`.
 
+### How large the store grows
+
+Every workspace on a machine shares one store, so its size is the
+machine's to set: `PEKIT_CACHE_LIMIT`, such as `20GiB` or `500MB`. It's
+50 GiB if you don't set it, and `0` means no limit. When a build ends
+with the store over its limit, pekit evicts until the store is under
+nine tenths of it, removing first what is cheapest to make again for
+the space it takes, and of that, what was used longest ago. A large file
+that took a second to make goes before a small one that took a minute.
+
+Eviction removes contents, not records. A step whose outputs were
+evicted is no longer found in the store: it runs again and puts them
+back. Scratch directories are evicted the same way, never while a build
+is using one. A build evicts nothing while another pekit process is
+using the store; a later build does instead.
+
 `--rebuild` runs every step again, reusing nothing from the store, and
 records each as it goes.
 

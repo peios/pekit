@@ -93,6 +93,13 @@ impl Scratch {
         &self.dir
     }
 
+    /// Its name in the store, if it is the one kept between the step's runs.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.lock.as_ref()?;
+        self.dir.file_name()?.to_str()
+    }
+
     /// Whether it is the one kept between the step's runs.
     #[must_use]
     pub fn kept(&self) -> bool {

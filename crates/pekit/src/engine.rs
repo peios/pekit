@@ -55,6 +55,7 @@ use gcsl::workspace::{Given, InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
+use crate::evict::{Evicted, evict};
 use crate::fetch::IN_A_STEP;
 use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
@@ -227,6 +228,9 @@ pub struct Settings {
     /// and the build's outputs, and nothing else (see [Building](#building)).
     /// The host tools a step borrows are the caller's to leave out.
     pub strict: bool,
+    /// How large the store may be, in bytes, as the build ends: none if it
+    /// may be as large as it likes (see [Eviction](crate::evict#eviction)).
+    pub cache_limit: Option<u64>,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -283,6 +287,10 @@ pub struct Outcomes {
     /// Each step that, with [`Reuse::Compare`], gave another result than
     /// its record holds for the same receipt.
     pub mismatches: Vec<Mismatch>,
+    /// What the store's eviction did as the build ended, if it was asked
+    /// to: nothing, if it was not over its limit or another process had
+    /// it; or why it failed, which fails no build.
+    pub evicted: Option<Result<Option<Evicted>, String>>,
 }
 
 /// A step that gave another result than its record holds for the same
@@ -565,7 +573,11 @@ fn build_roots(
         };
         outcomes.push(outcome);
     }
+    let evicted = settings.cache_limit.map(|limit| {
+        evict(&run.store, &run.store.used(), limit).map_err(|error| error.to_string())
+    });
     Ok(Outcomes {
+        evicted,
         targets: outcomes,
         ran: run.ran,
         cached: run.cached,
@@ -1884,8 +1896,11 @@ impl Run<'_> {
         };
         let mut given: Vec<(String, Kept)> = Vec::new();
         let base = self.receipt_of(&keyed, &[], Some(&mut given))?;
+        // A record whose contents were evicted is no hit: the step runs
+        // again and puts them back.
         let found = if self.settings.reuse == Reuse::Store {
             self.looked_up(&keyed, &base)?
+                .filter(|record| self.holds_all(&record.result))
         } else {
             None
         };
@@ -1951,6 +1966,14 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Whether the store holds every file and directory `stored` names.
+    fn holds_all(&self, stored: &Stored) -> bool {
+        stored.files().into_iter().all(|(_, kept)| match kept {
+            Kept::File(entry) => self.store.has(&entry.digest),
+            Kept::Dir(tree) => self.store.holds_tree(&tree),
+        })
+    }
+
     /// The scratch directory of the step `id`, named `name`, whose own
     /// output directory is `own`, if `attributes` mark it `#[scratch]` (see
     /// [Scratch directories](crate::scratch#scratch-directories)).
@@ -1968,14 +1991,18 @@ impl Run<'_> {
                 .scratch
                 .join(format!("kept-{}-{}", std::process::id(), id.number()));
         let platform = &self.settings.platform;
-        Scratch::of(
+        let scratch = Scratch::of(
             self.store.root(),
             (platform, own),
             &fresh,
             self.settings.strict,
-        )
-        .map(Some)
-        .map_err(|error| {
+        );
+        if let Ok(scratch) = &scratch
+            && let Some(name) = scratch.name()
+        {
+            self.store.note_scratch(name);
+        }
+        scratch.map(Some).map_err(|error| {
             engine(&format!(
                 "cannot give `{name}` its scratch directory: {error}"
             ))
