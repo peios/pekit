@@ -23,6 +23,7 @@ pub mod receipt;
 pub mod record;
 pub mod release;
 pub mod sandbox;
+pub mod scratch;
 pub mod store;
 pub mod target;
 pub mod trace;

@@ -66,6 +66,7 @@ use crate::receipt::{ReceiptOf, receipt};
 use crate::record::{
     Kept, Manifest, StepRecord, StoreError, Stored, differences, keep_files, manifest_key, stored,
 };
+use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Store, TreeEntry};
 use crate::target::Target;
@@ -867,6 +868,13 @@ fn devices_of(attributes: &[Attribute]) -> Result<Vec<PathBuf>, String> {
     Ok(devices)
 }
 
+/// Whether a step of `attributes` is marked `#[scratch]`.
+fn wants_scratch(attributes: &[Attribute]) -> bool {
+    attributes
+        .iter()
+        .any(|attribute| attribute.id.name() == "scratch")
+}
+
 /// No deferred call is a step: what runs in a step's own unit, inline.
 fn inline(_: &[Attribute]) -> bool {
     false
@@ -875,6 +883,18 @@ fn inline(_: &[Attribute]) -> bool {
 /// A secret file a step is given: its path as the step sees it, and where
 /// it is on the host (see [Secrets](crate::keychain#secrets)).
 type SecretFile = (String, PathBuf);
+
+/// What a step's sandbox is made with, for each attempt.
+struct Staging<'a> {
+    /// Its inputs, by logical path, to stage.
+    given: &'a [(String, Kept)],
+    /// Its secret files, to bind.
+    secrets: &'a [SecretFile],
+    /// Its devices, to bind.
+    devices: &'a [PathBuf],
+    /// Its scratch directory, on the host, to bind, if it has one.
+    scratch: Option<&'a Path>,
+}
 
 /// A step the engine is running (see [Building](#building)).
 struct StepRun {
@@ -905,6 +925,9 @@ struct StepRun {
     failed_once: bool,
     /// The effect its unit stopped for, if it did.
     waiting: Option<NodeId>,
+    /// Its scratch directory, if it is marked `#[scratch]`, held for as long
+    /// as it runs (see [Scratch directories](crate::scratch#scratch-directories)).
+    scratch: Option<Scratch>,
     /// What its attempt's programs are keyed by (see `design/additive.md`,
     /// F1).
     programs: Programs,
@@ -1886,7 +1909,19 @@ impl Run<'_> {
         let secrets = self
             .secret_files(inputs.args.iter().chain(&inputs.captures))
             .map_err(BuildError::Engine)?;
-        let sandbox = self.fresh_sandbox(id, &own, 0, (&given, &secrets, &devices), &keyed)?;
+        let scratch = self.scratch_of(id, (&name, &own), &inputs.attributes)?;
+        let sandbox = self.fresh_sandbox(
+            id,
+            &own,
+            0,
+            &Staging {
+                given: &given,
+                secrets: &secrets,
+                devices: &devices,
+                scratch: scratch.as_ref().map(Scratch::dir),
+            },
+            &keyed,
+        )?;
         let started = Instant::now();
         let programs = Programs::starting((&self.settings.platform, &own), &given);
         self.steps.insert(
@@ -1897,6 +1932,7 @@ impl Run<'_> {
                 given,
                 secrets,
                 devices,
+                scratch,
                 attempt: 0,
                 keyed,
                 base,
@@ -1915,15 +1951,46 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// The scratch directory of the step `id`, named `name`, whose own
+    /// output directory is `own`, if `attributes` mark it `#[scratch]` (see
+    /// [Scratch directories](crate::scratch#scratch-directories)).
+    fn scratch_of(
+        &self,
+        id: NodeId,
+        (name, own): (&str, &str),
+        attributes: &[Attribute],
+    ) -> Result<Option<Scratch>, BuildError> {
+        if !wants_scratch(attributes) {
+            return Ok(None);
+        }
+        let fresh =
+            self.settings
+                .scratch
+                .join(format!("kept-{}-{}", std::process::id(), id.number()));
+        let platform = &self.settings.platform;
+        Scratch::of(
+            self.store.root(),
+            (platform, own),
+            &fresh,
+            self.settings.strict,
+        )
+        .map(Some)
+        .map_err(|error| {
+            engine(&format!(
+                "cannot give `{name}` its scratch directory: {error}"
+            ))
+        })
+    }
+
     /// A new sandbox for the attempt `attempt` of the step `id`, whose own
     /// output directory is `own`, `<target>/<step>` under `/pekit-out`,
-    /// staged with `given`; nothing left behind if it cannot be made.
+    /// staged as `staging` says; nothing left behind if it cannot be made.
     fn fresh_sandbox(
         &self,
         id: NodeId,
         own: &str,
         attempt: u32,
-        (given, secrets, devices): (&[(String, Kept)], &[SecretFile], &[PathBuf]),
+        staging: &Staging<'_>,
         keyed: &Keyed,
     ) -> Result<Arc<StepSandbox>, BuildError> {
         let stage = self.stage_dir(id, attempt);
@@ -1934,8 +2001,9 @@ impl Run<'_> {
             let sandbox = StepSandbox::new(&stage, own)
                 .map_err(|error| engine(&error))?
                 .with_host(&self.settings.host_tools)
-                .with_secrets(secrets.to_vec())
-                .with_devices(devices.to_vec())
+                .with_secrets(staging.secrets.to_vec())
+                .with_devices(staging.devices.to_vec())
+                .with_scratch(staging.scratch.map(Path::to_path_buf))
                 .with_contexts(
                     keyed
                         .contexts
@@ -1947,7 +2015,7 @@ impl Run<'_> {
             // Each directory before what is in it, which it stages: so a
             // file of a staged directory is as the directory's tree has it, a
             // symbolic link a link, not the file it leads to.
-            let mut ordered: Vec<&(String, Kept)> = given.iter().collect();
+            let mut ordered: Vec<&(String, Kept)> = staging.given.iter().collect();
             ordered.sort_by(|a, b| a.0.cmp(&b.0));
             let mut dirs: Vec<&str> = Vec::new();
             for (path, kept) in ordered {
@@ -2377,7 +2445,12 @@ impl Run<'_> {
             id,
             &own,
             attempt,
-            (&step.given, &step.secrets, &step.devices),
+            &Staging {
+                given: &step.given,
+                secrets: &step.secrets,
+                devices: &step.devices,
+                scratch: step.scratch.as_ref().map(Scratch::dir),
+            },
             &step.keyed,
         )?;
         self.graph.forget_unit(STEP_UNITS + id.number());

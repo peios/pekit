@@ -53,6 +53,7 @@ use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 use crate::layers::{Layers, Overlay};
 use crate::record::Kept;
 use crate::keychain::{IN_A_STEP, Keychain};
+use crate::scratch::SCRATCH;
 use crate::store::{Seen, Store};
 
 /// The workspace's root in the logical layout.
@@ -136,7 +137,7 @@ enum Root {
 fn sandboxed(
     root: &Root,
     command: &Command,
-    (isolation, devices): (Isolation, &[PathBuf]),
+    (isolation, devices, scratch): (Isolation, &[PathBuf], Option<&Path>),
 ) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
     let mut wrapped = Command::new(bwrap()?);
@@ -158,6 +159,9 @@ fn sandboxed(
     wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
     for device in devices {
         wrapped.arg("--dev-bind").arg(device).arg(device);
+    }
+    if let Some(scratch) = scratch {
+        wrapped.arg("--bind").arg(scratch).arg(SCRATCH);
     }
     wrapped.args(["--chdir", cwd.as_deref().unwrap_or("/")]);
     wrapped.arg("--clearenv");
@@ -255,8 +259,9 @@ impl Effects for HostView {
 
     fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
         Some(
-            self.host_path(root)
-                .and_then(|root| sandboxed(&Root::Dir(root), &command, (Isolation::Plain, &[]))),
+            self.host_path(root).and_then(|root| {
+                sandboxed(&Root::Dir(root), &command, (Isolation::Plain, &[], None))
+            }),
         )
     }
 
@@ -333,6 +338,9 @@ pub struct StepSandbox {
     /// The devices bound into it, and into the sandboxes it makes, each where
     /// it is on the host.
     devices: Vec<PathBuf>,
+    /// Its scratch directory, on the host, if it is marked `#[scratch]`
+    /// (see [Scratch directories](crate::scratch#scratch-directories)).
+    scratch: Option<PathBuf>,
     /// What each context it can read gives it once it reads it, by the
     /// context's key, and the store they are staged from (see
     /// `design/engine.md`, R3).
@@ -391,6 +399,7 @@ impl StepSandbox {
             layers,
             secrets: Mutex::new(Vec::new()),
             devices: Vec::new(),
+            scratch: None,
             pending: Mutex::new(HashMap::new()),
             store: None,
             staged: Mutex::new(Vec::new()),
@@ -480,6 +489,14 @@ impl StepSandbox {
         self
     }
 
+    /// The sandbox with the scratch directory at `scratch` on the host
+    /// bound at [`SCRATCH`], into it and the sandboxes it makes.
+    #[must_use]
+    pub fn with_scratch(mut self, scratch: Option<PathBuf>) -> Self {
+        self.scratch = scratch;
+        self
+    }
+
     /// The sandbox borrowing the host tools `tools`, which makes the step
     /// not hermetic.
     #[must_use]
@@ -558,6 +575,9 @@ impl Effects for StepSandbox {
             .arg("--bind")
             .arg(self.stage.join("tmp"))
             .arg("/tmp");
+        if let Some(scratch) = &self.scratch {
+            wrapped.arg("--bind").arg(scratch).arg(SCRATCH);
+        }
         wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
         for device in &self.devices {
             wrapped.arg("--dev-bind").arg(device).arg(device);
@@ -595,7 +615,7 @@ impl Effects for StepSandbox {
         Some(sandboxed(
             &root,
             &command,
-            (Isolation::Hermetic, &self.devices),
+            (Isolation::Hermetic, &self.devices, self.scratch.as_deref()),
         ))
     }
 
@@ -662,6 +682,9 @@ impl Effects for StepSandbox {
         }
         if let Some(rest) = under(path, "/tmp") {
             return Ok(self.stage.join("tmp").join(rest));
+        }
+        if let (Some(scratch), Some(rest)) = (&self.scratch, under(path, SCRATCH)) {
+            return Ok(scratch.join(rest));
         }
         let secrets = self
             .secrets

@@ -326,6 +326,35 @@ part of the step's key, and on a machine without it the step runs
 anyway, more slowly if the program falls back to emulation. `kvm` is the
 only device pekit gives: asking for another fails the step.
 
+## Scratch directories
+
+Some tools do much less on a second run if they keep state between
+runs: a compiler cache, Cargo's target directory, or the kernel's build
+tree. A step marked `#[scratch]` sees a directory of its own at
+`/pekit-scratch` that's kept between its runs:
+
+```text
+#[scratch]
+#[hermetic]
+fn kernel(src: Dir, config: File) -> File { ... }
+```
+
+The directory is the step's, for its target and platform, whatever its
+inputs, and it's no part of the step's key. So a step must give exactly
+what it would give with an empty directory: use it only for state that
+saves time, never for anything that changes the result. Pekit relies on
+this:
+
+- A strict build gives the step an empty directory every time, so what
+  it releases depends on nothing a scratch directory kept.
+- When another build is running the same step at the same time, this
+  run gets an empty directory of its own rather than waiting.
+- A program found in the store, as [Programs found in a step that
+  runs](#programs-found-in-a-step-that-runs) describes, leaves the
+  directory as it is.
+
+`pekit clean --cache` removes the scratch directories with the store.
+
 ## Strict builds
 
 `--strict` builds as a release should: from what the workspace pins, and

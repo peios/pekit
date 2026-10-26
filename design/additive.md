@@ -111,9 +111,27 @@ directory and its name, whatever its inputs, and it keys nothing: a step
 must give what it would give with an empty one, a contract it keeps, as
 Bazel's persistent workers keep theirs. It is bound from
 outside the step's own directory and its `/tmp`, so that F1's programs
-neither capture nor put it back. Two builds running one step at once
-take turns with it, by a lock. A strict build gives each run an empty one,
-so a release depends on nothing a scratch directory kept.
+neither capture nor put it back. Two runs of one step at once don't
+share it: one holds it by a lock, and the other is given an empty one of
+its own, which the contract allows, so that no run waits. A strict build
+gives each run an empty one, so a release depends on nothing a scratch
+directory kept.
+
+### F2 as built
+
+- **Where:** `<store>/scratch/<digest>`, the digest of the platform and
+  the step's directory under `/pekit-out` (its target's and its name), and
+  a lock file beside it, held with `File::try_lock` for as long as the
+  step runs, through its retries, and touched when taken, for F3's
+  eviction to go by. `pekit clean --cache` removes them with the store.
+  Keying by the platform as well keeps two architectures' builds from
+  thrashing one directory, though either would be correct.
+- **An empty one:** under the build's scratch directory, removed when
+  the step's run ends.
+- **Bound:** at `/pekit-scratch` in the step's sandbox and in the
+  sandboxes it makes, and named so to the step's own effects.
+- **Asked for only to run:** a step found in the store takes no lock.
+- **Tests:** `tests/scratch.rs`.
 
 ## F3. Eviction by GreedyDual-Size
 
