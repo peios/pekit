@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -69,7 +70,7 @@ use crate::record::{
 };
 use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
-use crate::store::{Digest, Store, TreeEntry};
+use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
 use crate::target::Target;
 
 mod programs;
@@ -573,6 +574,8 @@ fn build_roots(
         };
         outcomes.push(outcome);
     }
+    // A stamp cache that can't be kept is a workspace read again next time.
+    let _ = keep_workspace_stamps(&run.store, &run.loaded.root, &run.workspace_seen.0);
     let evicted = settings.cache_limit.map(|limit| {
         evict(&run.store, &run.store.used(), limit).map_err(|error| error.to_string())
     });
@@ -632,6 +635,10 @@ fn new_run<'a>(
     events: &'a mut dyn FnMut(&Event),
 ) -> Result<Run<'a>, BuildError> {
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
+    let workspace_seen = (
+        workspace_stamps(&store, &loaded.root),
+        clock_beside(&loaded.root.join(".pekit")).map_err(|error| engine(&error))?,
+    );
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;
     let keychain = Arc::new(Keychain::open(&settings.state).map_err(|error| {
         engine(&format!(
@@ -675,6 +682,7 @@ fn new_run<'a>(
         ran: 0,
         cached: 0,
         programs_found: 0,
+        workspace_seen,
         flaky: Vec::new(),
         reports: Vec::new(),
         mismatches: Vec::new(),
@@ -782,6 +790,39 @@ fn root_fields(loaded: &Loaded) -> Vec<RootField<'static>> {
         }
     }
     fields
+}
+
+/// Where the store keeps the stamps of the workspace at `root`'s files.
+fn stamps_path(store: &Store, root: &Path) -> PathBuf {
+    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
+    store.root().join("seen").join(format!("{name}.json"))
+}
+
+/// The stamps of the workspace at `root`'s files as the last build kept
+/// them, or none.
+fn workspace_stamps(store: &Store, root: &Path) -> Seen {
+    fs::read(stamps_path(store, root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps `seen`, the stamps of the workspace at `root`'s files, but of those
+/// that are no longer there, for the next build.
+///
+/// # Errors
+///
+/// That the store cannot be written.
+fn keep_workspace_stamps(store: &Store, root: &Path, seen: &Seen) -> io::Result<()> {
+    let mut kept = seen.clone();
+    kept.retain_present();
+    let path = stamps_path(store, root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temp, serde_json::to_vec(&kept).map_err(io::Error::other)?)?;
+    fs::rename(&temp, &path)
 }
 
 /// An engine error from an I/O failure.
@@ -1025,6 +1066,10 @@ struct Run<'a> {
     cached: usize,
     /// How many programs the steps that ran found in the store.
     programs_found: usize,
+    /// What each workspace file was when it was last put into the store, kept
+    /// between builds, and when this build began, by the workspace's file
+    /// system's clock (see `design/additive.md`, F4).
+    workspace_seen: (Seen, (i64, i64)),
     /// The steps that passed only on a retry, by name.
     flaky: Vec<String>,
     /// What became of each step that was found in the store or passed.
@@ -2128,18 +2173,22 @@ impl Run<'_> {
                  workspace's files and other steps' outputs"
             ));
         };
+        // Read only if it changed since a build last put it in the store.
         let host = self.loaded.root.join(rest);
+        let (seen, now) = &mut self.workspace_seen;
+        let unreadable = |error: io::Error| format!("cannot read `{path}`: {error}");
         let kept = if dir {
-            Kept::Dir(
-                self.store
-                    .put_tree(&host)
-                    .map_err(|error| format!("cannot read `{path}`: {error}"))?,
-            )
+            let never = |_: &Path, _: &fs::Metadata| false;
+            let tree = self
+                .store
+                .put_tree_seen_at(&host, (seen, *now), &never)
+                .map_err(unreadable)?;
+            Kept::Dir(tree.ok_or_else(|| format!("cannot read `{path}`"))?)
         } else {
             Kept::File(
                 self.store
-                    .put_file(&host)
-                    .map_err(|error| format!("cannot read `{path}`: {error}"))?,
+                    .put_file_seen_at(&host, (seen, *now))
+                    .map_err(unreadable)?,
             )
         };
         self.outputs.insert(path.to_owned(), kept);

@@ -210,6 +210,22 @@ target that waited for a step's result is cached with that result in its
 key. Workspace files are hashed through a cache of their size, change time
 and inode, so that an unchanged workspace is stat'ed, not read.
 
+### F4, first part, as built: workspace files by their stamps
+
+- A build hashes each workspace file a step is given through the stamps
+  F1's per-program caching keeps (`Seen`), kept between builds in the
+  store, `seen/<digest of the workspace's path>.json`. A file whose stamp,
+  device, inode, size, mode and modification and change times, is as it
+  was is not read, nor copied into the store again; its blob must still
+  be there, so an eviction makes it read.
+- One clock probe per build, a file made and removed in the workspace's
+  root as the build begins, says when it began by the workspace's own file
+  system's clock; a stamp is kept only for a file last changed before it.
+  A file changed afterwards, even to the same size with its modification
+  time put back, has a later change time, so it is read again.
+- As a build ends, the stamps of files no longer there are dropped.
+- **Tests:** `tests/stamps.rs`.
+
 ## F5. The remote cache over REAPI
 
 Bazel's Remote Execution API is spoken, so existing servers work:

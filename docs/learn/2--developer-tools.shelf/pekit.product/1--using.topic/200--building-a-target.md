@@ -59,7 +59,10 @@ built app/hello: 0 steps run, 1 found in the store
 ```
 
 Change a file a step reads, and that step runs again, along with each
-step that depends on what it gives. A step whose result holds a secret
+step that depends on what it gives. Pekit tells a changed file by its
+contents, not its times, but reads only a file whose size, times or
+inode have changed since the last build, so an unchanged workspace isn't
+read again. A step whose result holds a secret
 is never recorded, so it runs every time.
 
 Of the context a step is called in, only what it read as it ran keys it.

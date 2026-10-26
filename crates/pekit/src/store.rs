@@ -56,7 +56,7 @@ use sha2::{Digest as _, Sha256};
 /// What a file was when it was put into the store (see [Trees seen
 /// before](#trees-seen-before)): its device and inode, size, mode, and the
 /// times it was modified and changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     /// Its device and inode.
     node: (u64, u64),
@@ -87,13 +87,15 @@ impl Stamp {
 /// What each file was when it was last put into the store, by its path,
 /// and the digests of the directories that cannot change, while they can't
 /// (see [Trees seen before](#trees-seen-before)).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Seen {
     /// Each file's stamp, and what the store keeps of it.
     files: HashMap<PathBuf, (Stamp, FileEntry)>,
     /// The directories that cannot change.
+    #[serde(skip)]
     fixed: Vec<PathBuf>,
     /// The digest of each of them put, by its path.
+    #[serde(skip)]
     dirs: HashMap<PathBuf, Digest>,
 }
 
@@ -104,10 +106,30 @@ impl Seen {
         self.fixed = fixed;
     }
 
+    /// Forgets each file that is no longer there.
+    pub fn retain_present(&mut self) {
+        self.files.retain(|path, _| path.exists());
+    }
+
     /// Says that the directories said to be fixed could have changed.
     pub fn changed(&mut self) {
         self.dirs.clear();
     }
+}
+
+/// Now, as the clock of the file system `path` is on tells it, as coarsely
+/// as that file system keeps times: the change time of a file made beside
+/// it, and removed.
+///
+/// # Errors
+///
+/// That no file can be made beside it.
+pub fn clock_beside(path: &Path) -> io::Result<(i64, i64)> {
+    let probe = path.with_file_name(format!(".pekit-probe-{}", std::process::id()));
+    File::create(&probe)?;
+    let now = fs::symlink_metadata(&probe).map(|meta| (meta.ctime(), meta.ctime_nsec()));
+    fs::remove_file(&probe)?;
+    now
 }
 
 /// A walk of a tree being put into the store by [`Store::put_tree_seen`].
@@ -617,17 +639,23 @@ impl Store {
         seen: &mut Seen,
         refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
     ) -> io::Result<Option<Digest>> {
-        // Now, as the clock of the file system the tree is on tells it, as
-        // coarsely as that file system keeps times.
-        let probe = path.with_file_name(format!(".pekit-probe-{}", std::process::id()));
-        File::create(&probe)?;
-        let now = fs::symlink_metadata(&probe).map(|meta| (meta.ctime(), meta.ctime_nsec()));
-        fs::remove_file(&probe)?;
-        let mut walk = Walk {
-            seen,
-            refuse,
-            now: now?,
-        };
+        let now = clock_beside(path)?;
+        self.put_tree_seen_at(path, (seen, now), refuse)
+    }
+
+    /// [`Store::put_tree_seen`], the put begun at `now`, by the clock of the
+    /// file system the tree is on ([`clock_beside`]).
+    ///
+    /// # Errors
+    ///
+    /// That something under `path` cannot be read, or the store written.
+    pub fn put_tree_seen_at(
+        &self,
+        path: &Path,
+        (seen, now): (&mut Seen, (i64, i64)),
+        refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
+    ) -> io::Result<Option<Digest>> {
+        let mut walk = Walk { seen, refuse, now };
         let meta = fs::symlink_metadata(path)?;
         if refuse(path, &meta) {
             return Ok(None);
@@ -676,6 +704,30 @@ impl Store {
         }
         entries.sort_by(|a, b| a.name().cmp(b.name()));
         self.put_tree_of(&Tree { entries }).map(Some)
+    }
+
+    /// [`Store::put_file`], reading the file only if `seen` does not know it
+    /// unchanged, the put begun at `now`, by the clock of the file system the
+    /// file is on ([`clock_beside`]) (see [Trees seen
+    /// before](#trees-seen-before)).
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be read, or the store written.
+    pub fn put_file_seen_at(
+        &self,
+        path: &Path,
+        (seen, now): (&mut Seen, (i64, i64)),
+    ) -> io::Result<FileEntry> {
+        let meta = fs::metadata(path)?;
+        let never = |_: &Path, _: &fs::Metadata| false;
+        let mut walk = Walk {
+            seen,
+            refuse: &never,
+            now,
+        };
+        self.file_seen(path, &meta, &mut walk)?
+            .ok_or_else(|| io::Error::other("refused"))
     }
 
     /// The file at `path`, of metadata `meta`, put into the store, unread if
