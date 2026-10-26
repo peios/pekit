@@ -458,6 +458,53 @@ fn check_reproducible_builds_with_a_toolchain_its_definition_unpacked() {
 }
 
 #[test]
+fn a_step_failing_in_a_library_is_reported_at_the_workspace_s_call() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                ".gcsl/libraries/github.com/x/tools/tools.gcsl",
+                "#[hermetic]\n\
+                 fn fails() -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"echo broken >&2; exit 3\"])\n\
+                 \x20   = file(\"out\")\n\
+                 }\n\
+                 def make() -> File { fails() }\n",
+            ),
+            (
+                "app/build.gcsl",
+                "import \"github.com/x/tools\"\n\
+                 #[hermetic]\n\
+                 fn own() -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"exit 4\"])\n\
+                 \x20   = file(\"out\")\n\
+                 }\n\
+                 def build lib() { = tools.make() }\n\
+                 def build mine() { = own() }\n",
+            ),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    // At the build file's call into the library, the library's line a
+    // label, what the program said a note.
+    let (_, err) = printed(&pekit(&app, cache.path(), &["build", "lib"]));
+    assert!(err.contains("--> build.gcsl:7:21"), "{err}");
+    assert!(err.contains("= tools.make()"), "{err}");
+    assert!(
+        err.contains(".gcsl/libraries/github.com/x/tools/tools.gcsl:3:13"),
+        "{err}"
+    );
+    assert!(err.contains("failed here, in library code"), "{err}");
+    assert!(err.contains("broken"), "{err}");
+    // A step of the workspace's own fails where it always did.
+    let (_, err) = printed(&pekit(&app, cache.path(), &["build", "mine"]));
+    assert!(err.contains("--> build.gcsl:4:13"), "{err}");
+}
+
+#[test]
 fn a_strict_build_runs_no_target_effect_but_reads_and_borrows_no_host_tool() {
     let dir = tempfile::tempdir().unwrap();
     let text = format!(

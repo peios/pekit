@@ -33,7 +33,8 @@ on Acta task PEI-1594, and implementation is tracked on PEI-1595.
     `gcsl` at `local/worktrees/gcsl-1595/`, made from `main` at `72edfde`.
     Jack had it merged into GCSL's `main` at `185a924` on 2026-10-26, and
     pekit2 now builds against the `gcsl` checkout itself. Further GCSL work
-    goes on a new branch in a worktree of its own.
+    goes on a new branch in a worktree of its own, which pekit2 builds
+    against while it is open, and against `gcsl` again once it is merged.
   - Never push, never rebase, and never merge a GCSL branch into its `main`
     unless Jack says to. Jack reviews and merges.
 - **Leave `pekit` and `pkgs` alone.** Both are on `feat/1593-modsig`. Today's
