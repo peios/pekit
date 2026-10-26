@@ -131,3 +131,52 @@ fn an_entry_that_would_leave_the_directory_fails_the_unpacking() {
     );
     assert!(error.contains("passes through a link"), "{error}");
 }
+
+/// A zip archive, compressed, of the directory `top`, `top/a.txt`, the
+/// executable `top/run.sh`, `top/sub/b.txt`, the symbolic link `top/link` to
+/// `a.txt`, and `extra`, as a wheel is made.
+fn zip_of(extra: &[(&str, &str)]) -> Vec<u8> {
+    use zip::write::SimpleFileOptions;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    writer.add_directory("top/", options).unwrap();
+    for (path, text, mode) in [
+        ("top/a.txt", "a\n", 0o644),
+        ("top/run.sh", "#!/bin/sh\n", 0o755),
+        ("top/sub/b.txt", "b\n", 0o644),
+    ] {
+        writer
+            .start_file(path, options.unix_permissions(mode))
+            .unwrap();
+        writer.write_all(text.as_bytes()).unwrap();
+    }
+    writer.add_symlink("top/link", "a.txt", options).unwrap();
+    for (path, text) in extra {
+        writer.start_file(*path, options).unwrap();
+        writer.write_all(text.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+#[test]
+fn a_zip_archive_unpacks_as_a_tar_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    fs::write(dir.path().join("archive.zip"), zip_of(&[])).unwrap();
+    let entry = store.put_file(&dir.path().join("archive.zip")).unwrap();
+    let tree = unpack(&store, (&entry, "archive.zip"), 1, dir.path()).unwrap();
+    let at = dir.path().join("out");
+    store.copy_tree(&tree, &at).unwrap();
+    assert_eq!(fs::read_to_string(at.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(fs::read_to_string(at.join("sub/b.txt")).unwrap(), "b\n");
+    let mode = |name: &str| fs::metadata(at.join(name)).unwrap().permissions().mode();
+    assert_ne!(mode("run.sh") & 0o111, 0);
+    assert_eq!(mode("a.txt") & 0o111, 0);
+    assert_eq!(fs::read_link(at.join("link")).unwrap(), Path::new("a.txt"));
+    // An entry that would leave the directory fails it.
+    fs::write(dir.path().join("bad.zip"), zip_of(&[("../escape", "x")])).unwrap();
+    let bad = store.put_file(&dir.path().join("bad.zip")).unwrap();
+    let error = unpack(&store, (&bad, "bad.zip"), 0, dir.path()).unwrap_err();
+    assert!(error.contains("bad.zip"), "{error}");
+    assert!(!dir.path().join("escape").exists());
+}

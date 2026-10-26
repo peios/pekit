@@ -9,8 +9,8 @@
 //! any machine that shares the store. Its directory is
 //! `/pekit-out/.unpack/<key>`, fixed by what it holds.
 //!
-//! The archive is read as gzip, xz, bzip2 or zstd by its first bytes, or as
-//! a plain tar. Each entry's path has its first `strip` components left off,
+//! The archive is read as a zip by its first bytes, as a wheel or a jar is,
+//! else as gzip, xz, bzip2 or zstd, or as a plain tar. Each entry's path has its first `strip` components left off,
 //! an entry with no more left out, as `tar --strip-components` does. An
 //! entry whose path would leave the directory, being absolute, holding `..`,
 //! or passing through a symbolic link the archive made, fails the unpacking:
@@ -169,7 +169,61 @@ fn through_link(dir: &Path, path: &Path) -> bool {
 
 /// Unpacks the archive `archive` from `store` into `dir`, the first `strip`
 /// components of each path left off (see [Unpacking](#unpacking)).
+/// Whether the file at `path` begins as a zip archive does: a local file's
+/// header, or the end of an empty archive's directory.
+fn is_zip(path: &Path) -> bool {
+    let mut start = [0u8; 4];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut start))
+        .is_ok_and(|()| matches!(&start, b"PK\x03\x04" | b"PK\x05\x06"))
+}
+
+/// Unpacks the zip archive at `path` into `dir`, as [`extract`] unpacks a
+/// tar: the first `strip` components of each path left off, nothing written
+/// outside `dir`, a symbolic link kept, and of each file's mode only whether
+/// it is executable.
+fn extract_zip(path: &Path, strip: u32, dir: &Path) -> Result<(), String> {
+    const KIND: u32 = 0o170_000;
+    const LINK: u32 = 0o120_000;
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(|error| error.to_string())?;
+        let name = PathBuf::from(entry.name().map_err(|error| error.to_string())?.as_ref());
+        let Some(relative) = stripped(&name, strip)? else {
+            continue;
+        };
+        if through_link(dir, &relative) {
+            return Err(format!(
+                "it holds `{}`, which passes through a link it made",
+                name.display()
+            ));
+        }
+        let target = dir.join(&relative);
+        let io = |error: io::Error| format!("`{}`: {error}", name.display());
+        fs::create_dir_all(target.parent().unwrap_or(dir)).map_err(io)?;
+        let mode = entry.unix_mode().unwrap_or(0o644);
+        if entry.is_dir() {
+            fs::create_dir_all(&target).map_err(io)?;
+        } else if mode & KIND == LINK {
+            let mut link = String::new();
+            entry.read_to_string(&mut link).map_err(io)?;
+            std::os::unix::fs::symlink(link, &target).map_err(io)?;
+        } else {
+            let mut out = fs::File::create(&target).map_err(io)?;
+            io::copy(&mut entry, &mut out).map_err(io)?;
+            let mode = if mode & 0o111 == 0 { 0o644 } else { 0o755 };
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode)).map_err(io)?;
+        }
+    }
+    Ok(())
+}
+
 fn extract(store: &Store, archive: &FileEntry, strip: u32, dir: &Path) -> Result<(), String> {
+    let blob = store.blob_path(&archive.digest, archive.executable);
+    if is_zip(&blob) {
+        return extract_zip(&blob, strip, dir);
+    }
     let reader = decompressed(store, archive).map_err(|error| error.to_string())?;
     let mut tar = tar::Archive::new(reader);
     for entry in tar.entries().map_err(|error| error.to_string())? {
