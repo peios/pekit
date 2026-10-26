@@ -43,7 +43,7 @@ are Cargo's `build.rustflags`, so a project's own configuration of its
 target's flags, or of its linker, takes precedence over them, as Cargo
 intends.
 
-## C, libraries and bindings
+## C, libraries, and bindings
 
 C that a crate compiles through the `cc` crate, such as `zstd-sys`, is
 compiled for the target by `target_c`: by default the gcc library's
