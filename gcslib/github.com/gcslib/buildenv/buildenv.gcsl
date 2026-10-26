@@ -40,7 +40,7 @@ let MAKE = "https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"
 def Toolchain::BuildEnv busybox_x86_64() {
     let busybox = fetch(BUSYBOX, sha256 = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348")
     let make = unpack(fetch(MAKE, sha256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"))
-    let registered = (Toolchain::C gcc_x86_64)()
+    let registered = (Toolchain::C gcc_x86_64)().made()
     let made: Toolchain = registered.provides
     host_platform = {arch = "x86_64"; os = "linux"}
     platform = {}

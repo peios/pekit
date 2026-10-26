@@ -695,9 +695,9 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      \x20   provides = {root = peiso; runtime = dir(\"/\"); peiso = peiso.file(\"peiso\"); \
                      mkirf = utils.file(\"mkirf\"); mkuki = utils.file(\"mkuki\")}\n\
                      }\n\
-                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Rust rust_1_98, \
-                     Toolchain::Qemu system_qemu, Toolchain::Ppk workspace_ppk, \
-                     Toolchain::Peiso workspace_peiso]}\n";
+                     pekitconf = {toolchains = [Toolchain::C system_c, Toolchain::Ppk workspace_ppk, \
+                     Toolchain::Peiso workspace_peiso, Toolchain::Qemu system_qemu, \
+                     Toolchain::Rust rust_1_98]}\n";
 
 /// Whether the host has what example 10 takes of it: QEMU, its firmware,
 /// and the tools peiso makes an ISO with. ppk, peiso and peiosutils' `mkirf`

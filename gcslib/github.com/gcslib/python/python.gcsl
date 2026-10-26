@@ -39,7 +39,7 @@ def Toolchain::Python python_3_14() {
         sha256 = "83f9cb480b702548c592443f86209cf0fc03448d90692df257f095c01791dccc",
     )
     let files = unpack(archive).dir("python")
-    let registered = (Toolchain::C gcc_x86_64)()
+    let registered = (Toolchain::C gcc_x86_64)().made()
     let c: Toolchain = registered.provides
     host_platform = {arch = "x86_64"; os = "linux"}
     platform = {}

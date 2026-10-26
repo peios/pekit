@@ -72,10 +72,10 @@ let OPT_CC = "/opt/cc"
 let OPT_TARGET_CC = "/opt/target-cc"
 
 def Toolchain::Rust rust_1_98() {
-    let gcc = (Toolchain::C gcc_x86_64)()
+    let gcc = (Toolchain::C gcc_x86_64)().made()
     let c: Toolchain = gcc.provides
     let linker = Toolchain::C.payload(c)
-    let pinned = (Toolchain::BuildEnv busybox_x86_64)()
+    let pinned = (Toolchain::BuildEnv busybox_x86_64)().made()
     let e: Toolchain = pinned.provides
     let zlib = configure_make(zlib_source(), cchain = linker, env = Toolchain::BuildEnv.payload(e))
     host_platform = {arch = "x86_64"; os = "linux"}

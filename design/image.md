@@ -222,12 +222,14 @@ workspace's lock.
     `target_c`, given to `cc` through Cargo's `[env]`); pekit's `mkirf`
     makes archives byte for byte as a host Cargo build of it does;
   - `cargo_build`'s `beside`, for peiso's `ppk = { path = "../ppk" }`;
-  - registering a toolchain after those its definition is built with:
-    `toolchain.get` runs each registered definition before it checks its
-    kind, so a `Toolchain::Ppk` built with `Toolchain::Rust` and registered
-    before it would wait on itself. GCSL's `toolchain` module checking an
-    entry's kind before running it, as Bazel resolves a toolchain by
-    constraints declared apart from it, is a follow-up.
+  - a toolchain built with another: `toolchain.get` ran each registered
+    definition to learn its kind, so a `Toolchain::Ppk` built with
+    `Toolchain::Rust` and registered before it made every `get` of the
+    Rust toolchain wait on itself. GCSL's `Toolchain` definition type now
+    gives a toolchain's kind at once and its body as a memoised closure,
+    which a `get` runs only for its own kind, as Bazel resolves a toolchain
+    by constraints declared apart from it; the example registers its
+    toolchains in any order.
 
   The example's test takes about 370 s rather than 75 s, most of it
   compiling peiosutils' crates.
