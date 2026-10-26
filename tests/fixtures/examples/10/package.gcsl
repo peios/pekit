@@ -60,7 +60,7 @@ fn isolated(
     archive: File,
     tool: File,
     py: PythonToolchain = toolchain.get(Toolchain::Python),
-    c: toolchain.CToolchain = musl_x86_64(),
+    c: toolchain.CToolchain = gcc_x86_64_musl(),
 ) -> File {
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = py.runtime},

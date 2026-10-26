@@ -217,7 +217,8 @@ workspace's lock.
   `Toolchain::Peiso`. Only QEMU, its firmware and the ISO tools peiso runs
   come from the host. What it took:
   - git crates (I7), for peiosutils' lock;
-  - the gcc library's musl toolchain, `musl_x86_64()`, which compiles a
+  - the gcc library's musl toolchain, `gcc_x86_64_musl()` (then
+    `musl_x86_64()`), which compiles a
     crate's C for a static musl program, `zstd-sys`'s (`cargo_build`'s
     `target_c`, given to `cc` through Cargo's `[env]`); pekit's `mkirf`
     makes archives byte for byte as a host Cargo build of it does;

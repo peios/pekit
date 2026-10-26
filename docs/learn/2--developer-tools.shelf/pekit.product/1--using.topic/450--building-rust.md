@@ -35,8 +35,9 @@ own. A crate from anywhere else is an error, since nothing pins it.
 
 By default `cargo_build` builds for `x86_64-unknown-linux-musl`, as
 static, position-independent programs that need nothing of the system
-they run on. Give `target = "x86_64-unknown-linux-gnu"` and `rustflags =
-[]` for programs linked against glibc instead. `packages` names the
+they run on. Give `target = "x86_64-unknown-linux-gnu"` for programs
+linked against glibc instead: the flags follow the target, so a glibc
+build takes none unless you give `rustflags`. `packages` names the
 workspace's packages to build, as Cargo's `-p` does. The library's flags
 are Cargo's `build.rustflags`, so a project's own configuration of its
 target's flags, or of its linker, takes precedence over them, as Cargo
@@ -46,8 +47,9 @@ intends.
 
 C that a crate compiles through the `cc` crate, such as `zstd-sys`, is
 compiled for the target by `target_c`: by default the gcc library's
-Bootlin musl toolchain, `musl_x86_64()`, which a static musl program
-needs.
+Bootlin musl toolchain, `gcc_x86_64_musl()`, for a musl target, which a
+static musl program needs, and the registered C toolchain for any
+other.
 
 `cargo_build` gives the binaries `bins` by default. To give a library a
 crate builds as well, such as a `staticlib`, name its file in `libs`,

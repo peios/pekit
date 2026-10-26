@@ -5,3 +5,13 @@ import "github.com/gcslib/rust"
 def build ppk() {
     = rust.cargo_build(dir("src"), rust.vendored(file("src/Cargo.lock")), bins = ["ppk"])
 }
+
+# ppk linked against glibc: the flags and the C compiler follow the target.
+def build ppk_glibc() {
+    = rust.cargo_build(
+        dir("src"),
+        rust.vendored(file("src/Cargo.lock")),
+        bins = ["ppk"],
+        target = "x86_64-unknown-linux-gnu",
+    )
+}

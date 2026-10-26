@@ -176,6 +176,40 @@ const ZLIB: &str = "zlib 1.3.1: 56 bytes -> 19 bytes -> \"pekit2 pekit2 pekit2 p
                     pekit2 pekit2 pekit2\"\n";
 
 #[test]
+fn configure_make_gives_each_word_as_one_argument() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = example(4, HOST);
+    // A build system that records the arguments its `configure` was given.
+    let configure = dir.path().join("example/args/configure");
+    fs::create_dir_all(configure.parent().unwrap()).unwrap();
+    fs::write(
+        &configure,
+        "#!/bin/sh\n\
+         for a in \"$@\"; do printf '%s\\n' \"$a\"; done > args.txt\n\
+         prefix=${1#--prefix=}\n\
+         printf 'all:\\n\\ninstall:\\n\\tmkdir -p %s && cp args.txt %s/\\n' \"$prefix\" \"$prefix\" > Makefile\n",
+    )
+    .unwrap();
+    fs::set_permissions(&configure, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        dir.path().join("example/args.gcsl"),
+        "import \"github.com/gcslib/buildenv\"\n\
+         def build args() {\n\
+         \x20   = buildenv.configure_make(dir(\"args\"), configure = [\"--with=a b\", \"it's\", \"$HOME\"])\n\
+         }\n",
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "args").unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let args = fs::read_to_string(built_file(dir.path(), &format!("{path}/args.txt"))).unwrap();
+    let words: Vec<&str> = args.lines().skip(1).collect();
+    assert_eq!(words, ["--with=a b", "it's", "$HOME"]);
+}
+
+#[test]
 fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
     let Some(state) = seeded(&["zlib-1.3.1.tar.gz"]) else {
         eprintln!("skipped: zlib's source is not on this machine");
@@ -366,6 +400,8 @@ fn example_8_reruns_the_checks_a_change_reaches_and_the_bundle() {
     assert_eq!((built.ran, built.cached), (4, 0));
     let program = file_of(&built.value, None).to_owned();
     assert_eq!(run_python(dir.path(), &program), "Hello, pekit2\n");
+    // A program of its own too, which its `#!` line runs.
+    assert_eq!(run(dir.path(), &program), "Hello, pekit2\n");
     let first = fs::read(built_file(dir.path(), &program)).unwrap();
     let edit = |path: &str, from: &str, to: &str| {
         let path = dir.path().join("example").join(path);
@@ -1077,4 +1113,14 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     };
     let strictly = fs::read(built_file(dir.path(), &format!("{path}/ppk"))).unwrap();
     assert_eq!(strictly, header, "a strict build gives the same program");
+    // For glibc, given the target alone: linked against the system's C
+    // library, with the registered C toolchain for the crates' C.
+    let built = build_in(dir.path(), state.path(), "ppk_glibc").unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let ppk = built_file(dir.path(), &format!("{path}/ppk"));
+    let version = Command::new(&ppk).arg("--version").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
+    assert!(holds(&ppk, "ld-linux-x86-64.so.2"));
 }
