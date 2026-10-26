@@ -18,14 +18,19 @@
 //! that matches nothing is "no `build` is named `hello`", suggesting the
 //! closest names there are.
 //!
-//! A command takes any number of names ([`select`]), and a *directory
-//! glob* among them, a pattern with `*` in it, selects every definition of
-//! the def-type in the directories it matches, relative to the directory
-//! pekit is run from: `*` matches one directory's name, `**` any number of
-//! them, none among them, so `**` alone is every definition below, and
-//! `pkgs/*` every one a directory of `pkgs` holds. `.` is the directory
-//! itself. What several names select is selected once, the targets sorted
-//! by their qualified names.
+//! A command takes any number of names ([`select`]), and a *glob* among
+//! them, a pattern with `*` in it, selects the definitions of the def-type
+//! it matches, relative to the directory pekit is run from. It reads as a
+//! qualified name does, its last part the definition's name and the parts
+//! before it the directory's: `app/*` is every definition of `app`,
+//! `app/test_*` those whose names begin `test_`, `*` every one of the
+//! directory itself, and `pkgs/*/*` every one a directory of `pkgs` holds.
+//! In a part, `*` matches any run of characters. `**` matches any number of
+//! directories, none among them, and as the last part matches every name
+//! too, so `**` alone is every definition below, and `pkgs/**` every one of
+//! `pkgs` and below. `.` is the directory itself, and every name in it.
+//! What several names select is selected once, the targets sorted by their
+//! qualified names.
 
 use std::fmt::Write as _;
 
@@ -197,7 +202,7 @@ pub fn resolve(
 }
 
 /// The definitions of the def-type `def_type` in `workspace` that `names`
-/// select, each a name or a directory glob, named from the directory
+/// select, each a name or a glob, named from the directory
 /// `here`, relative to its root (see [Targets](#targets)): sorted by
 /// qualified name, each once. A glob that selects nothing selects nothing.
 ///
@@ -226,7 +231,7 @@ pub fn select(
                 def_type: def_type.to_owned(),
             });
         };
-        let pattern = glob_segments(here, name);
+        let (pattern, wanted) = glob_of(here, name);
         targets.extend(
             found
                 .definitions
@@ -237,7 +242,7 @@ pub fn select(
                         .split('/')
                         .filter(|part| !part.is_empty())
                         .collect();
-                    matches_glob(&pattern, &dir)
+                    matches_glob(&pattern, &dir) && matches_segment(wanted, &definition.path)
                 })
                 .map(|definition| Target {
                     def_type: def_type.to_owned(),
@@ -250,9 +255,29 @@ pub fn select(
     Ok(targets)
 }
 
-/// Whether `name` is a directory glob: `.`, or a pattern with `*` in it.
-fn is_glob(name: &str) -> bool {
-    name == "." || name.contains('*')
+/// Whether `name` is a glob: a directory, `.` or ending `/.`, or a pattern
+/// with `*` in it.
+#[must_use]
+pub fn is_glob(name: &str) -> bool {
+    name == "." || name.ends_with("/.") || name.contains('*')
+}
+
+/// The glob `name`, from the directory `here`, as the segments of the
+/// directories it matches and the glob of the names it matches there (see
+/// [Targets](#targets)): its last part the name, as a qualified name's is,
+/// but for `**` and `.`, which are directories, each of whose names it
+/// matches.
+fn glob_of<'a>(here: &'a str, name: &'a str) -> (Vec<&'a str>, &'a str) {
+    let (dir, last) = match name.rsplit_once('/') {
+        Some(("", last)) => ("/", last),
+        Some((dir, last)) => (dir, last),
+        None => (".", name),
+    };
+    match last {
+        "**" => (glob_segments(here, name), "*"),
+        "." => (glob_segments(here, dir), "*"),
+        _ => (glob_segments(here, dir), last),
+    }
 }
 
 /// The segments of the directory glob `name`, from the directory `here`:
@@ -290,8 +315,8 @@ fn matches_glob(pattern: &[&str], dir: &[&str]) -> bool {
     }
 }
 
-/// Whether the directory name `segment` matches the glob segment `pattern`,
-/// whose `*`s each match any run of characters.
+/// Whether the directory's or definition's name `segment` matches the glob
+/// segment `pattern`, whose `*`s each match any run of characters.
 fn matches_segment(pattern: &str, segment: &str) -> bool {
     let mut parts = pattern.split('*');
     let first = parts.next().unwrap_or_default();

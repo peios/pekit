@@ -114,18 +114,27 @@ fn names_and_globs_select_targets_once_each_sorted() {
         ["/root", "a/b/three", "a/one", "a/two", "c/four"]
     );
     assert_eq!(
-        selected(root, "build", &["*"], ""),
-        ["a/one", "a/two", "c/four"]
-    );
-    assert_eq!(
         selected(root, "build", &["a/**"], ""),
         ["a/b/three", "a/one", "a/two"]
     );
+    // A glob's last part is the name, as a qualified name's is: every one
+    // of a directory, some of them, or every one a level below.
+    assert_eq!(selected(root, "build", &["a/*"], ""), ["a/one", "a/two"]);
+    assert_eq!(selected(root, "build", &["a/t*"], ""), ["a/two"]);
+    assert_eq!(selected(root, "build", &["*"], ""), ["/root"]);
+    assert_eq!(selected(root, "build", &["/*"], "a"), ["/root"]);
+    assert_eq!(
+        selected(root, "build", &["*/*"], ""),
+        ["a/one", "a/two", "c/four"]
+    );
+    assert_eq!(selected(root, "build", &["**/th*"], ""), ["a/b/three"]);
     // From a directory, and its own alone; a name and a glob, once each.
     assert_eq!(selected(root, "build", &["."], "a"), ["a/one", "a/two"]);
+    assert_eq!(selected(root, "build", &["*"], "a"), ["a/one", "a/two"]);
+    assert_eq!(selected(root, "build", &["../c/*"], "a"), ["c/four"]);
     assert_eq!(
-        selected(root, "build", &["one", "a/*", "**/b"], ""),
-        ["a/b/three", "a/one"]
+        selected(root, "build", &["one", "a/*", "a/b/."], ""),
+        ["a/b/three", "a/one", "a/two"]
     );
     // A glob that selects nothing is nothing, even of a def-type nothing
     // defines yet.

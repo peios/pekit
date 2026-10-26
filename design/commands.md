@@ -9,16 +9,27 @@ for Jack to change.
 
 ## Decisions
 
-### M1. Targets are names, qualified names or directory globs
+### M1. Targets are names, qualified names or globs
 
 Every command that takes targets takes any number. A target is named as
-in example 1: `hello`, or qualified by its directory, `app/hello`. A
-directory glob, `pkgs/*` or `**` (as imports' globs are, `*` one segment,
-`**` any number), selects every definition of the command's def-type in
-the directories it matches, relative to the current directory. `pekit
-build` needs at least one target; `pekit test` and `pekit package`, with
-none, take `**` from the current directory, every test or package below
-it, as running the tests of where you are is the common case.
+in example 1: `hello`, or qualified by its directory, `app/hello`. A glob
+selects every definition of the command's def-type it matches, relative to
+the current directory, and reads as a qualified name does: its last part
+the name, the parts before it the directory. `app/*` is every definition
+of `app`, `app/test_*` some of them, `pkgs/*/*` every one a directory of
+`pkgs` holds; `*` matches any run of characters in a part. `**` matches
+any number of directories and, as the last part, every name in them, so
+`**` and `pkgs/**` are every definition below; `.` is the current
+directory's. `pekit build` needs at least one target; `pekit test` and
+`pekit package`, with none, take `**` from the current directory, every
+test or package below it, as running the tests of where you are is the
+common case.
+
+Globs were first directory globs, every segment a directory, as imports'
+are: `pkgs/*` was every definition one level below `pkgs`, and `app/*`
+nothing when `app` had no directories below it. Jack chose, after the
+pekit course of 2026-10-26, that a glob read as a qualified name does, so
+that `app/*` is `app`'s definitions; `pkgs/*` is now `pkgs/*/*`.
 
 Several targets are evaluated as one evaluation, one graph: a step two
 targets reach runs once, and steps of different targets run at once,

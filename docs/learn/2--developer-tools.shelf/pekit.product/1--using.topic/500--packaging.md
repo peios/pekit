@@ -88,7 +88,7 @@ packed example/dev.example.greet-dev with ppk
 ```
 
 It names packages as `pekit build` names targets: `pekit package
-dev.example.greet`, or `pekit package pkgs/*`.
+dev.example.greet`, or `pekit package 'pkgs/**'`.
 
 ## Publishing
 

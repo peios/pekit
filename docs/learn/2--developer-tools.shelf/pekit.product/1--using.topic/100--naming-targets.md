@@ -32,21 +32,24 @@ names it has.
 
 ## Several targets at once
 
-A command takes as many targets as you give it, and a *directory glob*
-selects every definition of its kind in the directories it matches,
-relative to where you run pekit:
+A command takes as many targets as you give it, and a *glob* selects
+every definition of its kind that it matches, relative to where you run
+pekit. A glob reads as a full name does: its last part is the name, and
+the parts before it the directory.
 
-| Glob | Selects the definitions in |
+| Glob | Selects |
 |---|---|
-| `.` | this directory |
-| `*` | each directory directly below this one |
-| `pkgs/*` | each directory directly below `pkgs` |
-| `pkgs/**` | `pkgs` and every directory below it |
-| `**` | this directory and every directory below it |
+| `app/*` | every definition in `app` |
+| `app/test_*` | those in `app` whose names begin `test_` |
+| `*` or `.` | every definition in this directory |
+| `pkgs/*/*` | every definition in each directory directly below `pkgs` |
+| `pkgs/**` | every definition in `pkgs` and every directory below it |
+| `**` | every definition in this directory and every directory below it |
 
-`*` matches one directory's name, or part of one, as in `net.*`, and `**`
-any number of directories, none included. A definition that several names
-or globs select is built once.
+In a part, `*` matches any run of characters, as in `net.*`. `**` matches
+any number of directories, none included, and as the last part, every
+name in them. A glob that starts with `/` is from the workspace's root. A
+definition that several names or globs select is built once.
 
 ```sh
 pekit build hello 'pkgs/**'

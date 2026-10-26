@@ -26,7 +26,7 @@ in a sandbox that holds only what it was given.
 ## Running tests
 
 `pekit test` runs every test below the current directory. Name tests to
-run only those, or select them with a directory glob, as for builds (see
+run only those, or select them with a glob, as for builds (see
 ~pekit/naming-targets):
 
 ```sh

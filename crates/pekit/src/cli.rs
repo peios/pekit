@@ -3,7 +3,7 @@
 //! # Commands
 //!
 //! `pekit build TARGET...` builds the definitions `TARGET...` of the
-//! def-type `build`, each named or selected by a directory glob as
+//! def-type `build`, each named or selected by a glob as
 //! [Targets](crate::target#targets) says, from the workspace the current
 //! directory is in, as one build ([`build_all_observed`]). It shows the files
 //! each target gave, and how many steps ran and how many were found in the
@@ -59,7 +59,7 @@ use crate::release::Repository;
 use crate::lock;
 use crate::store::Store;
 use crate::sandbox::HostTools;
-use crate::target::{Target, TargetError, select};
+use crate::target::{Target, TargetError, is_glob, select};
 use crate::trace::Trace;
 
 /// Pekit, a build system that runs GCSL build files as an action graph.
@@ -246,7 +246,7 @@ struct TestArgs {
 #[derive(Debug, clap::Args)]
 struct BuildArgs {
     /// The targets: `hello`, qualified by its directory, `app/hello`, or a
-    /// directory glob, `pkgs/*` or `**`.
+    /// glob, `app/*` or `**`.
     #[arg(required = true, value_name = "TARGET")]
     targets: Vec<String>,
     /// What every command that builds takes.
@@ -1065,7 +1065,7 @@ fn changes_the_world(command: &str, terminal: &mut Terminal<'_>) -> ExitCode {
 ///
 /// That `name` is a glob, names neither, or names both, each as shown.
 fn runnable(loaded: &Loaded, name: &str) -> Result<(Target, bool), String> {
-    if name == "." || name.contains('*') {
+    if is_glob(name) {
         return Err(format!(
             "error: `pekit run` runs one script or build, which `{name}` does not name"
         ));
