@@ -20,9 +20,16 @@ each checked against the checksum `Cargo.lock` records for it, and lays
 them out as `cargo vendor` does. `rust.cargo_build(src, vendor, bins)`
 then builds the Cargo workspace `src` with `cargo build --release
 --frozen --offline` from those crates, and gives a directory of the
-binaries `bins`, each by its name. A crate from anywhere but crates.io,
-such as a git repository, is an error, since nothing pins it by a
-checksum.
+binaries `bins`, each by its name.
+
+A crate from a git repository is pinned by the commit `Cargo.lock`
+records for it. `rust.vendored` fetches the repository at that commit
+with `fetch_git`, once for every crate it holds, and gives each crate's
+directory as the repository has it, so a crate that takes another of the
+same repository by its path still finds it. A git crate whose manifest
+takes values from its workspace's, such as `version.workspace = true`,
+is an error, since its manifest would need rewriting to build on its
+own. A crate from anywhere else is an error, since nothing pins it.
 
 ## Targets
 

@@ -104,6 +104,32 @@ which can't run in a step: how it is to build under pekit2 is Jack's to
 decide. Until then the kernel comes from a repository. The recipes are
 ported under the example 10 fixture, since `pkgs` is Jack's.
 
+### I7. Crates from git repositories, pinned by commit
+
+prelude and peiosutils take crates from Peios's own repositories by git
+(`peios-rs`, `authd`), pinned in `Cargo.lock` by commit. Even a binary
+that needs none of them, `mkirf`, does, since Cargo resolves the whole
+workspace's lock.
+
+- **`fetch_git(url, commit)`** is a GCSL built-in, as `fetch` is: the
+  repository's files at a commit, pinned by the commit's whole name, which
+  names its files as a digest does. A branch or a tag is refused. Plain
+  GCSL runs `git`. Pekit answers it from bare repositories kept in the
+  store's `git/`, fetching the commit alone, shallowly, or everything if
+  the server won't give a commit by its name, checking it out with no
+  configuration of the user's or the system's, and recording its tree.
+  It is allowed in a strict build and refused in a step, as `fetch` is.
+- **Vendoring:** tested against Cargo 1.96 first: path overrides still
+  make Cargo load the git source, which fails offline, but a git source
+  replaced by a vendored directory is found by name and version, and a
+  crate's `path` keys are ignored, so its raw manifest from the repository
+  works, `"package": null` in its checksum record. Only a manifest that
+  inherits from its workspace needs rewriting, which `cargo vendor` does
+  and the rust library refuses, for now.
+- **Decision (to surface):** a commit, git's SHA-1, as the pin, as Cargo
+  pins git crates, rather than a SHA-256 of an archive the forge makes,
+  which has changed under people before.
+
 ## Steps
 
 1. **X1, `#[device]`:** the prelude's attribute, and pekit binding

@@ -25,6 +25,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
 use crate::fetch::{fetch, fetched_path};
+use crate::git_fetch::{fetch_git, git_path};
 use crate::programs::{ProgramRan, ProgramWork, perform_program};
 use crate::sandbox::StepSandbox;
 use crate::record::Kept;
@@ -47,6 +48,21 @@ pub enum Work {
         sha256: String,
         /// The store.
         store: Store,
+        /// Where its call is.
+        span: Span,
+    },
+    /// Answers a `fetch_git` of `url` at `commit` from `store` (see
+    /// [Fetching from git](crate::git_fetch#fetching-from-git)), its call at
+    /// `span`.
+    FetchGit {
+        /// The repository's URL.
+        url: String,
+        /// The commit, by its whole name.
+        commit: String,
+        /// The store.
+        store: Store,
+        /// Where to check it out before it is stored.
+        scratch: PathBuf,
         /// Where its call is.
         span: Span,
     },
@@ -135,6 +151,23 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
                 }
                 (Err(error), Vec::new(), None)
             }
+        },
+        Work::FetchGit {
+            url,
+            commit,
+            store,
+            scratch,
+            span,
+        } => match fetch_git(&store, (&url, &commit), &scratch) {
+            Ok(tree) => {
+                let path = git_path(&url, &commit.trim().to_ascii_lowercase());
+                let dir = Plain::Dir {
+                    path: path.clone(),
+                    identity: None,
+                };
+                (Ok(dir), vec![(path, Kept::Dir(tree))], None)
+            }
+            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new(), None),
         },
         Work::Unpack {
             archive,

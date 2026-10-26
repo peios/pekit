@@ -13,13 +13,26 @@
 #   library's pinned environment and put beside rustc's own libraries.
 # - `Crate`: a crate of crates.io, as `Cargo.lock` pins it: its name,
 #   version and checksum, the SHA-256 of its `.crate` file.
+# - `GitCrate`: a crate of a git repository, as `Cargo.lock` pins it: its
+#   name and version, and its source, `source`, as the lock writes it
+#   before its commit, `git+URL?rev=REV` say, which Cargo's configuration
+#   names it by, its `url`, and the `commit` it is pinned to by its whole
+#   name.
 # - `crates(lock)`: every crate of crates.io the `Cargo.lock` file `lock`
-#   pins, in its order. A crate from anywhere else, a git repository say, is
-#   an error: only crates.io's are pinned by a checksum. A crate of the
-#   workspace itself, which has no source, is the workspace's.
-# - `vendored(lock)`: a directory of every crate `lock` pins, each fetched by
-#   its checksum and unpacked under `NAME-VERSION`, as `cargo vendor` lays
-#   them out, which Cargo builds from with no network.
+#   pins, in its order; `git_crates(lock)`, every crate of a git repository.
+#   A crate from anywhere else is an error: only crates.io's are pinned by a
+#   checksum, and a git repository's by a commit. A crate of the workspace
+#   itself, which has no source, is the workspace's.
+# - `vendored(lock)`: the crates `lock` pins, as Cargo builds from them with
+#   no network, a `Vendored`: `crates`, a directory of each under
+#   `NAME-VERSION`, as `cargo vendor` lays them out, those of crates.io
+#   fetched by their checksums and unpacked, and those of a git repository
+#   its directory in the repository's files at its commit, found by its
+#   manifest's name and given whole, for Cargo to find each by its name and
+#   version; and `git`, the git sources, for Cargo to find in it. A git
+#   crate whose manifest takes a value from its workspace's, `version.
+#   workspace = true` say, is an error: its manifest would need rewriting,
+#   as `cargo vendor` does, to build on its own.
 # - `cargo_build(src, vendor, bins)`: the binaries `bins` of the Cargo
 #   workspace `src`, built by `cargo build --release --frozen --offline`
 #   from the crates of `vendor`, for `target`, by default
@@ -39,6 +52,10 @@ type RustToolchain = {root: Dir, runtime: Dir, cc: File, cc_root: Dir}
 enum Toolchain::Rust<RustToolchain>
 
 type Crate = {name: String, version: String, checksum: String}
+
+type GitCrate = {name: String, version: String, source: String, url: String, commit: String}
+
+type Vendored = {crates: Dir, git: List<GitCrate>}
 
 let DIST = "https://static.rust-lang.org/dist"
 
@@ -120,12 +137,17 @@ fn installed(rustc: Dir, cargo: Dir, std: List<Dir>, zlib: Dir) -> Dir {
     = fs.compose(entries)
 }
 
-def crates(lock: File) -> List<Crate> {
+# Each `[[package]]` block of the `Cargo.lock` file `lock`, as a lookup of
+# its keys' quoted values; the first, before any, is left out.
+fn packages(lock: File) -> List<fn(String) -> String> {
     let blocks = lock.read().split("[[package]]")
-    let mut found: List<Crate> = []
-    # The first, before any `[[package]]`, has no source, as the workspace's
-    # own crates have none.
+    let mut found: List<fn(String) -> String> = []
+    let mut first = true
     for block in blocks {
+        if first {
+            first := false
+            continue
+        }
         let value = fn(key: String) -> String {
             let mut seen = ""
             for line in block.lines() {
@@ -135,19 +157,45 @@ def crates(lock: File) -> List<Crate> {
             }
             = seen
         }
+        found := [...found, value]
+    }
+    = found
+}
+
+def crates(lock: File) -> List<Crate> {
+    let mut found: List<Crate> = []
+    for value in packages(lock) {
         let source = value("source")
-        if source == "" {
+        if source == "" or source.starts_with("git+") {
             continue
         }
         if not source.starts_with("registry+https://github.com/rust-lang/crates.io-index") {
-            panic("`{value("name")}` {value("version")} is from `{source}`: only crates of crates.io are pinned by a checksum")
+            panic("`{value("name")}` {value("version")} is from `{source}`: only crates of crates.io, pinned by a checksum, and of git repositories, pinned by a commit, are")
         }
         found := [...found, {name = value("name"); version = value("version"); checksum = value("checksum")}]
     }
     = found
 }
 
-def vendored(lock: File) -> Dir {
+def git_crates(lock: File) -> List<GitCrate> {
+    let mut found: List<GitCrate> = []
+    for value in packages(lock) {
+        let pinned = value("source")
+        if not pinned.starts_with("git+") {
+            continue
+        }
+        # `git+URL?rev=REV#COMMIT`: Cargo names the source by what is before
+        # the commit, and the repository is the URL before any query.
+        let halves = pinned.split("#")
+        let source = halves[0]
+        let commit = if len(halves) == 2 { halves[1] } else { "" }
+        let url = source.strip_prefix("git+").split("?")[0]
+        found := [...found, {name = value("name"); version = value("version"); source = source; url = url; commit = commit}]
+    }
+    = found
+}
+
+def vendored(lock: File) -> Vendored {
     let fetched = for each in crates(lock) {
         let archive = fetch(
             "https://static.crates.io/crates/{each.name}/{each.name}-{each.version}.crate",
@@ -155,7 +203,41 @@ def vendored(lock: File) -> Dir {
         )
         = {crate = each; tree = unpack(archive, strip = 1)}
     }
-    = vendor(fetched)
+    let git = git_crates(lock)
+    let repositories = for each in git {
+        = {crate = each; repository = fetch_git(each.url, each.commit)}
+    }
+    = {crates = vendor(fetched, repositories); git = git}
+}
+
+# The directory of the crate `name` in the repository files `repository`,
+# from its root, `""` for the root itself: the one whose manifest's
+# `[package]` names it.
+fn crate_dir(repository: Dir, name: String) -> String {
+    let mut found: List<String> = []
+    for each in repository.files() {
+        let path = each.path.strip_prefix(repository.path).strip_prefix("/")
+        if not (path == "Cargo.toml" or path.ends_with("/Cargo.toml")) {
+            continue
+        }
+        let text = each.read()
+        let mut in_package = false
+        for line in text.lines() {
+            let line = line.trim()
+            if line.starts_with("[") {
+                in_package := line == "[package]"
+            } else if in_package and line == "name = \"{name}\"" {
+                if text.contains("workspace = true") {
+                    panic("the git crate `{name}`'s manifest, `{path}`, takes values from its workspace's, which a crate given on its own can't")
+                }
+                found := [...found, path.strip_suffix("Cargo.toml").strip_suffix("/")]
+            }
+        }
+    }
+    if len(found) != 1 {
+        panic("the git repository `{repository.path}` has {len(found)} crates named `{name}`, not one")
+    }
+    = found[0]
 }
 
 # The crates `fetched`, each with its unpacked tree, as `cargo vendor` lays
@@ -163,8 +245,24 @@ def vendored(lock: File) -> Dir {
 # reads, which names no file, so that Cargo checks the crate it was given
 # against its pin and its files against nothing more.
 #[hermetic]
-fn vendor(fetched: List<{crate: Crate, tree: Dir}>) -> Dir {
+fn vendor(
+    fetched: List<{crate: Crate, tree: Dir}>,
+    repositories: List<{crate: GitCrate, repository: Dir}>,
+) -> Dir {
     let records = dir(".").path
+    # A git crate's record names no checksum: its commit pins it.
+    let git_record = "{records}/git.json"
+    let wrote = fs.write(git_record, "{{\"files\": {{}}, \"package\": null}}")
+    let from_git = for each in repositories {
+        let at = "{each.crate.name}-{each.crate.version}"
+        let within = crate_dir(each.repository, each.crate.name)
+        let place = if within == "" { each.repository } else { each.repository.dir(within) }
+        let pair: List<{at: String, place: Dir | File | FileSet}> = [
+            {at = at; place = place},
+            {at = "{at}/.cargo-checksum.json"; place = file(git_record)},
+        ]
+        = pair
+    }
     let entries = for each in fetched {
         let at = "{each.crate.name}-{each.crate.version}"
         let record = "{records}/{at}.json"
@@ -176,7 +274,7 @@ fn vendor(fetched: List<{crate: Crate, tree: Dir}>) -> Dir {
         = pair
     }
     let mut flat: List<{at: String, place: Dir | File | FileSet}> = []
-    for pair in entries {
+    for pair in [...entries, ...from_git] {
         flat := [...flat, ...pair]
     }
     = fs.compose(flat)
@@ -185,7 +283,7 @@ fn vendor(fetched: List<{crate: Crate, tree: Dir}>) -> Dir {
 #[hermetic]
 def cargo_build(
     src: Dir,
-    vendor: Dir,
+    vendor: Vendored,
     bins: List<String>,
     target: String = "x86_64-unknown-linux-musl",
     packages: List<String> = [],
@@ -195,9 +293,27 @@ def cargo_build(
     let home = dir(".").path
     let config = "{home}/config.toml"
     let cc = "{OPT_CC}/{rust.cc.path.strip_prefix(rust.cc_root.path).strip_prefix("/")}"
+    # Each git source, found among the vendored crates, as `cargo vendor`
+    # writes it: the repository and its query, a revision say.
+    let mut git_sources = ""
+    let mut seen: List<String> = []
+    for each in vendor.git {
+        if seen.contains(each.source) {
+            continue
+        }
+        seen := [...seen, each.source]
+        let parts = each.source.split("?")
+        let pairs: List<String> = if len(parts) == 2 { parts[1].split("&") } else { [] }
+        let mut query = ""
+        for pair in pairs {
+            let kv = pair.split("=")
+            query := "{query}{kv[0]} = \"{kv[1]}\"\n"
+        }
+        git_sources := "{git_sources}[source.\"{each.source}\"]\ngit = \"{each.url}\"\n{query}replace-with = \"vendored\"\n"
+    }
     let written = fs.write(
         config,
-        "[source.crates-io]\nreplace-with = \"vendored\"\n[source.vendored]\ndirectory = \"/work/vendor\"\n\
+        "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n\
          [target.{target}]\nlinker = \"{cc}\"\n[target.x86_64-unknown-linux-gnu]\nlinker = \"{cc}\"\n",
     )
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
@@ -205,7 +321,7 @@ def cargo_build(
         {at = OPT_RUST; place = rust.root},
         {at = OPT_CC; place = rust.cc_root},
         {at = "/work/src"; place = src},
-        {at = "/work/vendor"; place = vendor},
+        {at = "/work/vendor"; place = vendor.crates},
         {at = "/work/home/config.toml"; place = file(config)},
     ]
     let box = fs.compose(placed).sandbox(

@@ -58,6 +58,7 @@ use gcsl::{Diagnostic, Span, Value};
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, evict};
 use crate::fetch::IN_A_STEP;
+use crate::git_fetch;
 use crate::pool::{Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::keychain::{self, Keychain};
@@ -104,6 +105,7 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
     let builtin = job.builtin();
     match builtin {
         Builtin::Fetch
+        | Builtin::FetchGit
         | Builtin::ArchiveUnpack
         | Builtin::KeychainString
         | Builtin::KeychainFile => None,
@@ -1605,6 +1607,23 @@ impl Run<'_> {
                 url: text(0),
                 sha256: text(1),
                 store: self.store.clone(),
+                span,
+            }
+        } else if job.builtin() == Builtin::FetchGit {
+            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
+            if step.is_some() {
+                self.finish_now(id, Err(Diagnostic::error(git_fetch::IN_A_STEP, span)));
+                return Ok(());
+            }
+            let text = |at: usize| match job.args().get(at) {
+                Some(Plain::Str(text)) => text.clone(),
+                _ => String::new(),
+            };
+            Work::FetchGit {
+                url: text(0),
+                commit: text(1),
+                store: self.store.clone(),
+                scratch: self.settings.scratch.clone(),
                 span,
             }
         } else if job.builtin() == Builtin::ArchiveUnpack {
