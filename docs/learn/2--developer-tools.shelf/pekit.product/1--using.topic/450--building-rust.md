@@ -58,7 +58,7 @@ rust.workspace(
         {package = "policy"; data = [{at = "registry.d"; place = dir("registry.d")}]},
         {
             package = "sdk-sys"
-            env = [{name = "SDK_DIR"; value = "/opt/sdk"}]
+            env = [{key = "SDK_DIR"; value = "/opt/sdk"}]
             given = [{at = "/opt/sdk"; place = build sdk()}]
         },
     ],
@@ -142,7 +142,7 @@ crate builds as well, such as a `staticlib`, name its file in `libs`,
 for example `libs = ["libpeios.a"]`. `beside` places directories next to
 the source, at `../NAME`, for a crate that takes another by a path
 outside its own tree. `env` gives every build script variables of its
-own, each a `{name; value}`, as Cargo's `[env]` table does.
+own, each a `{key; value}`, as Cargo's `[env]` table does.
 
 A build script that runs bindgen needs libclang. Give `libclang = [dir]`,
 a directory holding `libclang.so`, such as the clang library's
