@@ -706,6 +706,12 @@ impl Effects for StepSandbox {
         Ok(PathBuf::from(&self.own))
     }
 
+    /// A step's code is in the step's own directory, whatever definition
+    /// made it, so that a step's key never holds its definition.
+    fn follows_definitions(&self) -> bool {
+        false
+    }
+
     fn temp_dir(&self) -> Option<Result<String, String>> {
         let number = self.temps.fetch_add(1, Ordering::Relaxed);
         let path = format!("{}/.pekit-tmp-{number}", self.own);

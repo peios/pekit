@@ -50,18 +50,16 @@ didn't change isn't packed again: changing `main.c` repacks
 changing the version alone repacks both and recompiles nothing.
 
 The ppk library asks the `toolchain` module for a `Toolchain::Ppk`, so a
-workspace registers the `ppk` tool it uses. A definition's files are
-found from the directory of the code that runs it, so name a tool kept
-beside `workspace.gcsl` with `fileroot.this`:
+workspace registers the `ppk` tool it uses. A definition's relative paths
+are against its own file's directory, whoever runs it, so `dir("tools")`
+names a tool kept beside `workspace.gcsl`:
 
 ```text
 import * from "github.com/gcslib/ppk"
 import * from toolchain
-import fileroot
-import path
 
 def Toolchain::Ppk workspace_ppk() {
-    let tools = dir(path.join(fileroot.this, "tools"))
+    let tools = dir("tools")
     host_platform = ^host_platform
     platform = {}
     provides = {root = tools; runtime = dir("/"); ppk = tools.file("ppk")}

@@ -253,3 +253,23 @@ fn a_target_built_alone_is_what_it_is_among_others() {
             .all(|event| !format!("{event:?}").contains("Started"))
     );
 }
+
+#[test]
+fn a_definition_built_for_another_reads_its_own_directory_s_files() {
+    let lib = format!("{SHOUT}def build lib() {{ = shout(file(\"lib.txt\")).read() }}\n");
+    let dir = workspace(&[
+        ("build.gcsl", &lib),
+        ("lib.txt", "from lib\n"),
+        ("app/build.gcsl", "def build app() { = build lib() }\n"),
+        ("app/lib.txt", "from app\n"),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let alone = build_in(dir.path(), state.path(), "lib").unwrap();
+    assert_eq!(alone.value, Plain::Str("FROM LIB\n".to_owned()));
+    // Built for `app`, in another directory, `lib` reads its own file, so
+    // its step is the one it was, found in the store; and the step's own
+    // `out.txt` is in the step's directory, not the definition's.
+    let through = build_in(dir.path(), state.path(), "app").unwrap();
+    assert_eq!(through.value, Plain::Str("FROM LIB\n".to_owned()));
+    assert_eq!((through.ran, through.cached), (0, 1));
+}

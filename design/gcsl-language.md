@@ -1573,7 +1573,9 @@ GCSL `9ed5107`. As planned, with these details:
   working directory, the same one `exec` gives a program by default, then
   normalised lexically. Under plain GCSL that is the process's directory;
   a host sets it for each step (Jack, 2026-10-24). Nothing is read until
-  `f.read()`.
+  `f.read()`. Since refined (Jack, 2026-10-26): inside a definition's
+  body, a relative path is against the definition's own directory (see
+  `design/libraries.md`, D10).
 - **`f.path`** is the one field of a file; it is lowered to a node of its
   own, `FilePath`, since a file is no record.
 - **Every `exec` fails by default** (Jack, 2026-10-24): `panic = false`

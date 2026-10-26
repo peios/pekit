@@ -94,7 +94,7 @@ ones you have, as ppk is registered (see ~pekit/packaging):
 
 ```text
 def Toolchain::Peiso workspace_peiso() {
-    let tools = dir(path.join(fileroot.this, "tools"))
+    let tools = dir("tools")
     host_platform = ^host_platform
     platform = {}
     provides = {

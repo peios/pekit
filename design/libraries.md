@@ -366,4 +366,10 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
   directory of the code that runs it, not its own file's, as any call's
   do, so a toolchain definition in `workspace.gcsl` names its files with
   `fileroot.this`. Documented; whether definitions should resolve against
-  their own directory is a question for Jack.
+  their own directory is a question for Jack. Since resolved (Jack,
+  2026-10-26): a definition's relative paths, `file`, `dir` and a
+  relative `cwd`, are against its own file's directory, in its body and
+  every function it calls, whoever calls it; a program given no `cwd`
+  keeps the host's working directory, so that a memoised function that
+  runs one is one call for every definition; and a step's code is in its
+  own directory always. GCSL `eval/files.rs`, "The working directory".
