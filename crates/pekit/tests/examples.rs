@@ -1187,6 +1187,18 @@ fn the_rust_library_builds_ppk_one_crate_at_a_time() {
     // Built again, nothing runs.
     let again = build_in(dir.path(), state.path(), "ppk_crates").unwrap();
     assert_eq!(again.ran, 0);
+    // And strictly, with nothing of the host: the same program.
+    let strict = Options {
+        strict: true,
+        ..Options::default()
+    };
+    let (strictly, _) = observed_with(dir.path(), state.path(), "ppk_crates", strict);
+    let strictly = strictly.unwrap();
+    assert_eq!(
+        fs::read(built_file(dir.path(), file_of(&strictly.value, None))).unwrap(),
+        fs::read(&ppk).unwrap(),
+        "a strict build gives the same program"
+    );
     // A change to ppk's own library compiles it, and the program that links
     // it, again: none of the crates it uses, nor Cargo's plan, which reads
     // no source.
