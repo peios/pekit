@@ -21,7 +21,7 @@ def build hello() {
 | Rule | Makes |
 |---|---|
 | `compile(src, headers, output, flags)` | The object of one C source, by default its name with `.o` |
-| `archive(objs, output)` | A static library of objects, by `ar rcs` |
+| `archive(objs, output)` | A static library of objects, by `ar rcsD`, with no times or owners recorded |
 | `link(objs, libraries, output, flags)` | A program of objects and static libraries |
 
 A compile's sandbox holds its source and the `headers` you give it, and

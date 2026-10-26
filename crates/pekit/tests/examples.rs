@@ -501,6 +501,26 @@ fn holds(path: &Path, text: &str) -> bool {
         .any(|window| window == text.as_bytes())
 }
 
+/// The time each member's header of the `ar` archive at `path` records,
+/// as written: `0` for each of an archive made deterministically.
+fn member_times(path: &Path) -> Vec<String> {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(bytes.get(..8), Some(&b"!<arch>\n"[..]));
+    let mut times = Vec::new();
+    let mut at = 8;
+    // Each header is 60 bytes: a name of 16, a time of 12, an owner of 6,
+    // a group of 6, a mode of 8 and a size of 10, then `` `\n``; each
+    // member's contents follow, padded to an even length.
+    while let Some(header) = bytes.get(at..at + 60) {
+        let field =
+            |from: usize, to: usize| String::from_utf8_lossy(&header[from..to]).trim().to_owned();
+        times.push(field(16, 28));
+        let size: usize = field(48, 58).parse().unwrap();
+        at += 60 + size + size % 2;
+    }
+    times
+}
+
 /// ELF's numbers for x86-64 and for aarch64.
 const X86_64: u16 = 0x3e;
 const AARCH64: u16 = 0xb7;
@@ -539,6 +559,18 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
             holds(&built_file(dir.path(), program), bootlin),
             "example {n}"
         );
+        // Bootlin's `ar` records the time unless told not to, which would
+        // make the library differ from one run to the next.
+        if n == 2 {
+            let library = dir
+                .path()
+                .join("pekit-out/example/greet/archive/libgreet.a");
+            let times = member_times(&library);
+            assert!(
+                !times.is_empty() && times.iter().all(|time| time == "0"),
+                "{times:?}"
+            );
+        }
     }
     // Example 8, with the pinned interpreter.
     let dir = example(8, PINNED);

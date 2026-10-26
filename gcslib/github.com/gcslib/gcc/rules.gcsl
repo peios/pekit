@@ -6,7 +6,7 @@
 #   headers it may include, each given to the step, and each one's directory
 #   a `-I` flag; `flags` go to the compiler as they are.
 # - `archive(objs, output)`: the static library `output` of the objects
-#   `objs`, by `ar rcs`.
+#   `objs`, by `ar rcsD`, deterministically: no time or owner recorded.
 # - `link(objs, libraries, output, flags)`: the program `output` of the
 #   objects `objs` and the static libraries `libraries`.
 #
@@ -47,7 +47,7 @@ def archive(
     output: String,
     cchain: toolchain.CToolchain = toolchain.get(Toolchain::C),
 ) -> File {
-    = run(cchain, cchain.ar, ["rcs", output, ...paths(objs)], objs, output)
+    = run(cchain, cchain.ar, ["rcsD", output, ...paths(objs)], objs, output)
 }
 
 #[hermetic]
