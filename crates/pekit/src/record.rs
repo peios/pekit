@@ -171,7 +171,7 @@ pub fn stored<S: BuildHasher>(
             },
         ),
         Plain::Secret { .. } => return Err(StoreError::Secret),
-        Plain::Closure { .. } => return Err(StoreError::NotData),
+        Plain::Closure { .. } | Plain::Step(_) => return Err(StoreError::NotData),
         Plain::File { path, identity } => match of(path)? {
             Kept::File(entry) => Stored::File(path.clone(), identity.clone(), entry),
             Kept::Dir(_) => return Err(StoreError::Unkept(path.clone())),

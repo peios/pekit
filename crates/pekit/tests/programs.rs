@@ -20,14 +20,16 @@ fn write(root: &Path, files: &[(&str, &str)]) {
 }
 
 /// A step of two programs, the second reading what the first wrote to its
-/// own directory and to `/tmp`, declared in the workspace's root file after
-/// `comment`.
-fn steps(comment: &str) -> String {
+/// own directory and to `/tmp`, and writing `word`, declared in the
+/// workspace's root file after `comment`. Its code alone changes with
+/// either, and its code names no step, so it is the same step, at the same
+/// path, whichever it is (see [Identities](pekit::receipt#identities)).
+fn steps(comment: &str, word: &str) -> String {
     format!(
         "# {comment}\n\
-         #[hermetic] def twice(src: File, word: String) -> File {{\n\
+         #[hermetic] def twice(src: File) -> File {{\n\
          \x20   let a = exec([\"sh\", \"-c\", \"tr a-z A-Z < {{src.path}} > up; echo t > /tmp/t\"])\n\
-         \x20   let b = exec([\"sh\", \"-c\", \"cat up /tmp/t > out; echo {{word}} >> out\"])\n\
+         \x20   let b = exec([\"sh\", \"-c\", \"cat up /tmp/t > out; echo {word} >> out\"])\n\
          \x20   = file(\"out\")\n\
          }}\n"
     )
@@ -40,11 +42,11 @@ fn workspace(text: &str, word: &str) -> tempfile::TempDir {
     write(
         dir.path(),
         &[
-            ("workspace.gcsl", &steps("one")),
+            ("workspace.gcsl", &steps("one", word)),
             ("app/name.txt", text),
             (
                 "app/build.gcsl",
-                &format!("def build both() {{ = twice(file(\"name.txt\"), \"{word}\") }}\n"),
+                "def build both() { = twice(file(\"name.txt\")) }\n",
             ),
         ],
     );
@@ -71,14 +73,17 @@ fn a_step_run_again_finds_the_programs_that_see_what_they_saw() {
     assert_eq!(out(dir.path()), "N\nt\nw\n");
     // Its code changed, by a comment: it runs, and finds both its programs,
     // the second seeing what the first, found, left.
-    write(dir.path(), &[("workspace.gcsl", &steps("two"))]);
+    write(dir.path(), &[("workspace.gcsl", &steps("two", "w"))]);
     let again = build_in(dir.path(), state.path(), "both").unwrap();
     assert_eq!(counts(&again), (1, 2, 0));
     assert_eq!(out(dir.path()), "N\nt\nw\n");
     // Another input, which the first program reads: neither is found.
     write(
         dir.path(),
-        &[("app/name.txt", "m\n"), ("workspace.gcsl", &steps("three"))],
+        &[
+            ("app/name.txt", "m\n"),
+            ("workspace.gcsl", &steps("three", "w")),
+        ],
     );
     let other = build_in(dir.path(), state.path(), "both").unwrap();
     assert_eq!(counts(&other), (1, 0, 0));
@@ -90,16 +95,10 @@ fn a_program_run_after_one_found_sees_what_the_found_one_left() {
     let dir = workspace("n\n", "w");
     let state = tempfile::tempdir().unwrap();
     build_in(dir.path(), state.path(), "both").unwrap();
-    // Another word, which only the second program is given: the first is
+    // Another word, which only the second program writes: the first is
     // found, and the second, run, reads what it left in the own directory
     // and in `/tmp`.
-    write(
-        dir.path(),
-        &[(
-            "app/build.gcsl",
-            "def build both() { = twice(file(\"name.txt\"), \"v\") }\n",
-        )],
-    );
+    write(dir.path(), &[("workspace.gcsl", &steps("one", "v"))]);
     let built = build_in(dir.path(), state.path(), "both").unwrap();
     assert_eq!(counts(&built), (1, 1, 0));
     assert_eq!(out(dir.path()), "N\nt\nv\n");
@@ -110,7 +109,7 @@ fn a_program_found_is_told_and_counted() {
     let dir = workspace("n\n", "w");
     let state = tempfile::tempdir().unwrap();
     build_in(dir.path(), state.path(), "both").unwrap();
-    write(dir.path(), &[("workspace.gcsl", &steps("two"))]);
+    write(dir.path(), &[("workspace.gcsl", &steps("two", "w"))]);
     let (built, events) = observed_with(dir.path(), state.path(), "both", Options::default());
     assert_eq!(counts(&built.unwrap()), (1, 2, 0));
     let found: Vec<&str> = events
@@ -120,7 +119,11 @@ fn a_program_found_is_told_and_counted() {
             _ => None,
         })
         .collect();
-    assert_eq!(found, ["twice", "twice"]);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found.iter().all(|step| step.starts_with("twice/")),
+        "{found:?}"
+    );
 }
 
 #[test]
@@ -128,7 +131,7 @@ fn a_rebuild_or_a_check_finds_no_program() {
     let dir = workspace("n\n", "w");
     let state = tempfile::tempdir().unwrap();
     build_in(dir.path(), state.path(), "both").unwrap();
-    write(dir.path(), &[("workspace.gcsl", &steps("two"))]);
+    write(dir.path(), &[("workspace.gcsl", &steps("two", "w"))]);
     for reuse in [Reuse::Rerun, Reuse::Compare] {
         let options = Options {
             reuse,
@@ -188,13 +191,13 @@ fn a_sandbox_s_program_found_leaves_its_writes_for_the_next() {
     }
     let text = |word: &str| {
         format!(
-            "#[hermetic] fn inside(root: Dir, word: String) -> File {{\n\
+            "#[hermetic] fn inside(root: Dir) -> File {{\n\
              \x20   let s = root.sandbox()\n\
              \x20   let a = s.exec(\"/bin/sh\", \"-c\", \"echo one > /made.txt\")\n\
-             \x20   let b = s.exec(\"/bin/sh\", \"-c\", \"cat /made.txt > /out.txt; echo {{word}} >> /out.txt\")\n\
+             \x20   let b = s.exec(\"/bin/sh\", \"-c\", \"cat /made.txt > /out.txt; echo {word} >> /out.txt\")\n\
              \x20   s.file(\"/out.txt\")\n\
              }}\n\
-             def build both() {{ = inside(dir(\"root\"), \"{word}\") }}\n"
+             def build both() {{ = inside(dir(\"root\")) }}\n"
         )
     };
     let dir = tempfile::tempdir().unwrap();
@@ -304,7 +307,7 @@ fn a_program_is_keyed_by_where_its_step_writes() {
         &[
             (
                 "workspace.gcsl",
-                "#[hermetic] def here(src: File) -> File {\n\
+                "#[hermetic] def here(src: File, tag: String) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"pwd > out; cat {src.path} >> out\"])\n\
                  \x20   = file(\"out\")\n\
                  }\n",
@@ -312,22 +315,22 @@ fn a_program_is_keyed_by_where_its_step_writes() {
             ("app/name.txt", "n\n"),
             (
                 "app/build.gcsl",
-                "def build one() { = here(file(\"name.txt\")) }\n\
-                 def build two() { = here(file(\"name.txt\")) }\n",
+                "def build one() { = here(file(\"name.txt\"), \"one\") }\n\
+                 def build two() { = here(file(\"name.txt\"), \"two\") }\n",
             ),
         ],
     );
     let state = tempfile::tempdir().unwrap();
     build_in(dir.path(), state.path(), "one").unwrap();
-    // The same step of another target: the same program, but run where
-    // that target's step writes, which it names.
+    // Another step, its tag apart: the same program, but run where that
+    // step writes, which it names.
     let two = build_in(dir.path(), state.path(), "two").unwrap();
     assert_eq!(counts(&two), (1, 0, 0));
-    let out = dir.path().join("pekit-out/app/two/here/out");
-    assert_eq!(
-        fs::read_to_string(out).unwrap(),
-        "/pekit-out/app/two/here\nn\n"
-    );
+    let out = fs::read_to_string(dir.path().join("pekit-out/app/two/here/out")).unwrap();
+    let own = out.strip_suffix("\nn\n").unwrap_or_else(|| panic!("{out}"));
+    assert!(own.starts_with("/pekit-out/.steps/here/"), "{out}");
+    let one = fs::read_to_string(dir.path().join("pekit-out/app/one/here/out")).unwrap();
+    assert_ne!(one, out);
 }
 
 #[test]
@@ -335,13 +338,13 @@ fn a_composition_placed_again_is_sealed_as_a_run_leaves_it() {
     let text = |word: &str| {
         format!(
             "import fs\n\
-             #[hermetic] def modes(src: File, word: String) -> File {{\n\
+             #[hermetic] def modes(src: File) -> File {{\n\
              \x20   let d = fs.compose_dir({{\"in/x\" = src}})\n\
              \x20   let a = exec([\"sh\", \"-c\", \"cat {{d.path}}/in/x > out\"])\n\
-             \x20   let b = exec([\"sh\", \"-c\", \"stat -c %a {{d.path}}/in/x >> out; echo {{word}} >> out\"])\n\
+             \x20   let b = exec([\"sh\", \"-c\", \"stat -c %a {{d.path}}/in/x >> out; echo {word} >> out\"])\n\
              \x20   = file(\"out\")\n\
              }}\n\
-             def build both() {{ = modes(file(\"x.txt\"), \"{word}\") }}\n"
+             def build both() {{ = modes(file(\"x.txt\")) }}\n"
         )
     };
     let dir = tempfile::tempdir().unwrap();

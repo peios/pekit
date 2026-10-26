@@ -46,8 +46,8 @@ use gcsl::eval::plain::Plain;
 
 use crate::evict::limit_of;
 use crate::engine::{
-    BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed, package_all_observed,
-    program_command, query_all, run_script_observed,
+    target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
+    package_all_observed, program_command, query_all, run_script_observed,
 };
 use crate::query::TargetDeps;
 use crate::events::{Event, EventKind};
@@ -430,7 +430,13 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
                 } else {
                     let _ = writeln!(terminal.out, "built {}", target.qualified());
                 }
-                for (path, _) in value.files() {
+                let paths: Vec<&str> = value.files().into_iter().map(|(path, _)| path).collect();
+                let views = target_view(target.qualified().trim_start_matches('/'), &paths);
+                for path in paths {
+                    let path = views
+                        .iter()
+                        .find(|(made, _)| made == path)
+                        .map_or(path, |(_, view)| view.as_str());
                     let shown = shown_path(path, &loaded.root, cwd);
                     let _ = writeln!(terminal.out, "  {}", shown.display());
                 }
@@ -502,7 +508,7 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
         let step = outcomes
             .steps
             .iter()
-            .find(|report| report.target == index && report.name == name);
+            .find(|report| report.target == index && report.function == name);
         let shown = test.qualified();
         let message = match outcome {
             Ok(result) => match test_result(result) {
@@ -1177,10 +1183,18 @@ fn package_command(
                 continue;
             }
         };
+        // Each packed directory as its package's view has it (see
+        // [`target_view`]).
+        let dirs: Vec<&str> = packed.iter().filter_map(|each| packed_by(each).1).collect();
+        let views = target_view(shown.trim_start_matches('/'), &dirs);
         for each in packed {
             let (by, dir) = packed_by(each);
             let _ = writeln!(terminal.out, "{verb} {shown} with {by}");
             if let Some(dir) = dir {
+                let dir = views
+                    .iter()
+                    .find(|(made, _)| made == dir)
+                    .map_or(dir, |(_, view)| view.as_str());
                 let shown = shown_path(dir, &loaded.root, cwd);
                 let _ = writeln!(terminal.out, "  {}", shown.display());
             }

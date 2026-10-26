@@ -162,32 +162,87 @@ fn several_targets_are_one_build_a_build_they_share_built_once() {
         &["first", "second", "own", "broken"],
         |_| {},
     );
-    // `broken` fails alone; `first` and `second` share `common`'s step,
-    // named by `common`, and `own`, which makes the same call itself, has
-    // its own: a step is its definition's, whatever else is built.
-    assert_eq!(counts, (2, 0));
+    // `broken` fails alone; `first` and `second` share `common`'s step, and
+    // `own`, which makes the same call itself, shares it too: a step is
+    // what it is, whichever definition makes it.
+    assert_eq!(counts, (1, 0));
     // In the order `select` gives, by qualified name.
     let [broken, first, own, second] = &outcomes[..] else {
         panic!("{outcomes:?}");
     };
     assert_eq!(first, second);
-    let shown = format!("{first:?}");
-    assert!(
-        shown.contains("/pekit-out/app/common/shout/out.txt"),
-        "{shown}"
-    );
-    let shown = format!("{own:?}");
-    assert!(
-        shown.contains("/pekit-out/app/own/shout/out.txt"),
+    let shown = format!("{first:?} {own:?}");
+    let step = shown
+        .split("/pekit-out/.steps/shout/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert_eq!(
+        shown
+            .matches(&format!("/pekit-out/.steps/shout/{step}/out.txt"))
+            .count(),
+        2,
         "{shown}"
     );
     let error = broken.as_ref().unwrap_err();
     assert!(error.contains("error: no"), "{error}");
-    let out = dir.path().join("pekit-out/app/common/shout/out.txt");
-    assert_eq!(fs::read_to_string(out).unwrap(), "N\n");
+    // Each target's view of it, under its own name.
+    for target in ["first", "second", "own"] {
+        let out = dir
+            .path()
+            .join(format!("pekit-out/app/{target}/shout/out.txt"));
+        assert_eq!(fs::read_to_string(out).unwrap(), "N\n");
+    }
     // `common` built alone is the step its callers built.
     let (_, counts) = build_all(dir.path(), state.path(), &["common"], |_| {});
     assert_eq!(counts, (0, 1));
+}
+
+#[test]
+fn one_call_made_in_two_contexts_is_two_steps_at_two_paths() {
+    // `loud` reads the context `case`: made in each of its values, the same
+    // call is two steps, which the contexts alone tell apart.
+    let text = "context case: String = \"upper\"\n\
+                #[hermetic] fn loud(src: File) -> File {\n\
+                \x20   let how = if ^case == \"upper\" { \"a-z A-Z\" } else { \"A-Z a-z\" }\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr {how} < {src.path} > out.txt\"])\n\
+                \x20   file(\"out.txt\")\n\
+                }\n\
+                def build both() {\n\
+                \x20   up = loud(file(\"name.txt\"))\n\
+                \x20   down = loud(file(\"name.txt\")) with { case = \"lower\" }\n\
+                }\n";
+    let dir = workspace(&[("app/build.gcsl", text), ("app/name.txt", "Mixed\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, counts) = build_all(dir.path(), state.path(), &["both"], |_| {});
+    assert_eq!(counts, (2, 0));
+    let shown = format!("{:?}", outcomes[0]);
+    let paths: Vec<&str> = shown
+        .split("path: \"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(paths.len(), 2, "{shown}");
+    assert_ne!(paths[0], paths[1]);
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.starts_with("/pekit-out/.steps/loud/")),
+        "{shown}"
+    );
+    // Each where its target's view puts it, the second step of the function
+    // after the first.
+    let read = |at: &str| fs::read_to_string(dir.path().join(at)).unwrap();
+    let mut views = [
+        read("pekit-out/app/both/loud/out.txt"),
+        read("pekit-out/app/both/loud.2/out.txt"),
+    ];
+    views.sort();
+    assert_eq!(views, ["MIXED\n", "mixed\n"]);
+    // Built again, each is found where it was.
+    let (again, counts) = build_all(dir.path(), state.path(), &["both"], |_| {});
+    assert_eq!(counts, (0, 2));
+    assert_eq!(format!("{:?}", again[0]), shown);
 }
 
 #[test]

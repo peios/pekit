@@ -260,25 +260,25 @@ archive is unpacked only once.
 
 ## Where results go
 
-Pekit copies the files the target gives to `pekit-out/` at the root of
-the workspace. Each step writes to a directory named after the
-definition whose code made it and the step, `pekit-out/app/hello/cc/`
-for the step `cc` of `app/hello`. A target that calls a function twice
-has steps `cc` and `cc.2`.
+Each step writes to a directory of its own under `pekit-out/.steps/`,
+named after its function and a digest of what the step is: its function,
+its arguments, and the platform it runs on. Files count by their paths,
+not their contents, so `pekit-out/.steps/cc/3fa9c2e17b04d6a8/` is the same
+directory in every build that compiles that file, whichever target asks.
+Two targets that make the same call share the one step, and it runs once.
+Changing a file a step reads runs the step again in the same directory.
 
-A step that `build lib()` makes is `lib`'s, whichever target, test, or
-script calls it, so building `lib` itself finds it in the store. Two
-targets that make the same call in their own code have a step each. To
-share the work, put it in a build of its own that both call. A step that
-a library's definition makes, such as a pinned toolchain's, is under
-`pekit-out/.libraries/`, by the library's path, the same for every target
-that uses it.
+The files a target gives are copied there, and pekit also puts each one
+under `pekit-out/` by the target's name and the step that made it, as a
+link to the step's copy: `pekit-out/app/hello/cc/hello` for the program
+`app/hello`'s step `cc` made. A target with two steps of one function has
+them under `cc` and `cc.2`. This is the path `pekit build` prints.
 
 The copies are your own: you can change or delete them, and the next
 build puts them back.
 
-As the build goes, `pekit-out/` also holds every step's outputs, so a
-target can read what a step made and decide what to do next, such as
+As the build goes, `pekit-out/.steps/` also holds every step's outputs,
+so a target can read what a step made and decide what to do next, such as
 compiling each file a generator wrote. These intermediate files are
 read-only.
 
@@ -403,8 +403,8 @@ command, named with each file that differs:
 
 ```text
 error: a step is not reproducible: run again with the same inputs, it gave other outputs
-  app/drift/stamp
-    /pekit-out/app/drift/stamp/out/sub/t
+  .steps/stamp/47a3fbfe129f0e26
+    /pekit-out/.steps/stamp/47a3fbfe129f0e26/out/sub/t
 ```
 
 Only steps given the same inputs both times are compared, so a step

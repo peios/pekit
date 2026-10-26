@@ -120,7 +120,7 @@ directory kept.
 ### F2 as built
 
 - **Where:** `<store>/scratch/<digest>`, the digest of the platform and
-  the step's directory under `/pekit-out` (its target's and its name), and
+  the step's directory under `/pekit-out` (`.steps/<function>/<identity>`), and
   a lock file beside it, held with `File::try_lock` for as long as the
   step runs, through its retries, and touched when taken, for F3's
   eviction to go by. `pekit clean --cache` removes them with the store.

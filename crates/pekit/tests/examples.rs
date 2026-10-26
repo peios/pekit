@@ -553,6 +553,37 @@ fn elf_machine(path: &Path) -> u16 {
     u16::from_le_bytes([bytes[18], bytes[19]])
 }
 
+/// `text` with each step's identity, `.steps/<function>/<identity>`, as
+/// `.steps/<function>/*`: it is a digest of what the step is, the platform
+/// among it.
+fn masked(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(".steps/") {
+        let (before, after) = rest.split_at(at + ".steps/".len());
+        out.push_str(before);
+        let function = after.find('/').map_or(after.len(), |end| end + 1);
+        out.push_str(&after[..function]);
+        let after = &after[function..];
+        let digits = after.chars().take_while(char::is_ascii_hexdigit).count();
+        out.push('*');
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The one directory of the steps of `function` under `dir`'s
+/// `pekit-out/.steps`.
+fn step_dir(dir: &Path, function: &str) -> PathBuf {
+    let found: Vec<PathBuf> = fs::read_dir(dir.join("pekit-out/.steps").join(function))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    found.into_iter().next().unwrap()
+}
+
 /// Whether the file at `path` holds `text`, such as its compiler's name.
 fn holds(path: &Path, text: &str) -> bool {
     fs::read(path)
@@ -622,9 +653,7 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
         // Bootlin's `ar` records the time unless told not to, which would
         // make the library differ from one run to the next.
         if n == 2 {
-            let library = dir
-                .path()
-                .join("pekit-out/example/greet/archive/libgreet.a");
+            let library = step_dir(dir.path(), "archive").join("libgreet.a");
             let times = member_times(&library);
             assert!(
                 !times.is_empty() && times.iter().all(|time| time == "0"),
@@ -712,7 +741,7 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
     let cache = tempfile::tempdir().unwrap();
     let tests_print = |expected: &str, passes: bool| {
         let (out, success) = pekit(dir.path(), cache.path(), &["test"]);
-        assert_eq!(out, expected);
+        assert_eq!(masked(&out), expected);
         assert_eq!(success, passes, "{out}");
     };
     let edit = |path: &str, from: &str, to: &str| {
@@ -757,7 +786,7 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
     edit("test/expected_output.txt", "Hello", "Hi");
     tests_print(
         "FAILED           example/greeting\n    \
-         `/pekit-out/example/greeting_test/link/greeting_test` exited with status 1\npassed           \
+         `/pekit-out/.steps/link/*/greeting_test` exited with status 1\npassed           \
          example/output\n1 passed, 1 failed\n",
         false,
     );
@@ -886,7 +915,7 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
     let script =
         fs::read_to_string(built_file(dir.path(), file_of(&launcher.value, None))).unwrap();
     assert!(
-        script.contains("-cdrom /pekit-out/example/iso/assemble/peios.iso"),
+        masked(&script).contains("-cdrom /pekit-out/.steps/assemble/*/peios.iso"),
         "{script}"
     );
 }

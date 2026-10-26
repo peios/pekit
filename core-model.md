@@ -237,6 +237,11 @@ build, pekit says so and shows the parameter-default form.
    colliding, and `gcslib/gcc` derives `-I` from these paths as it does for
    workspace headers. This is the same idea as Bazel's `bazel-out/`.
 
+   *Changed 2026-10-26 (Jack, PEI-1596):* a step's outputs are named by what
+   the step is, `pekit-out/.steps/<function>/<identity>/`, not by the target
+   that met it, so that a step two targets reach is one step; each
+   target's results are linked under its own name (`design/engine.md`, E5).
+
    A `FileSet` is simply a list of `File`s, so that `files(...)` and
    `[f1, f2]` are the same kind of value (agreed, example 3).
 4. **Toolchains.** Jack does not want pekit to be specific to ppk. Claude's

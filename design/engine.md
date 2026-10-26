@@ -99,11 +99,30 @@ must therefore take the host's `Effects` for graph-mode units too (C1), not
 only for `evaluate`.
 
 **Step paths.** A step's outputs are under
-`/pekit-out/<target>/<step>/`, where `<step>` is the step's function's name
-and its number among the target's steps of that name, in discovery order:
-`compile`, `compile.2`. Output paths reach downstream keys, so the rule
-must give the same path across runs for the same program, which discovery
-order does; editing the program can renumber steps, which only reruns them.
+`/pekit-out/.steps/<function>/<identity>/`, where `<identity>` is 16 hex
+digits of a SHA-256 over what the step is: its function, by its file's
+name and number, and captures; its arguments, files by their paths alone,
+and another step's result by that step's name; and the platform it runs
+on (see `receipt.rs`, Identities). Output paths reach downstream keys, so
+the rule must give the same path in every build that makes the step,
+whichever targets reach it and in whatever order; and since GCSL's graph
+makes one call one node, whichever definition makes it, a step two
+targets reach is one step and runs once. Contexts name no step, so that
+binding one moves only the steps that read it (R2); two steps a build
+makes that only their contexts tell apart are named by those contexts'
+digest too, the later met. A target's results are linked under
+`pekit-out/<target>/<function>/`, `<function>.2` for its second step of
+that function, which is the path the commands print.
+
+*Changed 2026-10-26 (Jack, PEI-1596).* Steps were first named
+`/pekit-out/<target>/<function>.N`, by the target that met them and in
+discovery order. That put the target in every step's key, so a step two
+targets reached ran once for each and so did everything after it, and a
+change that renumbered steps reran every later one. Per-crate Rust, where
+each of a workspace's binaries reaches about a hundred shared crates,
+needs neither. Naming by content, as Nix does, was rejected: it loses
+early cutoff, since a rebuilt input with the same bytes would move every
+step after it.
 
 A hermetic step runs under bubblewrap, with:
 - no network, its own user, pid and mount namespaces;
@@ -111,7 +130,7 @@ A hermetic step runs under bubblewrap, with:
   outputs of earlier steps at their `/pekit-out` paths, materialised from
   the store;
 - a fresh writable working directory, which is the step's
-  `/pekit-out/<target>/<step>/` path;
+  `/pekit-out/.steps/<function>/<identity>/` path;
 - an empty environment but for what the step's `exec` sets, `PATH` empty.
 
 Its result's files are captured into the store and given back at their
@@ -194,7 +213,8 @@ Each leaves pekit2 working, and tested, as far as it goes.
   files' sources, coarse but correct; a result holding a secret is never
   recorded.
 - E5: the logical layout `/w` and `/pekit-out`, and steps named by function
-  and number in discovery order.
+  and number in discovery order; since 2026-10-26, by function and
+  identity, under `/pekit-out/.steps`.
 - E5: a step's working directory is its `pekit-out/` path, `PATH` empty.
   As built, with the host snapshot below, a step whose `exec` sets no
   `PATH` gets `/usr/bin:/bin:/usr/sbin:/sbin`, since gcc finds its own

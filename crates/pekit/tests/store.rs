@@ -5,7 +5,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use gcsl::eval::plain::Plain;
-use pekit::receipt::{ReceiptOf, receipt};
+use pekit::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use pekit::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use pekit::store::{Digest, Store};
 
@@ -145,7 +145,7 @@ fn a_tree_materialised_is_known_so_until_anything_of_it_changes() {
 
 /// digests of `contents`, by path.
 fn receipt_of(args: &[Plain], contents: &[(&str, &[u8])]) -> Digest {
-    receipt_in("/pekit-out/app/hello/compile", args, contents)
+    receipt_in("/pekit-out/.steps/compile/0123456789abcdef", args, contents)
 }
 
 /// The receipt of a step whose output directory is `own`, given `args`, its
@@ -282,4 +282,83 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         stored(&result, &std::collections::HashMap::new()),
         Err(StoreError::Unkept(path)) if path == "/pekit-out/hello"
     ));
+}
+
+/// The identity of a step of the function number `function` of
+/// `app/build.gcsl`, given `args`, its earlier steps' names by node.
+fn identity_of(function: u32, args: &[Plain], steps: &[(u32, &str)]) -> Digest {
+    let callee = Plain::Closure {
+        input: 0,
+        function,
+        captures: Vec::new(),
+    };
+    let code_name = |input: u32| (input == 0).then(|| "app/build.gcsl".to_owned());
+    let step_of = |node: u32| {
+        steps
+            .iter()
+            .find(|(number, _)| *number == node)
+            .map(|(_, name)| (*name).to_owned())
+    };
+    identity(IdentityOf {
+        callee: &callee,
+        args,
+        context: &[],
+        platform: "x86_64-linux",
+        code_name: &code_name,
+        step_of: &step_of,
+    })
+    .unwrap()
+}
+
+#[test]
+fn an_identity_is_what_a_step_is_apart_from_its_inputs_contents() {
+    let file = |path: &str| Plain::File {
+        path: path.to_owned(),
+        identity: None,
+    };
+    let base = identity_of(1, &[file("/w/a.c")], &[]);
+    // Its files by their paths alone: no contents are asked for, and the
+    // same path is the same identity, whatever is there.
+    assert_eq!(base, identity_of(1, &[file("/w/a.c")], &[]));
+    assert_ne!(base, identity_of(1, &[file("/w/b.c")], &[]));
+    // Another function, or other data: another identity.
+    assert_ne!(base, identity_of(2, &[file("/w/a.c")], &[]));
+    assert_ne!(base, identity_of(1, &[file("/w/a.c"), Plain::Int(1)], &[]));
+    // A step's result, by that step's name.
+    let after = identity_of(1, &[Plain::Step(3)], &[(3, "compile/0011223344556677")]);
+    assert_eq!(
+        after,
+        identity_of(1, &[Plain::Step(7)], &[(7, "compile/0011223344556677")])
+    );
+    assert_ne!(
+        after,
+        identity_of(1, &[Plain::Step(3)], &[(3, "compile/8899aabbccddeeff")])
+    );
+    // A step's result in a receipt, which only an identity names, is an
+    // error, as one of a step no name is known for in an identity is.
+    let callee = Plain::Closure {
+        input: 0,
+        function: 1,
+        captures: Vec::new(),
+    };
+    let unnamed = identity(IdentityOf {
+        callee: &callee,
+        args: &[Plain::Step(3)],
+        context: &[],
+        platform: "x86_64-linux",
+        code_name: &|_| Some("app/build.gcsl".to_owned()),
+        step_of: &|_| None,
+    });
+    assert!(unnamed.is_err());
+    let code = [("app/build.gcsl".to_owned(), Digest::of(b"code"))];
+    let of = ReceiptOf {
+        code: &code,
+        args: &[Plain::Step(3)],
+        captures: &[],
+        context: &[],
+        own: "/pekit-out/.steps/x/0",
+        code_of: &|_| None,
+        platform: "x86_64-linux",
+    };
+    assert!(receipt(of, &mut |_, _| Ok(Digest::of(b""))).is_err());
 }

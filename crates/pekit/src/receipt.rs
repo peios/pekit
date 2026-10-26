@@ -23,12 +23,38 @@
 //!   definition say, by the name and contents of its code's file, its number
 //!   in that code, and its captures, as GCSL keys it
 //!   ([`Plain::Closure`]);
-//! - its own output directory, `/pekit-out/<target>/<step>`, which names
-//!   the files it makes;
+//! - its own output directory, `/pekit-out/.steps/<function>/<identity>`,
+//!   which names the files it makes (see [Identities](#identities));
 //! - the platform it runs on.
 //!
 //! Its attributes are not on it: `#[retry]` and `#[timeout]` change how it
 //! runs, not what it gives.
+//!
+//! # Identities
+//!
+//! A step's *identity* names its output directory,
+//! `/pekit-out/.steps/<function>/<identity>`, so that a step is at the same
+//! path in every build that makes it, whichever targets reach it, in
+//! whatever order (see `design/engine.md`, E5). It is a SHA-256 over what
+//! the step is, apart from its inputs' contents:
+//!
+//! - its callee: the name of its code's file and its function's number in
+//!   that code, and its captures;
+//! - its arguments, as plain data, every file and directory by its path
+//!   alone, and each result of a step not given yet by that step's
+//!   identity, so that a step is named before the steps it waits for run;
+//! - the platform it runs on.
+//!
+//! The contexts it was made in name no step, so that binding one moves only
+//! the steps that read it, as their receipts say (see `design/engine.md`,
+//! R2). Two steps a build makes that only their contexts tell apart, one
+//! compile for two platforms say, are named by the digest of those contexts
+//! too, the later met.
+//!
+//! Its inputs' contents are its receipt's alone: a rebuilt input with the
+//! same bytes keys the steps after it the same, and a changed one reruns
+//! them at the same paths. One call made by two targets, or twice, is one
+//! step, which GCSL's graph makes once.
 
 use gcsl::eval::plain::Plain;
 use sha2::{Digest as _, Sha256};
@@ -72,10 +98,12 @@ pub fn receipt(
     contents: &mut dyn FnMut(&str, bool) -> Result<Digest, String>,
 ) -> Result<Digest, String> {
     let mut hasher = Sha256::new();
+    let none = |_: u32| None;
     let mut out = Encoder {
         hasher: &mut hasher,
         contents,
         code_of: of.code_of,
+        step_of: &none,
     };
     out.text("pekit-receipt-3");
     out.count(of.code.len());
@@ -114,6 +142,9 @@ struct Encoder<'a> {
     contents: &'a mut dyn FnMut(&str, bool) -> Result<Digest, String>,
     /// The name and contents' digest of the file of each input number.
     code_of: &'a dyn Fn(u32) -> Option<(String, Digest)>,
+    /// The name of each step whose result, not given yet, is written, by its
+    /// node's number: an identity's alone.
+    step_of: &'a dyn Fn(u32) -> Option<String>,
 }
 
 impl Encoder<'_> {
@@ -233,6 +264,13 @@ impl Encoder<'_> {
                 function,
                 captures,
             } => self.closure(*input, *function, captures)?,
+            Plain::Step(node) => {
+                let name = (self.step_of)(*node).ok_or_else(|| {
+                    "a step's result not given yet, which only names a step".to_owned()
+                })?;
+                self.bytes(b"p");
+                self.text(&name);
+            }
             Plain::Sandbox { root, cwd, env } => {
                 self.bytes(b"x");
                 self.text(root);
@@ -246,6 +284,56 @@ impl Encoder<'_> {
         }
         Ok(())
     }
+}
+
+/// What a step's identity is made of (see [Identities](#identities)).
+#[derive(Clone, Copy)]
+pub struct IdentityOf<'a> {
+    /// Its callee, a closure's plain form.
+    pub callee: &'a Plain,
+    /// Its arguments, in parameter order.
+    pub args: &'a [Plain],
+    /// The contexts that name it, by key, sorted, each with its value: none,
+    /// but to tell two steps apart that only their contexts do.
+    pub context: &'a [(String, Plain)],
+    /// The platform it runs on, as pekit describes it.
+    pub platform: &'a str,
+    /// The name of the file of each input number, which a function in its
+    /// callee, arguments or context is named by.
+    pub code_name: &'a dyn Fn(u32) -> Option<String>,
+    /// The name of each step, by its node's number, whose result it is
+    /// given, not given yet, which names it.
+    pub step_of: &'a dyn Fn(u32) -> Option<String>,
+}
+
+/// The identity of a step made of `of` (see [Identities](#identities)).
+///
+/// # Errors
+///
+/// An argument that is no data, or a function of no file the build has.
+pub fn identity(of: IdentityOf<'_>) -> Result<Digest, String> {
+    let mut hasher = Sha256::new();
+    let mut by_path = |_: &str, _: bool| Ok(Digest::of(b""));
+    let code_of = |input: u32| (of.code_name)(input).map(|name| (name, Digest::of(b"")));
+    let mut out = Encoder {
+        hasher: &mut hasher,
+        contents: &mut by_path,
+        code_of: &code_of,
+        step_of: of.step_of,
+    };
+    out.text("pekit-identity-1");
+    out.plain(of.callee)?;
+    out.count(of.args.len());
+    for arg in of.args {
+        out.plain(arg)?;
+    }
+    out.count(of.context.len());
+    for (key, plain) in of.context {
+        out.text(key);
+        out.plain(plain)?;
+    }
+    out.text(of.platform);
+    Ok(Digest::from_hasher(hasher))
 }
 
 /// What a program's key is made of (see `design/additive.md`, F1).
@@ -275,10 +363,12 @@ pub fn exec_key(of: ExecOf<'_>) -> Result<Digest, String> {
     let mut hasher = Sha256::new();
     let mut by_path = |path: &str, _: bool| Ok(Digest::of(path.as_bytes()));
     let none = |_: u32| None;
+    let unnamed = |_: u32| None;
     let mut out = Encoder {
         hasher: &mut hasher,
         contents: &mut by_path,
         code_of: &none,
+        step_of: &unnamed,
     };
     out.text("pekit-exec-1");
     out.text(&of.view.hex());

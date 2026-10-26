@@ -186,6 +186,29 @@ fn kinds(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
+/// `text` with each step's name, `<function>/<identity>`, as its function's
+/// name alone.
+fn unnamed(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('/') {
+        let (before, after) = rest.split_at(at);
+        let digits = after[1..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .count();
+        if digits == 16 {
+            out.push_str(before);
+            rest = &after[1 + digits..];
+        } else {
+            out.push_str(&rest[..=at]);
+            rest = &after[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     let text = format!(
@@ -199,8 +222,15 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     let state = tempfile::tempdir().unwrap();
     let (built, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
     built.unwrap();
+    // Each step by its function's name, its identity left out.
+    let shown = |events: &[Event]| -> Vec<String> {
+        kinds(events)
+            .into_iter()
+            .map(|kind| unnamed(&kind))
+            .collect()
+    };
     assert_eq!(
-        kinds(&events),
+        shown(&events),
         [
             "Discovered { step: \"shout\" }",
             "Discovered { step: \"copy\" }",
@@ -225,7 +255,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     let (again, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
     again.unwrap();
     assert_eq!(
-        kinds(&events),
+        shown(&events),
         [
             "Discovered { step: \"shout\" }",
             "Discovered { step: \"copy\" }",

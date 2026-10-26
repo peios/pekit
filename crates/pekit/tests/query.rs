@@ -66,6 +66,26 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// `text` with each step's identity, `.steps/<function>/<identity>`, as
+/// `.steps/<function>/*`: it is a digest of what the step is, the platform
+/// among it.
+fn masked(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(".steps/") {
+        let (before, after) = rest.split_at(at + ".steps/".len());
+        out.push_str(before);
+        let function = after.find('/').map_or(after.len(), |end| end + 1);
+        out.push_str(&after[..function]);
+        let after = &after[function..];
+        let digits = after.chars().take_while(char::is_ascii_hexdigit).count();
+        out.push('*');
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What `output` printed on its standard output and standard error.
 fn shown(output: &Output) -> (String, String) {
     (
@@ -86,21 +106,22 @@ fn deps_lists_each_step_a_target_reaches_and_what_each_reads() {
     );
     let (out, err) = shown(&queried);
     assert!(queried.status.success(), "{err}");
+    // `waits` reaches the step `chain` does, the same call: one step.
     assert_eq!(
-        out,
+        masked(&out),
         "app/chain\n\
          \x20 code: app/build.gcsl\n\
-         \x20 step app/chain/upper\n\
+         \x20 step .steps/upper/*\n\
          \x20   code: app/build.gcsl\n\
          \x20   reads: app/in.txt\n\
-         \x20 step app/chain/steady\n\
+         \x20 step .steps/steady/*\n\
          \x20   code: app/build.gcsl\n\
-         \x20 step app/chain/joined\n\
+         \x20 step .steps/joined/*\n\
          \x20   code: app/build.gcsl\n\
-         \x20   after: app/chain/steady, app/chain/upper\n\
+         \x20   after: .steps/steady/*, .steps/upper/*\n\
          app/waits\n\
          \x20 code: app/build.gcsl\n\
-         \x20 step app/waits/steady\n\
+         \x20 step .steps/steady/*\n\
          \x20   code: app/build.gcsl\n\
          \x20 unknown: it waits at app/build.gcsl:15 for a step's result, so what it reaches \
          after is known only once that step runs\n\

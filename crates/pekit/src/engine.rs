@@ -25,14 +25,18 @@
 //! recorded, unless its result holds a secret, and its outputs are kept by
 //! their logical paths, so that the steps after it are staged with them. Once
 //! the target's value has no holes, the files under `/pekit-out` it names are
-//! copied out to the output directory, each a copy of its own.
+//! copied out to the output directory, each a copy of its own, and linked
+//! under the target's name.
 //!
 //! Several targets are one build ([`build_all_observed`]): each is a unit of
 //! its own, against the one graph, so that a step two of them reach runs
-//! once and their steps run at once. A step is the target's whose unit met
-//! it, or met the step that met it, and its directory is under that
-//! target's, its name counted among that target's steps. A target that
-//! fails, in its evaluation or by a step it needs, fails alone. Under
+//! once and their steps run at once. A step is reported as the target's
+//! whose unit met it first, or met the step that met it; its directory is
+//! named by what it is, `/pekit-out/.steps/<function>/<identity>`, the same
+//! whichever targets reach it (see [Identities](crate::receipt#identities)),
+//! and each target's results are linked under its own name too
+//! ([`target_view`]). A target that fails, in its evaluation or by a step
+//! it needs, fails alone. Under
 //! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
 //! dependency, fails there.
 
@@ -65,7 +69,7 @@ use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
-use crate::receipt::{ReceiptOf, receipt};
+use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use crate::record::{
     Kept, Manifest, StepRecord, StoreError, Stored, differences, keep_files, manifest_key, stored,
 };
@@ -96,6 +100,13 @@ const KEYCHAIN_KEYS: &str = "keychain_keys";
 
 /// The context the `packaging` module lists the packagers in.
 const PACKAGERS: &str = "packagers";
+
+/// The directory under `/pekit-out` that steps' directories are in, each
+/// `<function>/<identity>`.
+pub const STEPS: &str = ".steps";
+
+/// How many hex digits of its digest name a step's identity: 64 bits.
+const IDENTITY_DIGITS: usize = 16;
 
 /// Why a strict build refuses `job`, an effect of a target's own code, if it
 /// does (see [`Settings::strict`]): it runs a program, writes, or reads a
@@ -312,8 +323,12 @@ pub struct Mismatch {
 pub struct StepReport {
     /// The target it was of, by its place among the targets given.
     pub target: usize,
-    /// Its name, as its directory under its target's has it.
+    /// Its name, `<function>/<identity>`, as its directory under
+    /// `/pekit-out/.steps` has it.
     pub name: String,
+    /// Its function's name, a definition's last segment for a definition's
+    /// body.
+    pub function: String,
     /// Whether it was found in the store.
     pub cached: bool,
     /// Whether it passed only on a retry.
@@ -564,7 +579,7 @@ fn build_roots(
     for index in 0..run.roots.len() {
         let done = run.roots.get_mut(index).and_then(|root| root.done.take());
         let outcome = match done {
-            Some(Ok(value)) => run.copy_out(&value).and_then(|()| {
+            Some(Ok(value)) => run.copy_out(&value, index).and_then(|()| {
                 run.loaded
                     .workspace
                     .to_plain(&value)
@@ -672,8 +687,7 @@ fn new_run<'a>(
         steps: HashMap::new(),
         step_names: HashMap::new(),
         step_roots: HashMap::new(),
-        step_dirs: HashMap::new(),
-        names_used: HashMap::new(),
+        named_steps: HashMap::new(),
         named: 0,
         pool: Pool::new(settings.jobs.max(1)),
         in_flight: HashMap::new(),
@@ -868,31 +882,6 @@ fn read_keys(step: &StepRun) -> Vec<String> {
     keys
 }
 
-/// The directory under `/pekit-out` of the steps of `definition`: its
-/// qualified name, a library's under `.libraries/`, which no directory of a
-/// workspace can be, and one made with a variant under its def-type and
-/// variant too, `Toolchain.C/gcc`, so that two of one name never share one.
-fn definition_dir(definition: &gcsl::workspace::Referenced) -> String {
-    let dir = match definition.dir.strip_prefix(gcsl::workspace::LIBRARIES) {
-        Some(rest) => format!(".libraries{rest}"),
-        None => definition.dir.clone(),
-    };
-    let name = if definition.def_type.contains("::") {
-        format!(
-            "{}/{}",
-            definition.def_type.replace("::", "."),
-            definition.path
-        )
-    } else {
-        definition.path.clone()
-    };
-    if dir.is_empty() {
-        name
-    } else {
-        format!("{dir}/{name}")
-    }
-}
-
 /// The devices a step of a function with `attributes` is bound, by its
 /// `#[device(NAME)]`s: `/dev/kvm` for `kvm`, where this machine has it, and
 /// nothing where it doesn't, since a device changes how fast a step runs,
@@ -1045,15 +1034,14 @@ struct Run<'a> {
     outputs: HashMap<String, Kept>,
     /// The steps running, by node.
     steps: HashMap<NodeId, StepRun>,
-    /// Each step's name, `<function>` or `<function>.<n>`, by node.
-    step_names: HashMap<NodeId, String>,
+    /// Each step's name, `<function>/<identity>`, by node: its directory
+    /// under `/pekit-out/.steps`.
+    step_names: HashMap<u32, String>,
     /// The target each step is of, by node, its number among the roots.
     step_roots: HashMap<NodeId, usize>,
-    /// The directory under `/pekit-out` of each step, by node: the
-    /// definition's whose call made it, or failing one its target's.
-    step_dirs: HashMap<NodeId, String>,
-    /// How many steps of each function's name each directory has named.
-    names_used: HashMap<(String, String), u32>,
+    /// The step each name is of, so that two steps of one identity but for
+    /// the workspace's configuration are told apart.
+    named_steps: HashMap<String, NodeId>,
     /// How many of the graph's nodes have been looked at to name steps.
     named: usize,
     /// The pool effects run on.
@@ -1318,9 +1306,12 @@ impl Run<'_> {
     /// Reports the step `id` as found in the store or passed, whether it was
     /// found, and whether it passed only on a retry, as `(cached, flaky)`.
     fn report(&mut self, id: NodeId, (cached, flaky): (bool, bool)) {
+        let name = self.step_name(id);
+        let function = name.split('/').next().unwrap_or_default().to_owned();
         self.reports.push(StepReport {
             target: self.step_roots.get(&id).copied().unwrap_or(0),
-            name: self.step_name(id),
+            name,
+            function,
             cached,
             flaky,
         });
@@ -1373,7 +1364,7 @@ impl Run<'_> {
                     .is_some_and(|node| node.kind() == NodeKind::Deferred)
             })
             .map(|&id| StepDeps {
-                name: format!("{}/{}", self.step_dir(id), self.step_name(id)),
+                name: self.own_dir(id),
                 code: shown(workspace.node_code_files(&self.graph, id)),
                 reads: self.node_reads(id),
                 after: self.steps_after(id),
@@ -1381,7 +1372,11 @@ impl Run<'_> {
             .collect();
         let waits = root.waits.and_then(|id| {
             let node = self.graph.node(id)?;
-            let (span, file) = (node.span(), node.input());
+            // Where its own code met it, which another target's step need
+            // not have been made.
+            let (file, span) = call
+                .and_then(|call| self.graph.met_at(call.unit(), id))
+                .unwrap_or((node.input(), node.span()));
             let source = self.loaded.sources.get(file as usize)?;
             let line = source
                 .text()
@@ -1439,7 +1434,7 @@ impl Run<'_> {
                         .node(edge)
                         .is_some_and(|found| found.kind() == NodeKind::Deferred)
             })
-            .map(|edge| format!("{}/{}", self.step_dir(edge), self.step_name(edge)))
+            .map(|edge| self.own_dir(edge))
             .collect();
         after.sort();
         after.dedup();
@@ -1475,14 +1470,10 @@ impl Run<'_> {
         reads
     }
 
-    /// The directory under `/pekit-out` of the step `id`
-    /// ([`Run::name_new_steps`]).
-    fn step_dir(&self, id: NodeId) -> &str {
-        if let Some(dir) = self.step_dirs.get(&id) {
-            return dir;
-        }
-        let root = self.step_roots.get(&id).copied().unwrap_or(0);
-        self.roots.get(root).map_or("", |found| found.dir.as_str())
+    /// The directory under `/pekit-out` of the step `id`,
+    /// `.steps/<function>/<identity>` ([`Run::name_new_steps`]).
+    fn own_dir(&self, id: NodeId) -> String {
+        format!("{STEPS}/{}", self.step_name(id))
     }
 
     /// Whether the node `id` is still waiting for its result.
@@ -1820,14 +1811,12 @@ impl Run<'_> {
     }
 
     /// Names every step the graph has that is not named, in the order the
-    /// target's code met them, which is the same in every build whatever
-    /// order steps finish in: its function's name, and its number among the
-    /// steps of that name of its directory after the first, `compile.2`.
-    /// A step's directory is that of the definition whose call made it,
-    /// `app/lib` for one `build lib()` made, whichever target called it, so
-    /// that its outputs, which key it, are the same in every build that
-    /// reaches it ([`gcsl::workspace::Workspace::step_definition`]); one a
-    /// target's own code made is its target's.
+    /// target's code met them: its function's name and its identity, which
+    /// is the same in every build that makes it, whichever targets reach it
+    /// (see [Identities](crate::receipt#identities)). Two steps whose
+    /// identities are one, which only the contexts they were made in tell
+    /// apart, are told apart by the digest of those contexts too, the later
+    /// met.
     fn name_new_steps(&mut self) {
         let mut found = Vec::new();
         for (id, node) in self.graph.nodes().skip(self.named) {
@@ -1846,33 +1835,56 @@ impl Run<'_> {
         for (id, function, root) in found {
             self.step_roots.insert(id, root);
             self.unit_roots.insert(STEP_UNITS + id.number(), root);
-            let dir = match self.loaded.workspace.step_definition(&self.graph, id) {
-                Some(definition) => definition_dir(&definition),
-                None => self
-                    .roots
-                    .get(root)
-                    .map_or_else(String::new, |found| found.dir.clone()),
-            };
-            let count = self
-                .names_used
-                .entry((dir.clone(), function.clone()))
-                .or_insert(0);
-            self.step_dirs.insert(id, dir);
-            *count += 1;
-            let name = if *count == 1 {
-                function
-            } else {
-                format!("{function}.{count}")
-            };
-            self.step_names.insert(id, name.clone());
+            let mut name = format!("{function}/{}", self.identity_of(id, false));
+            if self
+                .named_steps
+                .get(&name)
+                .is_some_and(|&other| other != id)
+            {
+                name = format!("{name}-{}", self.identity_of(id, true));
+            }
+            self.named_steps.insert(name.clone(), id);
+            self.step_names.insert(id.number(), name.clone());
             self.emit(EventKind::Discovered { step: name });
+        }
+    }
+
+    /// The identity of the step `id`, as the start of its digest's hex (see
+    /// [Identities](crate::receipt#identities)), every context it was made
+    /// in naming it if `every`: its node's number if it cannot be had, which
+    /// starting it then fails on.
+    fn identity_of(&self, id: NodeId, every: bool) -> String {
+        let made = self
+            .loaded
+            .workspace
+            .step_identity(&self.graph, id)
+            .and_then(|inputs| {
+                let callee = inputs.callee.ok_or("a step with no callee")?;
+                let context: Vec<(String, Plain)> =
+                    inputs.context.into_iter().filter(|_| every).collect();
+                let table = Rc::clone(&self.code_table);
+                let code_name =
+                    move |input: u32| table.get(input as usize).map(|(name, _)| name.clone());
+                let step_of = |node: u32| self.step_names.get(&node).cloned();
+                identity(IdentityOf {
+                    callee: &callee,
+                    args: &inputs.args,
+                    context: &context,
+                    platform: &self.settings.platform,
+                    code_name: &code_name,
+                    step_of: &step_of,
+                })
+            });
+        match made {
+            Ok(digest) => digest.hex().chars().take(IDENTITY_DIGITS).collect(),
+            Err(_) => format!("node-{}", id.number()),
         }
     }
 
     /// The name of the step `id` ([`Run::name_new_steps`]).
     fn step_name(&self, id: NodeId) -> String {
         self.step_names
-            .get(&id)
+            .get(&id.number())
             .cloned()
             .unwrap_or_else(|| format!("step-{}", id.number()))
     }
@@ -1964,7 +1976,7 @@ impl Run<'_> {
             .filter_map(|&file| self.code_table.get(file as usize).cloned())
             .collect();
         let name = self.step_name(id);
-        let own = format!("{}/{name}", self.step_dir(id));
+        let own = self.own_dir(id);
         let own_path = format!("{OUTPUTS}/{own}");
         let keyed = Keyed {
             code,
@@ -2337,7 +2349,11 @@ impl Run<'_> {
             Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
         }
         if step.failed_once {
-            let name = self.step_names.get(&id).cloned().unwrap_or_default();
+            let name = self
+                .step_names
+                .get(&id.number())
+                .cloned()
+                .unwrap_or_default();
             self.flaky.push(name);
         }
         self.report(id, (false, step.failed_once));
@@ -2366,7 +2382,7 @@ impl Run<'_> {
         {
             if first.result != result {
                 let differences = differences(&self.store, &first.result, &result);
-                let step = format!("{}/{}", self.step_dir(id), self.step_name(id));
+                let step = self.own_dir(id);
                 self.mismatches.push(Mismatch { step, differences });
             }
             return Ok(());
@@ -2548,7 +2564,7 @@ impl Run<'_> {
             return Ok(());
         };
         self.unstage(id, &step)?;
-        let own = format!("{}/{name}", self.step_dir(id));
+        let own = self.own_dir(id);
         let attempt = step.attempt + 1;
         let sandbox = self.fresh_sandbox(
             id,
@@ -2637,15 +2653,18 @@ impl Run<'_> {
         self.finish_now(node, value);
     }
 
-    /// Copies every output under `/pekit-out` that `value` names out to the
-    /// output directory, each file a copy of its own.
-    fn copy_out(&self, value: &Value) -> Result<(), BuildError> {
+    /// Copies every output under `/pekit-out` that `value`, the value of the
+    /// root `index`, names out to the output directory, each file a copy of
+    /// its own, and makes its target's view of those its steps made (see
+    /// [`target_view`]).
+    fn copy_out(&self, value: &Value, index: usize) -> Result<(), BuildError> {
         let plain = self
             .loaded
             .workspace
             .to_plain(value)
             .map_err(BuildError::Engine)?;
-        for (path, _) in plain.files() {
+        let files = plain.files();
+        for &(path, _) in &files {
             let Some(at) = output_path(&self.settings.outputs, path) else {
                 continue;
             };
@@ -2661,8 +2680,100 @@ impl Run<'_> {
             };
             copied.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))?;
         }
+        let Some(root) = self.roots.get(index) else {
+            return Ok(());
+        };
+        let paths: Vec<&str> = files.iter().map(|&(path, _)| path).collect();
+        for (path, view) in target_view(&root.dir, &paths) {
+            let (Some(from), Some(at)) = (
+                output_path(&self.settings.outputs, &path),
+                output_path(&self.settings.outputs, &view),
+            ) else {
+                continue;
+            };
+            link_view(&from, &at)
+                .map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))?;
+        }
         Ok(())
     }
+}
+
+/// The view of the outputs a target's value names that steps made, each
+/// under `/pekit-out/.steps/<function>/<identity>/`: each at the same path
+/// under `/pekit-out/<target>/<function>/`, the steps of one function told
+/// apart in the order the value first names them, `<function>.2` the second,
+/// so that what a build made is found by its target's name. Each output's
+/// logical path, with its view's.
+#[must_use]
+pub fn target_view(target: &str, paths: &[&str]) -> Vec<(String, String)> {
+    let prefix = format!("{OUTPUTS}/{STEPS}/");
+    let mut named: Vec<(String, String)> = Vec::new();
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut views = Vec::new();
+    for &path in paths {
+        let Some(rest) = path.strip_prefix(&prefix) else {
+            continue;
+        };
+        let mut parts = rest.splitn(3, '/');
+        let (Some(function), Some(identity)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let step = format!("{function}/{identity}");
+        let known = named
+            .iter()
+            .find(|(known, _)| *known == step)
+            .map(|(_, shown)| shown.clone());
+        let shown = known.unwrap_or_else(|| {
+            let count = counts.entry(function.to_owned()).or_insert(0);
+            *count += 1;
+            let shown = if *count == 1 {
+                function.to_owned()
+            } else {
+                format!("{function}.{count}")
+            };
+            named.push((step, shown.clone()));
+            shown
+        });
+        let view = match parts.next() {
+            Some(inner) => format!("{OUTPUTS}/{target}/{shown}/{inner}"),
+            None => format!("{OUTPUTS}/{target}/{shown}"),
+        };
+        if !views
+            .iter()
+            .any(|(known, _): &(String, String)| *known == path)
+        {
+            views.push((path.to_owned(), view));
+        }
+    }
+    views
+}
+
+/// Makes `at` a symbolic link to `from`, by a relative path, whatever was
+/// there before.
+fn link_view(from: &Path, at: &Path) -> io::Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(at) {
+        if meta.is_dir() {
+            fs::remove_dir_all(at)?;
+        } else {
+            fs::remove_file(at)?;
+        }
+    }
+    let parent = at.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    std::os::unix::fs::symlink(relative_to(from, parent), at)
+}
+
+/// The path from the directory `base` to `to`, both absolute.
+fn relative_to(to: &Path, base: &Path) -> PathBuf {
+    let to: Vec<_> = to.components().collect();
+    let from: Vec<_> = base.components().collect();
+    let shared = to.iter().zip(&from).take_while(|(a, b)| a == b).count();
+    let mut path = PathBuf::new();
+    for _ in shared..from.len() {
+        path.push("..");
+    }
+    path.extend(&to[shared..]);
+    path
 }
 
 /// The path under the output directory a logical output path is at.

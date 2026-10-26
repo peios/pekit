@@ -115,10 +115,13 @@ fn a_build_that_gives_a_program_runs_it_and_exits_as_it_does() {
     assert_eq!(ran.status.code(), Some(3));
     // A file that is no program, or a value that is no file, is not run.
     let (_, err) = shown(&pekit(&app, cache.path(), &["run", "loud"]));
-    assert_eq!(
-        err,
-        "error: `/pekit-out/app/loud/shout/out.txt` is no executable file, so it cannot be run\n"
-    );
+    let step = err
+        .strip_prefix("error: `/pekit-out/.steps/shout/")
+        .and_then(|rest| {
+            rest.strip_suffix("/out.txt` is no executable file, so it cannot be run\n")
+        })
+        .unwrap_or_else(|| panic!("{err}"));
+    assert_eq!(step.len(), 16, "{err}");
     let (_, err) = shown(&pekit(&app, cache.path(), &["run", "record"]));
     assert_eq!(
         err,

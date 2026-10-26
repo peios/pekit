@@ -120,11 +120,12 @@ fn a_build_s_trace_is_written_where_asked() {
     assert!(built.status.success(), "{}", printed(&built).1);
     let trace: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let events = trace["traceEvents"].as_array().unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|event| event["ph"] == "b" && event["name"] == "shout")
-    );
+    assert!(events.iter().any(|event| {
+        event["ph"] == "b"
+            && event["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("shout/"))
+    }));
     assert!(
         events
             .iter()
@@ -339,10 +340,18 @@ fn check_reproducible_runs_every_step_again_and_names_what_differs() {
     );
     let (_, err) = printed(&checked);
     assert!(!checked.status.success());
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 3, "{err}");
     assert_eq!(
-        err,
-        "error: a step is not reproducible: run again with the same inputs, it gave other \
-         outputs\n  app/drift/stamp\n    /pekit-out/app/drift/stamp/out/sub/t\n"
+        lines[0],
+        "error: a step is not reproducible: run again with the same inputs, it gave other outputs"
+    );
+    let step = lines[1]
+        .strip_prefix("  .steps/stamp/")
+        .unwrap_or_else(|| panic!("{err}"));
+    assert_eq!(
+        lines[2],
+        format!("    /pekit-out/.steps/stamp/{step}/out/sub/t")
     );
     // What changes the world is not done twice to check it.
     let (_, err) = printed(&pekit(
@@ -379,8 +388,8 @@ fn check_reproducible_runs_again_what_a_top_level_or_a_memoised_call_made() {
     // second must run it too, not take what the first left in the
     // workspace, or it compares nothing.
     for (name, step) in [
-        ("top/at_top", "top/at_top/stamp"),
-        ("memo/memoised", "memo/memoised/stamp"),
+        ("top/at_top", ".steps/stamp/"),
+        ("memo/memoised", ".steps/stamp/"),
     ] {
         let cache = tempfile::tempdir().unwrap();
         let checked = pekit(
@@ -592,8 +601,16 @@ fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
         out.starts_with("built app/reads: 0 steps run, 1 found"),
         "{out}"
     );
-    let placed = dir.path().join("pekit-out/app/reads/made/out/f");
-    assert_eq!(fs::read_to_string(placed).unwrap(), "inside\n");
+    // Under its step's directory, named by what the step is.
+    let made: Vec<_> = fs::read_dir(dir.path().join("pekit-out/.steps/made"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert_eq!(
+        fs::read_to_string(made[0].join("out/f")).unwrap(),
+        "inside\n"
+    );
 }
 
 #[test]
