@@ -1153,3 +1153,51 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
     assert!(holds(&ppk, "ld-linux-x86-64.so.2"));
 }
+
+#[test]
+fn the_rust_library_builds_ppk_one_crate_at_a_time() {
+    let source = repository().join("../ppk");
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) =
+        seeded(&names).filter(|_| rust.len() > 4 && source.join("Cargo.lock").is_file())
+    else {
+        eprintln!("skipped: Rust, the crates or ppk's source are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    copy_tree(
+        &repository().join("tests/fixtures/rust"),
+        &dir.path().join("example"),
+    );
+    libraries(&dir.path().join(".gcsl/libraries"));
+    fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
+    committed(&source, &dir.path().join("example/src"));
+    let built = build_in(dir.path(), state.path(), "ppk_crates").unwrap();
+    let ppk = built_file(dir.path(), file_of(&built.value, None));
+    let version = Command::new(&ppk).arg("--version").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
+    assert!(holds(&ppk, "ld-linux-x86-64.so.2"));
+    // Each crate a step: far more than Cargo's one.
+    assert!(built.ran > 50, "{}", built.ran);
+    // Built again, nothing runs.
+    let again = build_in(dir.path(), state.path(), "ppk_crates").unwrap();
+    assert_eq!(again.ran, 0);
+    // A change to ppk's own library compiles it, and the program that links
+    // it, again: none of the crates it uses, nor Cargo's plan, which reads
+    // no source.
+    let lib = dir.path().join("example/src/src/lib.rs");
+    let text = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{text}// changed\n")).unwrap();
+    let changed = build_in(dir.path(), state.path(), "ppk_crates").unwrap();
+    assert_eq!(changed.ran, 2);
+    let version = Command::new(built_file(dir.path(), file_of(&changed.value, None)))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
+}

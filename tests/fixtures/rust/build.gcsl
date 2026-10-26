@@ -15,3 +15,14 @@ def build ppk_glibc() {
         target = "x86_64-unknown-linux-gnu",
     )
 }
+
+# ppk built one crate at a time: its kernel crate reads the kernel's
+# sources beside it.
+def build ppk_crates() {
+    let ws = rust.workspace(
+        dir("src"),
+        rust.vendored(file("src/Cargo.lock")),
+        crates = [{package = "peios-uapi"; data = [{at = "vendor/kernel"; place = dir("src/vendor/kernel")}]}],
+    )
+    = rust.bin(ws, "ppk")
+}

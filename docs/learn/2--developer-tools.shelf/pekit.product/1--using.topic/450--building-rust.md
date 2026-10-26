@@ -1,11 +1,96 @@
 ---
 title: Building Rust
 type: guide
-description: Build Rust programs with Cargo from the crates Cargo.lock pins, hermetically, with gcslib's rust library and its pinned Rust.
+description: Build Rust programs one crate at a time, or with Cargo whole, from the crates Cargo.lock pins, hermetically, with gcslib's rust library and its pinned Rust.
 ---
 
-The rust library builds Rust programs with Cargo, from the crates your
-`Cargo.lock` pins, with no network and nothing of the host:
+The rust library builds Rust programs from the crates your `Cargo.lock`
+pins, with no network and nothing of the host. It builds a Cargo
+workspace one crate at a time, as Bazel's rules do, or whole, as Cargo
+does.
+
+## One crate at a time
+
+Plan the workspace with `rust.workspace`, then build what you need of it:
+
+```text
+import "github.com/gcslib/rust"
+
+fn crates() -> rust.RustWorkspace {
+    = rust.workspace(dir("."), rust.vendored(file("Cargo.lock")))
+}
+
+def build server() {
+    = rust.bin(crates(), "server")
+}
+
+def build client_library() {
+    = rust.library(crates(), "client")
+}
+```
+
+Cargo plans the build: what each member needs, unit by unit, as `cargo
+build --unit-graph` lists it. Each crate, with the features Cargo resolves
+for the member you build, is compiled as a step of its own, and so is
+each build script and each run of one. A change compiles again only the
+crates it reaches, and two programs that use the same crate with the same
+features share the one step. Planning reads the manifests, `Cargo.lock`,
+and which files exist, never what the sources say, so editing a source
+plans nothing again.
+
+Features follow the member: a program built from a member that asks for a
+crate's feature gets it, and a program from a member that doesn't never
+does, even when you build both at once. Cargo unifies features across
+everything one `cargo build` names; pekit plans each member on its own.
+
+`rust.bin(ws, package, name)` gives a member's program, by default the one
+named after the member. `rust.library(ws, package)` gives its shared or
+static library. Each step's sandbox holds the toolchain, the crate's own
+directory, and what it is given, so a crate that reads a file outside its
+directory needs it named. Give `workspace` the settings of such packages
+in `crates`:
+
+```text
+rust.workspace(
+    dir("."),
+    rust.vendored(file("Cargo.lock")),
+    crates = [
+        {package = "policy"; data = [{at = "registry.d"; place = dir("registry.d")}]},
+        {
+            package = "sdk-sys"
+            env = [{name = "SDK_DIR"; value = "/opt/sdk"}]
+            given = [{at = "/opt/sdk"; place = build sdk()}]
+        },
+    ],
+)
+```
+
+`data` places files and directories under the workspace, where the
+crate's compiles and build script find them. `env` sets variables for its
+build script and its compiles. `given` places files and directories at
+absolute paths for its build script and its compiles, and for every crate
+that depends on it, such as a native library its build script links,
+which the programs that use the crate link too.
+
+## Tests
+
+`rust.tests(ws, package)` gives a member's test programs, its unit tests
+and each integration test, as `cargo test -p` builds them, with
+`features` too if you give them. `rust.run_test(test)` runs one as a step,
+in a sandbox of the toolchain's runtime with a writable `/tmp`:
+
+```text
+def test server_tests(tests: List<rust.RustTest> = rust.tests(crates(), "server")) {
+    let ran = for each in tests { = rust.run_test(each) }
+}
+```
+
+Give `run_test` what a test reads in `given` and its variables in `env`.
+A test whose program did not change is found in the store.
+
+## With Cargo, whole
+
+`rust.cargo_build` builds the workspace with Cargo, in one step:
 
 ```text
 import "github.com/gcslib/rust"
@@ -20,7 +105,8 @@ each checked against the checksum `Cargo.lock` records for it, and lays
 them out as `cargo vendor` does. `rust.cargo_build(src, vendor, bins)`
 then builds the Cargo workspace `src` with `cargo build --release
 --frozen --offline` from those crates, and gives a directory of the
-binaries `bins`, each by its name.
+binaries `bins`, each by its name. Both ways of building take their crates
+from `rust.vendored`.
 
 A crate from a git repository is pinned by the commit `Cargo.lock`
 records for it. `rust.vendored` fetches the repository at that commit
@@ -88,7 +174,9 @@ builds the same program, byte for byte.
 
 ## What is a step
 
-Each crate's fetch and unpacking is its own, kept in the store. The
-vendored directory is one step, and the whole of `cargo build` another,
-so changing one source file of the workspace builds the workspace again,
-as Cargo would, but no crate is fetched again.
+Each crate's fetch and unpacking is its own, kept in the store, and the
+vendored directory is one step. Built one crate at a time, each crate is
+a step, so changing a source file compiles its crate and the crates that
+depend on it again. Built with `cargo_build`, the whole of `cargo build`
+is one step, so changing one source file builds the workspace again, as
+Cargo would. Either way, no crate is fetched again.
