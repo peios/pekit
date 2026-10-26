@@ -721,6 +721,8 @@ fn image_host() -> bool {
 }
 
 #[test]
+#[ignore = "opt-in, as it takes about six minutes: `tools/check --all`, or `cargo test --test \
+            examples -- --ignored`"]
 fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
     let sources = ["ppk", "peiso", "peiosutils", "prelude"]
         .map(|name| (name, repository().join("..").join(name)));

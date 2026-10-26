@@ -1,8 +1,17 @@
 #!/bin/sh
-# The gate: style, strict lints, and every test.
+# The gate: style, strict lints, and every test but the opt-in ones, which
+# take minutes, such as example 10's; `tools/check --all` runs those too.
 set -eu
+case "$*" in
+"") ;;
+--all) set -- --include-ignored ;;
+*)
+    echo "usage: tools/check [--all]" >&2
+    exit 2
+    ;;
+esac
 repo=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 python3 tools/style-check.py
 cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
-cargo +1.98.1 test --workspace --locked
+cargo +1.98.1 test --workspace --locked -- "$@"

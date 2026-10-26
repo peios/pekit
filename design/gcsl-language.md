@@ -1660,7 +1660,8 @@ otherwise.
 - `tools/check` runs the tests under Bazel only, whose build has smaller
   frames than `cargo test`'s, though `STACK_SIZE` promises the depth
   tests pass unoptimised. Running `cargo test --workspace` in the gate
-  too would have caught 14a's regression.
+  too would have caught 14a's regression. Since done: GCSL `f3d82ef`
+  added it to the gate, as Jack agreed on 2026-10-26.
 
 ## 15. Importing every definition of a def-type (done)
 
