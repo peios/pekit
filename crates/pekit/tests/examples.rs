@@ -18,11 +18,15 @@ fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Copies the tree at `from` to `to`, its files' contents alone.
+/// Copies the tree at `from` to `to`, its files' contents alone, but a
+/// git repository's `.git`.
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let at = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy_tree(&entry.path(), &at);
@@ -32,16 +36,36 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// The gcslib libraries published each in a repository of its own.
+const PUBLISHED: [&str; 5] = ["buildenv", "clang", "gcc", "python", "rust"];
+
+/// Copies every gcslib library to `to`, a directory of libraries, each at
+/// its path: those not yet published from this repository's `gcslib`, and
+/// each published one from its clone in `$PEKIT_TEST_GCSLIB`, else the
+/// Peios workspace's `gcslib`.
+fn libraries(to: &Path) {
+    copy_tree(&repository().join("gcslib"), to);
+    let clones = std::env::var_os("PEKIT_TEST_GCSLIB")
+        .map_or_else(|| repository().join("../gcslib"), PathBuf::from);
+    for name in PUBLISHED {
+        let from = clones.join(name);
+        assert!(
+            from.join("README.md").is_file(),
+            "the gcslib library `{name}` is not at `{}`: clone \
+             https://github.com/gcslib/{name} there, or set $PEKIT_TEST_GCSLIB",
+            from.display()
+        );
+        copy_tree(&from, &to.join("github.com/gcslib").join(name));
+    }
+}
+
 /// A workspace of example `n`'s fixture, in its directory `example`, the
-/// gcc library among its libraries, its `workspace.gcsl` of `config`.
+/// gcslib libraries among its libraries, its `workspace.gcsl` of `config`.
 fn example(n: u32, config: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let fixture = repository().join(format!("tests/fixtures/examples/{n}"));
     copy_tree(&fixture, &dir.path().join("example"));
-    copy_tree(
-        &repository().join("gcslib"),
-        &dir.path().join(".gcsl/libraries"),
-    );
+    libraries(&dir.path().join(".gcsl/libraries"));
     fs::write(dir.path().join("workspace.gcsl"), config).unwrap();
     dir
 }
@@ -924,7 +948,7 @@ fn greeting_app(dir: &Path, (url, commit): (&str, &str)) {
          def build app() { = rust.cargo_build(dir(\"app\"), rust.vendored(file(\"app/Cargo.lock\")), bins = [\"app\"]) }\n",
     )
     .unwrap();
-    copy_tree(&repository().join("gcslib"), &dir.join(".gcsl/libraries"));
+    libraries(&dir.join(".gcsl/libraries"));
     fs::write(dir.join("workspace.gcsl"), RUST).unwrap();
 }
 
@@ -1020,10 +1044,7 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
         &repository().join("tests/fixtures/rust"),
         &dir.path().join("example"),
     );
-    copy_tree(
-        &repository().join("gcslib"),
-        &dir.path().join(".gcsl/libraries"),
-    );
+    libraries(&dir.path().join(".gcsl/libraries"));
     fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
     // ppk's committed tree, as a release would build it.
     committed(&source, &dir.path().join("example/src"));

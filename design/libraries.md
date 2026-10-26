@@ -165,9 +165,17 @@ A library's files are named on receipts by their import path,
 them, as standard files are named `<stdlib>/fs.gcsl`, so that a step keys
 the same on every checkout.
 
-The `gcslib` libraries are written in this repository, under
+The `gcslib` libraries were written in this repository, under
 `gcslib/github.com/gcslib/<name>/`, so that the path is one root, until Jack
-decides where they are published.
+decided where they are published. On 2026-10-26 he chose one GitHub
+repository per library, `github.com/gcslib/<name>`, as `pekit lock`
+resolves a library by default, under the MIT licence, "The GCSLib
+Authors". gcc, buildenv, rust, python and clang moved to repositories of
+their own, cloned beside pekit2 at `gcslib/<name>/` in the Peios
+workspace, with their history; pekit2's tests copy them in from there, or
+from `$PEKIT_TEST_GCSLIB`. ppk, peiso and qemu stay here until ppk and
+peiso are published with pinned toolchains of their own: today they run
+the host's tools, so no strict build can use them.
 
 ### L8. Pinned toolchains are definitions in the libraries
 
