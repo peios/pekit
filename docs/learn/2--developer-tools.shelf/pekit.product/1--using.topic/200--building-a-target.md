@@ -111,10 +111,10 @@ the space it takes, and of that, what was used longest ago. A large file
 that took a second to make goes before a small one that took a minute.
 
 Eviction removes contents, not records. A step whose outputs were
-evicted is no longer found in the store: it runs again and puts them
-back. Scratch directories are evicted the same way, never while a build
-is using one. A build evicts nothing while another pekit process is
-using the store; a later build does instead.
+evicted isn't found in the store: it runs again and puts them back.
+Scratch directories are evicted the same way, never while a build is
+using one. A build evicts nothing while another pekit process is using
+the store; a later build does instead.
 
 `--rebuild` runs every step again, reusing nothing from the store, and
 records each as it goes.
