@@ -269,15 +269,64 @@ workspace, comes next, and will say whether evaluation needs caching.
 
 ## F5. The remote cache over REAPI
 
-Bazel's Remote Execution API is spoken, so existing servers work:
-bazel-remote, Buildbarn, BuildBuddy, NativeLink. A step's record is an
-action result, its receipt the action's digest, and its outputs and the
-store's blobs the content-addressed store's. Manifests are action results
-too, by their keys. A build finds a step locally first, then remotely,
-and downloads only what it needs. Who may write is the workspace's
-configuration: developers read, `upload = false`; CI writes, with
-credentials of its own. A release checks what it found by rebuilding
-(`--check-reproducible`).
+Bazel's Remote Execution API is spoken, over gRPC, so existing servers
+work: bazel-remote, Buildbarn, BuildBuddy, NativeLink. A build finds a
+record locally first, then remotely, and downloads only what it needs.
+Who may write is a machine's or CI's configuration: developers read, CI
+writes, with credentials of its own. A release checks what it found by
+rebuilding (`--check-reproducible`).
+
+- **Contents are blobs as they are.** pekit's blobs are SHA-256 digests of
+  their contents, as REAPI's CAS's are, so a file is uploaded as it is.
+- **A record is an action result,** keyed by an *action blob*:
+  `pekit-action-1\0<key hex>`, uploaded too, its digest and real size the
+  action-cache key, as Bazel keys an action by its `Action` proto's. So
+  every key has a true size, and a server that checks the action exists is
+  satisfied. Step records, manifests, unpackings and downloads are keyed
+  so, each by its local key.
+- **Sizes come with the result.** REAPI names a blob by its digest and its
+  size, and a pekit tree names a directory by digest alone. So an action
+  result declares the record blob in `output_files`, with each file the
+  record names, and each tree the record names in `output_directories`, as
+  a REAPI `Tree` proto made from the pekit tree: a `FileNode` for each
+  file, with its digest, size and whether it is executable, a
+  `DirectoryNode` for each directory, a `SymlinkNode` for each link. On a
+  hit the result gives every blob's digest and size; the pekit trees are
+  made again locally from the `Tree` protos, their digests the same since
+  their entries are. A server that checks a result's outputs are all there
+  (Buildbarn) or keeps what a hit touches (bazel-remote's LRU) does so for
+  the whole of it.
+- **Off the engine's thread.** A step missed locally is looked up remotely
+  as pool work, the step waiting as it waits for an effect; found, its
+  contents are put into the local store and it is taken as found locally.
+  Uploads are pool work after a step is recorded; the build's end waits for
+  them, and a failed upload is a warning, never a failed build.
+- **Only where records are reused** (`Reuse::Store`): a host whose packages
+  can't be told apart neither reads nor writes remotely, as it reads no
+  local record.
+- **Manifests merge.** A manifest uploaded is read, merged and written
+  again; a lost race loses a read-set, which only costs a miss.
+- **Program records stay local** at first: each one's trees are a step's
+  whole writable world, a toolchain's 14,000 files say. Uploading them is a
+  later flag.
+- **Configuration.** The cache's URL and its `instance_name`, which
+  Buildbarn needs, are a workspace's team's: `pekitconf.remote_cache =
+  {url; instance_name}` as a default, which the environment and flags
+  override (`PEKIT_REMOTE_CACHE`, `--remote-cache`). Whether to upload, and
+  credentials, as headers, come from the environment or flags alone, never
+  the workspace's files.
+- **The client:** tonic and prost, the REAPI protos and those they import
+  vendored with their licence and compiled by `protox`, so pekit's build
+  needs no `protoc`; one tokio runtime per process, blocked on from pool
+  threads; `GetCapabilities` first, for the batch limit, ByteStream above
+  it; no compression.
+- **Tests** run a pinned bazel-remote on a free port: build with upload,
+  empty the local store, build again and find every step remotely, none
+  run; remove a blob from the server and build again, which runs that step
+  rather than failing.
+- **Order, each a place to stop:** the client and the read path for step
+  records; uploads; manifests, unpackings and downloads; programs behind a
+  flag.
 
 ## F6. Remote execution
 
@@ -326,5 +375,9 @@ release was built from.
   workspace's `pekitconf`, defaulting to 50 GiB; cost as the time to make;
   a scratch directory as costing nothing.
 - F4: what keys a target's evaluation.
+- F5: an action blob as a record's action-cache key; trees as REAPI
+  `Tree` protos in a result; program records local at first; the URL and
+  instance from `pekitconf` with the environment overriding, uploads and
+  credentials from the environment alone.
 - F6: a step runner as REAPI's command.
 - F10: SLSA provenance.
