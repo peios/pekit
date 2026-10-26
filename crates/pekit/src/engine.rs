@@ -510,7 +510,6 @@ pub fn run_script_observed(
     }
     let words = args.iter().map(|word| Plain::Str(word.clone())).collect();
     let session = Plain::Record(vec![("args".to_owned(), Plain::List(words))]);
-    let session = loaded.workspace.from_plain(&session);
     let contexts = vec![(SCRIPT_SESSION.to_owned(), session)];
     build_roots(
         loaded,
@@ -556,7 +555,7 @@ fn build_roots(
     loaded: &mut Loaded,
     targets: &[Target],
     settings: &Settings,
-    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
+    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
     events: &mut dyn FnMut(&Event),
 ) -> Result<Outcomes, BuildError> {
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
@@ -633,7 +632,7 @@ fn new_run<'a>(
     loaded: &'a mut Loaded,
     targets: &[Target],
     settings: &'a Settings,
-    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Value)>),
+    (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
     events: &'a mut dyn FnMut(&Event),
 ) -> Result<Run<'a>, BuildError> {
     loaded.ready().map_err(BuildError::Engine)?;
@@ -694,15 +693,22 @@ fn new_run<'a>(
 
 /// A root of each of `targets` of `loaded`'s workspace, as `settings` say,
 /// its own effects under a host view of its directory that asks `keychain`
-/// for secrets: its prepared call, or why it could not be prepared.
+/// for secrets: its prepared call, or why it could not be prepared. The
+/// contexts `extra` are made values of the workspace here, readied for this
+/// build, never of one an earlier build used (see
+/// [Loading](crate::load#loading)).
 fn prepare_roots(
     loaded: &mut Loaded,
     targets: &[Target],
     (settings, keychain): (&Settings, &Arc<Keychain>),
-    (wrap, extra): (Option<RootWrap<'_>>, Vec<(String, Value)>),
+    (wrap, extra): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
 ) -> Vec<Root> {
     let mut contexts = root_contexts(loaded, settings);
-    contexts.extend(extra);
+    contexts.extend(
+        extra
+            .into_iter()
+            .map(|(name, plain)| (name, loaded.workspace.from_plain(&plain))),
+    );
     let fields = root_fields(loaded);
     targets
         .iter()

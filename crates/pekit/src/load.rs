@@ -60,7 +60,8 @@ pub struct Loaded {
 impl Loaded {
     /// Readies `workspace` for a build (see [Loading](#loading)): as it was
     /// checked for the first, and checked afresh from the same files for
-    /// each one after.
+    /// each one after. The same files are numbered the same, so a target
+    /// selected before, which names its file by number, names it still.
     ///
     /// # Errors
     ///
