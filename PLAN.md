@@ -29,11 +29,13 @@ on Acta task PEI-1594, and implementation is tracked on PEI-1595.
 
 - **Repositories:**
   - pekit2 is a new repository, worked on directly on `main` (Jack).
-  - GCSL changes go on a branch, `feat/1595-pekit2`, in a worktree of `gcsl`
-    at `local/worktrees/gcsl-1595/`. It is made from the current `main`
-    (`72edfde`, six commits ahead of `origin`).
-  - Never push, never rebase, and never merge GCSL's branch into its `main`.
-    Jack reviews and merges.
+  - GCSL changes went on a branch, `feat/1595-pekit2`, in a worktree of
+    `gcsl` at `local/worktrees/gcsl-1595/`, made from `main` at `72edfde`.
+    Jack had it merged into GCSL's `main` at `185a924` on 2026-10-26, and
+    pekit2 now builds against the `gcsl` checkout itself. Further GCSL work
+    goes on a new branch in a worktree of its own.
+  - Never push, never rebase, and never merge a GCSL branch into its `main`
+    unless Jack says to. Jack reviews and merges.
 - **Leave `pekit` and `pkgs` alone.** Both are on `feat/1593-modsig`. Today's
   pekit keeps serving `pkgs/` until pekit2 replaces it.
 - **Leave `examples/*/build.gcsl` alone.** They are Jack's design drafts.
