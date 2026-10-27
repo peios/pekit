@@ -74,6 +74,10 @@ internal error instead of a pause.
 
 ### D2. Resuming: restart, as Bazel's Skyframe does
 
+**Superseded on 2026-10-27 by `suspension.md`.** Restart departed from
+Jack's model, and its cost grows with the square of a unit's effects. This
+section is kept as history.
+
 When graph-mode evaluation awaits a future the host has not resolved, the
 evaluation *unit* stops. Once the host resolves what it waited on, the unit
 runs again from its start. Everything before the pause recomputes to the
@@ -292,7 +296,8 @@ Each step leaves plain GCSL unchanged and fully tested.
 
 ## Decisions taken without Jack (to surface)
 
-- Restart rather than suspension (D2).
+- Restart rather than suspension (D2). Reversed on 2026-10-27; see
+  `suspension.md`.
 - `#[defers]` as the marker, with typing that depends only on the
   declaration (D1).
 - Effect nodes for every effect of graph-mode code (D4), so a unit never
