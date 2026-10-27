@@ -181,6 +181,10 @@ fn kinds(events: &[Event]) -> Vec<String> {
             EventKind::EffectRan {
                 step, effect, ok, ..
             } => format!("ran {effect} of {step:?}, ok {ok}"),
+            EventKind::Evaluated { unit, step, .. } => {
+                let whose = if *step { "step" } else { "target" };
+                format!("evaluated {whose} {unit}")
+            }
             other => format!("{other:?}"),
         })
         .collect()
@@ -232,15 +236,23 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     assert_eq!(
         shown(&events),
         [
+            // The target's code runs once: its value holds both steps.
+            "evaluated target app/hello",
             "Discovered { step: \"shout\" }",
             "Discovered { step: \"copy\" }",
             "Started { step: \"shout\", attempt: 0 }",
+            // Each step's code runs until it stops for its program, and
+            // again, past it, once the program has run.
+            "evaluated step shout",
             "queued exec sh of Some(\"shout\")",
             "ran exec sh of Some(\"shout\"), ok true",
+            "evaluated step shout",
             "Finished { step: \"shout\" }",
             "Started { step: \"copy\", attempt: 0 }",
+            "evaluated step copy",
             "queued exec cp of Some(\"copy\")",
             "ran exec cp of Some(\"copy\"), ok true",
+            "evaluated step copy",
             "Finished { step: \"copy\" }",
         ]
     );
@@ -257,6 +269,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     assert_eq!(
         shown(&events),
         [
+            "evaluated target app/hello",
             "Discovered { step: \"shout\" }",
             "Discovered { step: \"copy\" }",
             "Cached { step: \"shout\" }",

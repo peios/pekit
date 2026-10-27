@@ -49,8 +49,32 @@ pekit build hello --trace build-trace.json
 
 Each attempt of a step is a span on the *steps* row, and each program a
 step runs is a span on the row of the worker that ran it. A step found in
-the store is a mark. The trace names programs but never shows their
+the store is a mark. Each run of a target's or a step's code is a span on
+the *evaluation* row. The trace names programs but never shows their
 arguments, so it holds no secrets.
+
+When a build spends its time evaluating code rather than running
+programs, which you'll notice when even a build where nothing changed is
+slow, `--gcsl-profile` shows which functions take it:
+
+```sh
+pekit build hello --gcsl-profile profile.txt
+```
+
+The profile starts by counting how many times the targets' code and the
+steps' code ran, and how long that took. A target's code stops each time
+it waits for a step or an effect, and carries on from there when the
+result is ready, so a target that meets a hundred of them runs about a
+hundred times, but runs no code twice. Next comes a
+table with a row for each function and built-in that ran, the most
+expensive first. Each row gives the time spent in the function's own
+body, its total time including the calls it made, and how many times it
+was called. For a memoised function, it also gives how many of those
+calls found an earlier result. A function that's called thousands of
+times, once per run of a target, is usually work to memoise with `->>`.
+Timing every call slows the build, so a profiled build takes longer than
+an ordinary one. Compare the rows with each other, not with a build you
+timed without the profile.
 
 ## Reusing what is unchanged
 

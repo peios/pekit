@@ -11,6 +11,7 @@ pub mod engine;
 pub mod events;
 pub mod evict;
 pub mod fetch;
+pub mod gcsl_profile;
 pub mod git_fetch;
 pub mod host;
 pub mod keychain;
