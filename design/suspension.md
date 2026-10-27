@@ -35,10 +35,15 @@ syntax.
 1. **Scheduling is split in two.** GCSL schedules its own branches. The
    host schedules nodes (steps and effects). When the host resolves a
    node, GCSL wakes the code that waits on it and runs everything it can.
-2. **State-changing effects keep program order.** `exec`, `fs.write` and
-   the like happen in the order a sequential run would perform them.
-   Read-only effects may be met in any order. This note proposes widening
-   "read-only" to "order-free" (see Open points).
+2. **The host decides effect order.** This was refined with Jack on
+   2026-10-27. GCSL makes no ordering decision of its own. Every effect
+   becomes a node that carries its program position, and the host decides
+   whether that order matters. A node the host isolates or makes
+   content-addressed runs in any order. A node it runs with shared state
+   runs in the order a sequential run would perform it. Examples of the
+   latter are the `exec`s of one step's sandbox and anything run
+   unisolated on the host. GCSL publishes the information that rule needs
+   (see Program order).
 3. **A memoised call that pauses is shared.** A second call with the same
    key waits for the first to finish, rather than running the body again.
 4. **Failures are reported in program order.** If several branches fail,
@@ -166,8 +171,10 @@ A task blocks when it needs:
 - **a pending slot**, which another task will fill;
 - **a future another task is running** (a `lazy` body);
 - **a memoised entry another task is running** (rule 3);
-- **its turn for a state-changing effect** (rule 2);
 - **its forked children** (a join).
+
+A task never waits for its turn to make an effect. Ordering is the host's
+(rule 2).
 
 A blocked task is filed under what it waits for. When that arrives, the
 task is runnable again and carries on exactly where it stopped. Nothing
@@ -248,17 +255,24 @@ also evaluate, unless an earlier piece fails (see Failures).
 
 ### Program order
 
-**Effects that change state (rule 2).** Each effectful built-in is
-classified at its source as either order-free or state-changing. Anything
-not shown to be order-free counts as state-changing.
+**Effects (rule 2).** Today a node's order edge points at the node met
+just before it. With branches, that node may not exist yet. For example,
+iteration 1 of a `for` may be waiting on its `fetch`, so its later `exec`
+hasn't been reached, while iteration 2 has already made its own `exec`. An
+edge cannot point at a node that does not exist, so GCSL gives the host
+two things instead:
 
-A task meeting a state-changing effect waits until no other live task's
-position is earlier than its own. It is then exactly where a sequential
-run would be when it performed that effect. A parent at a join is after
-its children, so it never holds them up.
+- **Each node's program position.** This means "after everything earlier
+  than this point", whether or not those earlier nodes exist yet.
+- **The frontier.** This is the earliest position of any live task. No
+  new node can ever appear before it. A parent at a join is after its
+  children, so it never holds the frontier back.
 
-Order-free effects proceed at once. Deferred calls (steps) perform nothing
-when they are made, so they never wait for order.
+The host's rule for a node it does not isolate is to run it once the
+frontier has passed it and every earlier node it does not isolate has
+finished. The host ignores order for the nodes it does isolate. GCSL never
+waits on any of this: it makes the node, and the task blocks only if it
+needs the node's result.
 
 **Failures (rule 4).** An error in a forked piece goes to the construct's
 frame in the parent, not up through the parent's frames. The construct
@@ -301,8 +315,10 @@ earlier task then proceeds as a sequential run would: it either finishes,
 or meets its own self-dependency and raises the error at the call where a
 sequential run would.
 
-Abandoning is safe, because forkable pieces have no outward writes and
-state-changing effects never run out of order. Cycles are checked when a
+Abandoning is safe, for two reasons. Forkable pieces have no outward
+writes. And an ordered node made by the abandoned work lies after the
+earlier task's position, so the frontier has not passed it and the host
+has not run it. Abandoning withdraws such nodes. Cycles are checked when a
 task is about to wait. The wait-for graph is small: one edge per task,
 plus a parent's join edges.
 
@@ -338,8 +354,10 @@ flag records the owning task, and a second awaiting task waits.
   That is deterministic whatever order tasks ran in, and whether or not
   anything forked. Before changing this, I will check what pekit keys on
   effect identity.
-- **Step bodies** (`run_step`) are units like any other. An `exec` in a
-  step keeps its order by rule 2.
+- **Step bodies** (`run_step`) are units like any other. Their `exec`s
+  share the step's sandbox, so pekit keeps them in order by rule 2.
+- **Order.** The graph gives each node's program position and the current
+  frontier. It replaces the order edge with them.
 - **The profiler** must not count time a task spends blocked as a
   function's own or total time.
 
@@ -377,9 +395,6 @@ Each stage leaves GCSL working, with the full test suite passing.
    - The `simple` flag and each simple root's read set.
    - Forkability marks: no outward writes and no outward `break` or
      `return`.
-   - The order-free or state-changing classification of every effectful
-     built-in, checking each one, `fs.compose_dir` included, against what
-     it actually does.
    - Unit tests for each.
 2. **Machine core, one task.**
    - Every control construct as frames.
@@ -399,7 +414,8 @@ Each stage leaves GCSL working, with the full test suite passing.
    - Measure authd.
 4. **Forking.**
    - Lazy splits, destinations, pending slots and joins.
-   - The program-order rules for effects and failures, and cancellation.
+   - Program positions and the frontier, failures in program order, and
+     cancellation.
    - Shared memo entries and futures, and wound-wait.
    - Effect identity by program position.
    - Measure authd.
@@ -413,19 +429,6 @@ Each stage leaves GCSL working, with the full test suite passing.
 
 ## Open points for Jack
 
-- **Order-free effects (a change to rule 2).** You agreed that read-only
-  effects run as soon as they are reached. I propose widening that to
-  every effect that changes nothing the program can observe except
-  through its own result:
-  - reads, such as `File.read` and `Dir.files`;
-  - content-addressed fetches, such as `fetch` and `fetch_git`, which are
-    pinned by a digest or a commit;
-  - effects that only make something new from their inputs, such as
-    `archive_unpack` and probably `fs.compose_dir` (to be checked in stage
-    1).
-
-  `fetch` and `archive_unpack` are most of authd's effects, so without this
-  most of the gain disappears. Recommendation: widen it.
 - **Speculation policy.** Forking happens only where every piece would be
   evaluated by a sequential run anyway (no outward writes, no outward
   `break` or `return`). This never does work a sequential run would skip,
