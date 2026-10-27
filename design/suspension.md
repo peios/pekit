@@ -504,6 +504,59 @@ crate loops that dominate. Before any fork code:
 - **`#[timeout]` and forks**: a child inherits its parent's deadlines,
   each moved on by the child's own stopped time.
 
+### Stage 4, the rest (2026-10-27)
+
+Forking now covers every construct listed under Forking, in function
+bodies: `for` iterations, list elements, interpolation pieces, the
+arguments of calls and built-ins, block statements and record fields
+(which lower to a block's stores). Wound-wait resolves waits between
+tasks. Where the implementation differs from the design above, or goes
+beyond it, it is listed here for Jack to confirm:
+
+- **A task splits at any wait**, not only at a node: also when it waits
+  for its turn, for a sibling's memoised call or `lazy`, or for its own
+  children. Without this, an iteration waiting for its turn behind an
+  earlier one stopped the whole loop.
+- **Pending slots wait per statement, not per read.** A statement that
+  reads or writes a slot that a statement split off declares waits for
+  every statement split off so far before it starts. The design blocked
+  only the read itself. This is coarser, but needs no check on any read,
+  so plain code pays nothing. A block's result likewise waits for all
+  its statements.
+- **Independence is conservative.** A piece is split off only if its
+  subtree has no `:=` at all, even to its own variables, and no `break`,
+  `continue` or `return`. The design allowed a piece's own variables.
+  `for` keeps its finer marks.
+- **The last piece that is not simple is never marked.** Splitting it
+  gains nothing: its task would only wait for it. Single-argument calls
+  therefore cost nothing.
+- **Positions count every forkable construct**, as the design says,
+  whether or not anything was split off from it. The first cut counted a
+  construct only once it had split. That made positions taken at
+  different times disagree, which reordered effects and deadlocked
+  wound-wait; this is fixed, with tests.
+- **A step's context reads keep program order.** The host acts on a read
+  by giving the step what the context holds. So a read in a step's run
+  waits for its turn, as an effect the host does not isolate does, and
+  the record of what was read is shared by all of the unit's tasks.
+- **A file's top level still never forks**: only function bodies do.
+  Top-level forks would need pending top-level cells that other units'
+  prepared calls read.
+- **Wound-wait** is as designed. A task never waits for a later task's
+  run of a memoised call or `lazy`. It wounds that task instead, which is
+  cancelled as far as the call's frame. That frame drops the entry, or
+  leaves the `lazy` unrun, and waits to look it up again. The earlier task
+  then runs the call itself. A real cycle gives the self-dependency error
+  that a run in order gives.
+
+**Cost in plain mode: none**, since nothing marks outside graph mode. In
+graph mode, marking costs about 25 ns per marked piece. On authd's
+no-change build, GCSL's evaluation went from 0.272 s to about 0.281 s
+(+3%), while the targets' runs fell from about 563 to about 460. The
+build's wall time is unchanged at about 0.73 s. The gain is in builds
+where effects really run: independent fetches, unpacks and compiles now
+reach the host together.
+
 ## Open points for Jack
 
 - **Speculation policy.** Forking happens only where every piece would be
