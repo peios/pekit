@@ -5,6 +5,7 @@ use std::path::Path;
 
 use pekit::engine::{BuildError, Built, Reuse, Settings, build_observed};
 use pekit::events::Event;
+use pekit::exposure::Exposing;
 use pekit::load::load;
 use pekit::platform::ExecutionPlatform;
 use pekit::sandbox::HostTools;
@@ -68,6 +69,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         strict: false,
         cache_limit: None,
         profile_gcsl: false,
+        exposing: Exposing::AsNeeded,
     }
 }
 

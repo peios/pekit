@@ -6,7 +6,9 @@
 //! effects (see `design/engine.md`, E1). The pool has a fixed number of
 //! threads, `--jobs`, each taking the next [`Work`] from one queue: an
 //! effect of a unit to run under its effect context, until its deadline, or
-//! a `fetch` to answer from the store or the network ([Fetching](crate::fetch#fetching)).
+//! a `fetch` to answer from the store or the network ([Fetching](crate::fetch#fetching)),
+//! or a target's read of an output to answer from the store
+//! ([Exposure](crate::exposure#exposure)).
 //! Each reports what it came to, a [`Ran`], with the thread that ran it and
 //! when, for the build's events, and the files it kept in the store. A
 //! step's program that may be found in the store is found or run there too,
@@ -24,6 +26,7 @@ use gcsl::eval::graph::{EffectJob, NodeId};
 use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
+use crate::exposure::{OutputRead, read_output};
 use crate::fetch::{fetch, fetched_path};
 use crate::git_fetch::{fetch_git, git_path};
 use crate::programs::{ProgramRan, ProgramWork, perform_program};
@@ -79,6 +82,18 @@ pub enum Work {
         store: Store,
         /// Where to unpack it before it is stored.
         scratch: PathBuf,
+        /// Where its call is.
+        span: Span,
+    },
+    /// Answers a target's read of an output from the store (see
+    /// [Exposure](crate::exposure#exposure)).
+    Read {
+        /// What it reads.
+        read: OutputRead,
+        /// The output, as GCSL code names it.
+        path: String,
+        /// The store.
+        store: Store,
         /// Where its call is.
         span: Span,
     },
@@ -187,6 +202,21 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
             }
             Err(message) => (Err(Diagnostic::error(message, span)), Vec::new(), None),
         },
+        Work::Read {
+            read,
+            path,
+            store,
+            span,
+        } => {
+            let outcome = read_output(&store, read, &path).map_err(|(message, note)| {
+                let error = Diagnostic::error(message, span);
+                match note {
+                    Some(note) => error.with_note(note),
+                    None => error,
+                }
+            });
+            (outcome, Vec::new(), None)
+        }
     }
 }
 

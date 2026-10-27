@@ -65,6 +65,7 @@ use gcsl::{Diagnostic, Span, Value};
 
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, evict};
+use crate::exposure::{Exposing, Exposures, OutputRead, within};
 use crate::fetch::IN_A_STEP;
 use crate::git_fetch;
 use crate::pool::{Pool, Ran, Work};
@@ -256,6 +257,9 @@ pub struct Settings {
     /// [Profiling](gcsl::eval::profile#profiling)), which
     /// [`gcsl::workspace::Workspace::profile_report`] then reports.
     pub profile_gcsl: bool,
+    /// Which outputs of the build are put under the output directory (see
+    /// [Exposure](crate::exposure#exposure)).
+    pub exposing: Exposing,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -587,6 +591,9 @@ fn build_roots(
 ) -> Result<Outcomes, BuildError> {
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
+    if settings.exposing == Exposing::All {
+        run.expose_waiting()?;
+    }
     let mut outcomes = Vec::with_capacity(run.roots.len());
     for index in 0..run.roots.len() {
         let done = run.roots.get_mut(index).and_then(|root| root.done.take());
@@ -697,6 +704,7 @@ fn new_run<'a>(
         roots,
         unit_roots,
         query: false,
+        exposures: Exposures::default(),
         graph: Graph::new(),
         outputs: HashMap::new(),
         steps: HashMap::new(),
@@ -1111,6 +1119,9 @@ struct Run<'a> {
     reports: Vec<StepReport>,
     /// The steps that gave another result than their records hold.
     mismatches: Vec<Mismatch>,
+    /// The outputs yet to be put under the output directory (see
+    /// [Exposure](crate::exposure#exposure)).
+    exposures: Exposures,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -1652,6 +1663,7 @@ impl Run<'_> {
             effect: effect_label(&job),
             fold: None,
         };
+        let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
         // A step is given its secrets, and never asks the keychain itself.
         if step.is_some()
             && matches!(
@@ -1659,7 +1671,6 @@ impl Run<'_> {
                 Builtin::KeychainString | Builtin::KeychainFile
             )
         {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
             self.finish_now(id, Err(Diagnostic::error(keychain::IN_A_STEP, span)));
             return Ok(());
         }
@@ -1667,13 +1678,11 @@ impl Run<'_> {
             && self.settings.strict
             && let Some(refused) = strict_refusal(&job)
         {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
             self.finish_now(id, Err(Diagnostic::error(refused, span)));
             return Ok(());
         }
         let mut program = None;
         if let Some(of) = step {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
             match self.program_before(of, &job, span) {
                 Before::Program(work) => {
                     program = self
@@ -1685,53 +1694,26 @@ impl Run<'_> {
                 Before::Plain => {}
             }
         }
-        // A fetch is pekit's to answer, and never a step's.
-        let work = if job.builtin() == Builtin::Fetch {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
-            if step.is_some() {
-                self.finish_now(id, Err(Diagnostic::error(IN_A_STEP, span)));
-                return Ok(());
-            }
-            let text = |at: usize| match job.args().get(at) {
-                Some(Plain::Str(text)) => text.clone(),
-                _ => String::new(),
-            };
-            Work::Fetch {
-                url: text(0),
-                sha256: text(1),
-                store: self.store.clone(),
-                span,
-            }
-        } else if job.builtin() == Builtin::FetchGit {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
-            if step.is_some() {
-                self.finish_now(id, Err(Diagnostic::error(git_fetch::IN_A_STEP, span)));
-                return Ok(());
-            }
-            let text = |at: usize| match job.args().get(at) {
-                Some(Plain::Str(text)) => text.clone(),
-                _ => String::new(),
-            };
-            Work::FetchGit {
-                url: text(0),
-                commit: text(1),
-                store: self.store.clone(),
-                scratch: self.settings.scratch.clone(),
-                span,
-            }
-        } else if job.builtin() == Builtin::ArchiveUnpack {
-            let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
-            match self.unpack_work(&job, span) {
-                Ok(work) => work,
-                Err(message) => {
-                    self.finish_now(id, Err(Diagnostic::error(message, span)));
-                    return Ok(());
-                }
-            }
-        } else if let Some((sandbox, work)) = program {
-            Work::Program(job, sandbox, work)
+        let own = if step.is_none() {
+            self.before_target_effect(&job, &*effects, span)
         } else {
-            Work::Effect(job, effects)
+            Ok(None)
+        };
+        let own = own.and_then(|answered| match answered {
+            Some(work) => Ok(Some(work)),
+            None => self.own_work(&job, step, span),
+        });
+        let work = match own {
+            Ok(Some(work)) => work,
+            Ok(None) => match program {
+                Some((sandbox, work)) => Work::Program(job, sandbox, work),
+                None => Work::Effect(job, effects),
+            },
+            Err(BuildError::Engine(message)) => {
+                self.finish_now(id, Err(Diagnostic::error(message, span)));
+                return Ok(());
+            }
+            Err(other) => return Err(other),
         };
         self.emit(EventKind::EffectQueued {
             node: id.number(),
@@ -1741,6 +1723,149 @@ impl Run<'_> {
         self.pool.send(id, work, deadline);
         self.in_flight.insert(id, running);
         Ok(())
+    }
+
+    /// The work of `job`, of the step `step` or of the target's own unit,
+    /// its call at `span`, if it is pekit's own to answer, a fetch or an
+    /// unpacking: none if it is not.
+    ///
+    /// # Errors
+    ///
+    /// Why it fails at once: a step fetches, or an unpacking's archive
+    /// cannot be read.
+    fn own_work(
+        &mut self,
+        job: &EffectJob,
+        step: Option<NodeId>,
+        span: Span,
+    ) -> Result<Option<Work>, BuildError> {
+        let text = |at: usize| match job.args().get(at) {
+            Some(Plain::Str(text)) => text.clone(),
+            _ => String::new(),
+        };
+        match job.builtin() {
+            // A fetch is pekit's to answer, and never a step's.
+            Builtin::Fetch if step.is_some() => Err(engine(&IN_A_STEP)),
+            Builtin::FetchGit if step.is_some() => Err(engine(&git_fetch::IN_A_STEP)),
+            Builtin::Fetch => Ok(Some(Work::Fetch {
+                url: text(0),
+                sha256: text(1),
+                store: self.store.clone(),
+                span,
+            })),
+            Builtin::FetchGit => Ok(Some(Work::FetchGit {
+                url: text(0),
+                commit: text(1),
+                store: self.store.clone(),
+                scratch: self.settings.scratch.clone(),
+                span,
+            })),
+            Builtin::ArchiveUnpack => self
+                .unpack_work(job, span)
+                .map(Some)
+                .map_err(|message| engine(&message)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Readies the output directory for `job`, an effect of a target's own
+    /// code under `effects`, its call at `span` (see
+    /// [Exposure](crate::exposure#exposure)): the work that answers it from
+    /// the store if it reads an output and may be, else none, every waiting
+    /// exposure made first if it may read the output directory.
+    ///
+    /// # Errors
+    ///
+    /// That an exposure cannot be written.
+    fn before_target_effect(
+        &mut self,
+        job: &EffectJob,
+        effects: &dyn Effects,
+        span: Span,
+    ) -> Result<Option<Work>, BuildError> {
+        match job.builtin() {
+            // Answered from the store, or reading nothing.
+            Builtin::Fetch
+            | Builtin::FetchGit
+            | Builtin::ArchiveUnpack
+            | Builtin::KeychainString
+            | Builtin::File
+            | Builtin::Dir => Ok(None),
+            Builtin::FileRead | Builtin::DirFiles => {
+                let path = match job.args().first() {
+                    Some(Plain::File { path, .. } | Plain::Dir { path, .. }) => path.as_str(),
+                    _ => "",
+                };
+                if let Some(read) = self.output_read(job.builtin(), path) {
+                    return Ok(Some(Work::Read {
+                        read,
+                        path: path.to_owned(),
+                        store: self.store.clone(),
+                        span,
+                    }));
+                }
+                if self.reaches_outputs(path, effects) {
+                    self.expose_waiting()?;
+                }
+                Ok(None)
+            }
+            Builtin::FsExists | Builtin::FsRead | Builtin::KeychainFile => {
+                self.expose_waiting()?;
+                Ok(None)
+            }
+            // A program, or a write, may read or change anything there.
+            _ => {
+                self.expose_waiting()?;
+                self.exposures.to_disk();
+                Ok(None)
+            }
+        }
+    }
+
+    /// What `builtin`, `file_read` or `dir_files`, of `path` reads from the
+    /// store, if it may be answered from there: while no target's own
+    /// effect has changed the output directory, of a file or a directory,
+    /// as `builtin` reads, inside an output of the build.
+    fn output_read(&self, builtin: Builtin, path: &str) -> Option<OutputRead> {
+        if !self.exposures.answers_from_store() || !within(path, OUTPUTS) {
+            return None;
+        }
+        match (builtin, self.output_kept(path, 0)?) {
+            (Builtin::FileRead, Kept::File(entry)) => Some(OutputRead::Text(entry)),
+            (Builtin::DirFiles, Kept::Dir(tree)) => Some(OutputRead::Files(tree)),
+            _ => None,
+        }
+    }
+
+    /// What the store keeps of `path`, under `/pekit-out`, if it is an output
+    /// of the build or inside one, reached through `links` symbolic links
+    /// that led to paths of their own: none if it leads anywhere else.
+    fn output_kept(&self, path: &str, links: u32) -> Option<Kept> {
+        if let Some(kept) = self.outputs.get(path) {
+            return Some(*kept);
+        }
+        match self.inside_output(path)? {
+            Inside::Kept(kept) => Some(kept),
+            Inside::Link(to) if links < MAX_LINKS && within(&to, OUTPUTS) => {
+                self.output_kept(&to, links + 1)
+            }
+            Inside::Link(_) => None,
+        }
+    }
+
+    /// Whether `path`, as GCSL code under `effects` names it, is in the
+    /// output directory or leads into it, so that reading it reads what
+    /// was exposed: if it can't be told, it may.
+    fn reaches_outputs(&self, path: &str, effects: &dyn Effects) -> bool {
+        if within(path, OUTPUTS) {
+            return true;
+        }
+        let Ok(host) = effects.host_path(path) else {
+            return true;
+        };
+        let outputs = &self.settings.outputs;
+        let outputs = fs::canonicalize(outputs).unwrap_or_else(|_| outputs.clone());
+        fs::canonicalize(host).map_or(true, |real| real.starts_with(outputs))
     }
 
     /// The work of the `archive.unpack` `job`, its call at `span`: its archive
@@ -1859,19 +1984,40 @@ impl Run<'_> {
         Some(Inside::Kept(Kept::Dir(*trees.last()?)))
     }
 
+    /// Notes that the output `path` is `kept`, to be put under the output
+    /// directory once something may read it there (see
+    /// [Exposure](crate::exposure#exposure)).
+    fn expose(&mut self, path: &str, kept: Kept) {
+        self.exposures.defer(path.to_owned(), kept);
+    }
+
+    /// Makes every exposure that waits (see
+    /// [Exposure](crate::exposure#exposure)).
+    ///
+    /// # Errors
+    ///
+    /// That one cannot be written.
+    fn expose_waiting(&mut self) -> Result<(), BuildError> {
+        for (path, kept) in self.exposures.take_all() {
+            self.write_exposure(&path, kept)?;
+        }
+        Ok(())
+    }
+
     /// Puts what the store keeps of the output `path` under the output
     /// directory, hard-linked and read-only, in place of what an earlier
-    /// build left there, so that what is not hermetic reads it mid-build, as
-    /// the target's own `dir.files()` does.
-    fn expose(&self, path: &str, kept: Kept) -> Result<(), BuildError> {
+    /// build left there, so that what is not hermetic reads it.
+    fn write_exposure(&self, path: &str, kept: Kept) -> Result<(), BuildError> {
         let Some(at) = output_path(&self.settings.outputs, path) else {
             return Ok(());
         };
         // Left as it is if it is that already, as a build that changed
         // nothing finds each unpacked toolchain.
-        if let Kept::Dir(tree) = kept
-            && self.store.is_materialised(&tree, &at)
-        {
+        let already = match kept {
+            Kept::Dir(tree) => self.store.is_materialised(&tree, &at),
+            Kept::File(entry) => self.store.is_linked(&entry, &at),
+        };
+        if already {
             return Ok(());
         }
         let placed = (|| {
@@ -2091,12 +2237,11 @@ impl Run<'_> {
         };
         let inputs = &keyed.inputs;
         if let Some(record) = found {
-            // Its outputs placed as a step's that ran are, since a target's
-            // own code reads `/pekit-out` mid-build: after `pekit clean`, or
-            // in a release's tree, nothing else would put them there.
+            // Its outputs kept as a step's that ran are, since a target's
+            // own code may read them (see [Exposure](crate::exposure#exposure)).
             for (path, kept) in record.result.files() {
                 self.outputs.insert(path.to_owned(), kept);
-                self.expose(path, kept)?;
+                self.expose(path, kept);
             }
             let value = self.loaded.workspace.from_plain(&record.result.plain());
             self.graph.resolve(id, Ok(value));
@@ -2457,7 +2602,7 @@ impl Run<'_> {
         };
         for (path, entry) in &kept {
             self.outputs.insert(path.clone(), *entry);
-            self.expose(path, *entry)?;
+            self.expose(path, *entry);
         }
         match stored(&plain, &kept) {
             Ok(result) => self.keep_record(id, step, result)?,
@@ -2747,12 +2892,13 @@ impl Run<'_> {
         for (path, kept) in ran.kept.iter().cloned() {
             // What a step unpacked is in its own sandbox; what the target
             // fetched or unpacked is under the output directory.
-            let placed = match of.and_then(|step| self.steps.get(&step)) {
-                Some(step) => step
-                    .sandbox
+            let placed = if let Some(step) = of.and_then(|step| self.steps.get(&step)) {
+                step.sandbox
                     .stage(&self.store, &path, kept)
-                    .map_err(|error| engine(&error)),
-                None => self.expose(&path, kept),
+                    .map_err(|error| engine(&error))
+            } else {
+                self.expose(&path, kept);
+                Ok(())
             };
             if let Err(BuildError::Engine(message)) = placed {
                 outcome = Err(Diagnostic::error(message, Span::new(0, 0)));
@@ -2775,7 +2921,7 @@ impl Run<'_> {
     /// root `index`, names out to the output directory, each file a copy of
     /// its own, and makes its target's view of those its steps made (see
     /// [`target_view`]).
-    fn copy_out(&self, value: &Value, index: usize) -> Result<(), BuildError> {
+    fn copy_out(&mut self, value: &Value, index: usize) -> Result<(), BuildError> {
         let plain = self
             .loaded
             .workspace
@@ -2786,6 +2932,12 @@ impl Run<'_> {
             let Some(at) = output_path(&self.settings.outputs, path) else {
                 continue;
             };
+            // A result inside an output is copied over it once it is
+            // there; whatever is waiting to be exposed in its place is not.
+            for (above, kept) in self.exposures.take_above(path) {
+                self.write_exposure(&above, kept)?;
+            }
+            self.exposures.forget_within(path);
             // What no step made, the target's own effects wrote there.
             let Some(kept) = self.outputs.get(path) else {
                 continue;

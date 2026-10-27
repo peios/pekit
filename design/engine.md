@@ -134,7 +134,16 @@ A hermetic step runs under bubblewrap, with:
 - an empty environment but for what the step's `exec` sets, `PATH` empty.
 
 Its result's files are captured into the store and given back at their
-`pekit-out/` paths. A file its result names that is not under its working
+`pekit-out/` paths.
+
+*Changed 2026-10-27 (PEI-1598, for Jack to confirm).* Outputs were
+written under `pekit-out/` as each was made or found, and every build
+checked each against the store again: about 56,000 files of authd's
+toolchain and crates, and a fresh link for every fetched file. Now an
+output is written there only once something that is not hermetic may read
+it from the disk. A target's `dir.files()` and `file.read()` of an output
+are answered from the store until a target's own effect runs a program or
+writes. `pekit run` writes every output first (see `exposure.rs`). A file its result names that is not under its working
 directory, or that does not exist, is the step's failure. `Dir.sandbox` in
 a step is GCSL's own copy for now; overlay mounts come later.
 

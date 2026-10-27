@@ -194,6 +194,19 @@ store is below nine tenths of it, by GreedyDual-Size.
   tree's, so a fetched archive is never read through to find it isn't.
   The stat of every blob is to become a running total if stores grow far
   larger.
+
+  *Changed 2026-10-27 (PEI-1598).* It has: the stat of every blob was
+  about 38,000 stats in each of authd's no-change builds. The store's
+  `size` file keeps its blobs' size as an eviction last measured it, a
+  day ago at most, with the bytes of the blobs each build wrote since
+  added as it ends, under a lock of its own. The blobs are walked only
+  when that, which can only be too large, is over the limit, or is a day
+  old, or is not there. A build that is killed before it ends adds
+  nothing, which is why a measurement is trusted for a day only.
+- **Trees known complete:** a record whose contents were evicted is no
+  hit, so a hit checks every blob of its trees. A tree found complete is
+  marked in `complete/`, so the walk is once, not in every build, and an
+  eviction removes every mark before it removes a blob.
 - A lock that fails to become exclusive has been let go of, as `flock`
   changes locks, so the shared lock is taken again either way.
 - **Tests:** `tests/evict.rs`.
