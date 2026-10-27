@@ -4,7 +4,9 @@
 //!
 //! A build emits an [`Event`] at each change in a step's life and each
 //! program it runs (see `design/engine.md`, E8): a step met, found in the
-//! store, started, finished or failed, and an effect queued and run. The
+//! store, started, finished or failed, and an effect queued and run; and at
+//! each run of a target's or a step's code, which GCSL's graph mode runs
+//! again from its start each time it stops for a result. The
 //! terminal's display and the Chrome trace (`--trace`) are made from them,
 //! and so will the web view be. Each is stamped with its time since the
 //! build began.
@@ -95,6 +97,16 @@ pub enum EventKind {
         began: Duration,
         /// Whether it succeeded.
         ok: bool,
+    },
+    /// A target's or a step's code ran once, until it ended or stopped for
+    /// a result it needs.
+    Evaluated {
+        /// The target's name, or the step's.
+        unit: String,
+        /// Whether it is a step's code.
+        step: bool,
+        /// When it began, since the build began.
+        began: Duration,
     },
 }
 

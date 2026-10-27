@@ -19,7 +19,9 @@
 //! machine has processors, `--profile NAME` uses the keychain's secrets of
 //! the profile `NAME`, `dev` by default ([Secrets](crate::keychain#secrets)),
 //! `--trace FILE` writes a Chrome trace of the build ([The
-//! trace](crate::trace#the-trace)), `--platform ARCH[-OS]` builds for that
+//! trace](crate::trace#the-trace)), `--gcsl-profile FILE` a profile of its
+//! GCSL evaluation ([The GCSL profile](crate::gcsl_profile#the-gcsl-profile)),
+//! `--platform ARCH[-OS]` builds for that
 //! platform, `--rebuild` reuses nothing from the store, and `--no-dynamic`
 //! fails a target that waits for a step's result. On a terminal, a line
 //! shows the steps running as it goes.
@@ -60,6 +62,7 @@ use crate::lock;
 use crate::store::Store;
 use crate::sandbox::HostTools;
 use crate::target::{Target, TargetError, is_glob, select};
+use crate::gcsl_profile::GcslProfile;
 use crate::trace::Trace;
 
 /// Pekit, a build system that runs GCSL build files as an action graph.
@@ -287,6 +290,10 @@ struct Shared {
     /// Write a Chrome trace of the build to this file.
     #[arg(long, value_name = "FILE")]
     trace: Option<PathBuf>,
+    /// Write a profile of the build's GCSL evaluation to this file: where
+    /// its code spends its time.
+    #[arg(long, value_name = "FILE")]
+    gcsl_profile: Option<PathBuf>,
     /// The keychain's profile, whose secrets the build uses.
     #[arg(long, default_value = "dev")]
     profile: String,
@@ -826,6 +833,7 @@ fn released(
     let shared = |check_reproducible| Shared {
         jobs: args.jobs,
         trace: args.trace.clone(),
+        gcsl_profile: None,
         profile: "release".to_owned(),
         platform: None,
         reuse: ReuseFlags {
@@ -1401,6 +1409,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         no_dynamic: shared.allows.no_dynamic,
         strict,
         cache_limit,
+        profile_gcsl: shared.gcsl_profile.is_some(),
     })
 }
 
@@ -1419,24 +1428,30 @@ fn build_targets(
     terminal: &mut Terminal<'_>,
 ) -> Result<Outcomes, BuildError> {
     let mut trace = Trace::new();
+    let mut profile = GcslProfile::new();
+    let mut reports = Vec::new();
     let mut progress = Progress::default();
     let live = terminal.live;
     let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
             trace.add(event);
+            profile.add(event);
             if live {
                 progress.show(event, err);
             }
         };
         let first = build_once((loaded, targets, doing), settings, &mut events);
+        reports.extend(loaded.workspace.profile_report());
         match first {
             Ok(first) if shared.reuse.check_reproducible => {
                 let again = Settings {
                     reuse: Reuse::Compare,
                     ..settings.clone()
                 };
-                build_once((loaded, targets, doing), &again, &mut events).and_then(|again| {
+                let second = build_once((loaded, targets, doing), &again, &mut events);
+                reports.extend(loaded.workspace.profile_report());
+                second.and_then(|again| {
                     if again.mismatches.is_empty() {
                         Ok(first)
                     } else {
@@ -1449,6 +1464,18 @@ fn build_targets(
     };
     if live {
         progress.clear(terminal.err);
+    }
+    if let Some(path) = &shared.gcsl_profile {
+        for report in reports {
+            profile.add_report(report);
+        }
+        if let Err(error) = std::fs::write(path, profile.render(loaded)) {
+            let _ = writeln!(
+                terminal.err,
+                "warning: cannot write the GCSL profile to `{}`: {error}",
+                path.display()
+            );
+        }
     }
     if let Some(path) = &shared.trace {
         let written = serde_json::to_vec(&trace.to_json())

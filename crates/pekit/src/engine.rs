@@ -248,6 +248,10 @@ pub struct Settings {
     /// How large the store may be, in bytes, as the build ends: none if it
     /// may be as large as it likes (see [Eviction](crate::evict#eviction)).
     pub cache_limit: Option<u64>,
+    /// Whether GCSL profiles the build's evaluation (see
+    /// [Profiling](gcsl::eval::profile#profiling)), which
+    /// [`gcsl::workspace::Workspace::profile_report`] then reports.
+    pub profile_gcsl: bool,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -655,6 +659,9 @@ fn new_run<'a>(
     events: &'a mut dyn FnMut(&Event),
 ) -> Result<Run<'a>, BuildError> {
     loaded.ready().map_err(BuildError::Engine)?;
+    if settings.profile_gcsl {
+        loaded.workspace.start_profiling();
+    }
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     let workspace_seen = (
         workspace_stamps(&store, &loaded.root),
@@ -1245,6 +1252,7 @@ impl Run<'_> {
     fn run_roots(&mut self) {
         let no_dynamic = self.settings.no_dynamic;
         let query = self.query;
+        let mut evaluated = Vec::new();
         for root in &mut self.roots {
             if root.done.is_some() || !matches!(root.main, Main::Runnable) {
                 continue;
@@ -1256,11 +1264,20 @@ impl Run<'_> {
                 defers: &hermetic,
                 effects: &*root.host,
             };
-            match self
+            let began = self.began.elapsed();
+            let ran = self
                 .loaded
                 .workspace
-                .run_prepared(call, &mut self.graph, host)
-            {
+                .run_prepared(call, &mut self.graph, host);
+            evaluated.push(Event {
+                at: self.began.elapsed(),
+                kind: EventKind::Evaluated {
+                    unit: root.dir.clone(),
+                    step: false,
+                    began,
+                },
+            });
+            match ran {
                 Ok(Progress::Paused(node)) => {
                     let step = self
                         .graph
@@ -1289,6 +1306,9 @@ impl Run<'_> {
                 Ok(Progress::Done(value)) => root.main = Main::Holding(value),
                 Err(error) => root.done = Some(Err(BuildError::Invoke(error))),
             }
+        }
+        for event in &evaluated {
+            (self.events)(event);
         }
     }
 
@@ -2290,7 +2310,15 @@ impl Run<'_> {
             defers: &inline,
             effects: &*sandbox,
         };
-        match self.loaded.workspace.run_step(&mut self.graph, id, host) {
+        let began = self.began.elapsed();
+        let ran = self.loaded.workspace.run_step(&mut self.graph, id, host);
+        let unit = self.step_name(id);
+        self.emit(EventKind::Evaluated {
+            unit,
+            step: true,
+            began,
+        });
+        match ran {
             Ok((Progress::Paused(effect), reads)) => {
                 if let Some(step) = self.steps.get_mut(&id) {
                     step.waiting = Some(effect);

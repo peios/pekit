@@ -5,9 +5,11 @@
 //! `pekit build --trace FILE` writes the build's [events](crate::events) as
 //! a trace in the Trace Event Format, which `chrome://tracing` and Perfetto
 //! show. Each attempt of a step is a span on the *steps* row, a step found
-//! in the store a mark there, and each program run a span on the row of the
-//! pool's thread that ran it, named by what it ran and labelled with its
-//! step. Times are in microseconds since the build began.
+//! in the store a mark there, each run of a target's or a step's code a span
+//! on the *evaluation* row, named by the target or the step, and each
+//! program run a span on the row of the pool's thread that ran it, named by
+//! what it ran and labelled with its step. Times are in microseconds since
+//! the build began.
 
 use serde_json::{Value, json};
 
@@ -16,8 +18,14 @@ use crate::events::{Event, EventKind};
 /// The process every row of the trace is in.
 const PID: u32 = 1;
 
-/// The row steps are on; pool threads' rows follow it.
+/// The row steps are on.
 const STEPS_ROW: usize = 0;
+
+/// The row the runs of the targets' and the steps' code are on.
+const EVALUATION_ROW: usize = 1;
+
+/// The row of the pool's first thread; the others' follow it.
+const FIRST_WORKER_ROW: usize = 2;
 
 /// A trace being made from a build's events (see [The trace](#the-trace)).
 #[derive(Debug, Default)]
@@ -87,8 +95,17 @@ impl Trace {
                 self.events.push(json!({
                     "name": effect, "cat": "effect", "ph": "X",
                     "ts": began, "dur": ts.saturating_sub(began),
-                    "pid": PID, "tid": worker + 1 + STEPS_ROW,
+                    "pid": PID, "tid": worker + FIRST_WORKER_ROW,
                     "args": { "step": step.as_deref().unwrap_or("(the target)"), "ok": ok },
+                }));
+            }
+            EventKind::Evaluated { unit, step, began } => {
+                let began = micros(*began);
+                self.events.push(json!({
+                    "name": unit, "cat": "evaluation", "ph": "X",
+                    "ts": began, "dur": ts.saturating_sub(began),
+                    "pid": PID, "tid": EVALUATION_ROW,
+                    "args": { "step": step },
                 }));
             }
         }
@@ -112,7 +129,7 @@ impl Trace {
             self.workers += 1;
             self.events.push(json!({
                 "name": "thread_name", "ph": "M", "pid": PID,
-                "tid": self.workers + STEPS_ROW,
+                "tid": self.workers - 1 + FIRST_WORKER_ROW,
                 "args": { "name": format!("worker {}", self.workers) },
             }));
         }
@@ -129,6 +146,10 @@ impl Trace {
             json!({
                 "name": "thread_name", "ph": "M", "pid": PID, "tid": STEPS_ROW,
                 "args": { "name": "steps" },
+            }),
+            json!({
+                "name": "thread_name", "ph": "M", "pid": PID, "tid": EVALUATION_ROW,
+                "args": { "name": "evaluation" },
             }),
         ];
         events.extend(self.events.iter().cloned());

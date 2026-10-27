@@ -136,6 +136,39 @@ fn a_build_s_trace_is_written_where_asked() {
 }
 
 #[test]
+fn a_build_s_gcsl_profile_is_written_where_asked() {
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profile.txt");
+    let built = pekit(
+        dir.path(),
+        cache.path(),
+        &["build", "hello", "--gcsl-profile", path.to_str().unwrap()],
+    );
+    assert!(built.status.success(), "{}", printed(&built).1);
+    let profile = fs::read_to_string(&path).unwrap();
+    // The runs counted: the target's once, each step's before and after
+    // its program.
+    assert!(
+        profile.contains("The targets' code ran 1 time,"),
+        "{profile}"
+    );
+    // A row for the step's function, named where its body begins, and one
+    // for a built-in its code called.
+    let rows: Vec<&str> = profile.lines().collect();
+    assert!(
+        rows.iter()
+            .any(|row| row.contains(" fn ") && row.contains("shout  app/build.gcsl:")),
+        "{profile}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("built-in") && row.ends_with(" working_dir")),
+        "{profile}"
+    );
+}
+
+#[test]
 fn a_library_s_steps_key_the_same_wherever_the_library_is_found() {
     let library = "#[hermetic] def shout(src: File) -> File {\n\
                    \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\

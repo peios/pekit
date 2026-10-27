@@ -90,7 +90,7 @@ fn a_trace_has_a_span_per_attempt_and_per_program_on_its_thread() {
     let ran = find("X");
     assert_eq!(ran.len(), 1);
     assert_eq!(ran[0]["name"], "exec cc");
-    assert_eq!(ran[0]["tid"], 2);
+    assert_eq!(ran[0]["tid"], 3);
     assert_eq!(ran[0]["ts"], 4_000);
     assert_eq!(ran[0]["dur"], 5_000);
     assert_eq!(ran[0]["args"]["step"], "cc");
@@ -101,5 +101,46 @@ fn a_trace_has_a_span_per_attempt_and_per_program_on_its_thread() {
         .iter()
         .filter_map(|event| event["args"]["name"].as_str())
         .collect();
-    assert_eq!(names, ["pekit build", "steps", "worker 1", "worker 2"]);
+    assert_eq!(
+        names,
+        ["pekit build", "steps", "evaluation", "worker 1", "worker 2"]
+    );
+}
+
+#[test]
+fn a_trace_has_a_span_per_run_of_a_target_s_or_a_step_s_code() {
+    let mut trace = Trace::new();
+    for (ms, unit, step) in [(3, "/app", false), (5, "cc-1a2b", true)] {
+        trace.add(&at(
+            ms,
+            EventKind::Evaluated {
+                unit: unit.to_owned(),
+                step,
+                began: Duration::from_millis(ms - 2),
+            },
+        ));
+    }
+    let json = trace.to_json();
+    let events = json["traceEvents"].as_array().unwrap();
+    // Each run a span on the evaluation row, from when it began.
+    let runs: Vec<(&str, u64, u64, bool)> = events
+        .iter()
+        .filter(|event| event["cat"] == "evaluation")
+        .map(|event| {
+            assert_eq!(event["tid"], 1);
+            (
+                event["name"].as_str().unwrap(),
+                event["ts"].as_u64().unwrap(),
+                event["dur"].as_u64().unwrap(),
+                event["args"]["step"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            ("/app", 1_000, 2_000, false),
+            ("cc-1a2b", 3_000, 2_000, true)
+        ]
+    );
 }
