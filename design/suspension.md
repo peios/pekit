@@ -387,6 +387,30 @@ implementation of calls (arguments, frames, memoisation, `#[retry]`),
 which is exactly the duplication this design otherwise avoids. See Open
 points.
 
+**Measured, 2026-10-27, and what was done.** With calls, loops and stops
+on the machine, the costs against the baseline were:
+
+| Program | Change |
+|---|---|
+| recursive calls | +4% |
+| plain loops | +3% |
+| memoised calls | +25% |
+| string splitting | +10% |
+| a call inside a `for` body | about +100% |
+
+Each machine step costs about 7 ns that native recursion does not, and a
+loop whose body calls a function pays several steps per iteration.
+
+So the agreed remedy, a recursive path for code that never blocks, is
+taken to its end. Plain evaluation never blocks, so it stays wholly on the
+existing recursive walkers, at no cost, and graph mode runs on the
+machine. This keeps two implementations of each control construct. They
+are kept equal by running the whole test suite twice: once as is, and
+once with the crate feature `machine-everywhere`, which runs plain
+evaluation on the machine too. The gate does both. In graph mode, calls of
+functions proven never to block can later move back to the walkers, if
+evaluation's own cost there matters once restarts are gone.
+
 ## How it gets built
 
 Each stage leaves GCSL working, with the full test suite passing.
