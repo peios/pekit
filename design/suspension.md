@@ -451,6 +451,56 @@ Each stage leaves GCSL working, with the full test suite passing.
 6. **Later, as agreed: parallel evaluation.** `Arc` and concurrent shared
    structures, and a multi-threaded scheduler. Measure on authd.
 
+## Progress
+
+**Stage 3, done (2026-10-27).** Graph mode never restarts a unit: every
+pause, in a target's code, a file's or a step's body, is on the machine,
+and a walker that would stop in graph mode is an internal error. Host API
+changes made:
+
+- `Progress::Waiting(unit)`: the unit needs a memoised call or a `lazy`
+  that another unit is running and has stopped in. pekit runs it again
+  once anything else in the build has run, and fails the build if
+  nothing can (the units wait for each other).
+- Memo entries and futures being run record their owning unit; a unit
+  meeting its own running entry is a self-dependency, as before.
+
+On authd, a no-change build went from 1.87 s to 0.78 s, and GCSL's
+evaluation from 1.13 s to 0.26 s: `fetch` is called once per fetch.
+
+## Stage 4 proposal (2026-10-27, for Jack before pekit depends on it)
+
+Forking is the remaining lever: a target still stops at each of its
+effects in turn, about 250 round trips for `nss`. The first cut forks
+only the iterations of a `for` inside a function's body, which covers the
+crate loops that dominate. Before any fork code:
+
+1. **Forkability marks in the checker** (stage 1's missing piece): a
+   `for` is forkable only if its body assigns no outer variable and has
+   no `break` or `return` out of it. Tested on the four cases.
+2. **Per-task state.** Everything stage 3 sets aside per unit becomes per
+   task, swapped on each task switch; a child inherits its parent's
+   running memoised calls. Memo and future owners become `(unit, task)`.
+   A walker reads top-level cells through a slice of its own, so that a
+   task with its own stack can read them.
+
+**API changes proposed:**
+
+- **`Progress::Paused` carries a set of nodes**, since one unit now waits
+  on many at once. pekit's target state holds the set, demands them all,
+  and runs the unit again when any is given. `--no-dynamic` and query
+  mode, which look at one node today, look at each.
+- **`GraphHost` carries the host's isolation predicate**: which effects it
+  isolates. This is rule 2's frontier, enforced inside GCSL rather than
+  published: a task makes a node for an effect the host does not isolate
+  only when no task earlier in program order is live, so such effects
+  still reach the host in program order, one at a time, as pekit relies
+  on today. pekit's predicate isolates `fetch`, `fetch_git`,
+  `archive_unpack` and the reads of files; every other effect is
+  ordered, the conservative default.
+- **`#[timeout]` and forks**: a child inherits its parent's deadlines,
+  each moved on by the child's own stopped time.
+
 ## Open points for Jack
 
 - **Speculation policy.** Forking happens only where every piece would be
