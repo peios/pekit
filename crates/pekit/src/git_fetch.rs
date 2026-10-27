@@ -16,16 +16,21 @@
 //!   give a commit by its name, with every branch and tag; checked out into
 //!   a scratch directory, without `.git` or submodules, and put into the
 //!   store; and recorded, with how long it took, for an eviction to weigh.
+//!   Fetches of one repository take turns, since a build fetches several
+//!   crates of one repository at once into one bare repository; one that
+//!   waited finds the record another made.
 //!
 //! Git runs with no configuration but its own, the user's and the system's
 //! left out, so that nothing of the machine, a line-ending conversion or a
 //! filter, changes the files a commit gives: only the repository's own
 //! attributes do, as they do for anyone who checks the commit out.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +99,18 @@ pub fn fetch_git(
     }
     let began = Instant::now();
     let fail = |reason: String| format!("`fetch_git` could not fetch `{pin}` of `{url}`: {reason}");
-    let repo = repository(store, url).map_err(fail)?;
+    let path = repository_path(store, url);
+    // Fetches of one repository take turns: a build fetches several crates
+    // of one repository at once, into one bare repository.
+    let lock = lock_of(&path);
+    let _turn = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    // Another fetch of the commit may have recorded it while this waited.
+    if let Ok(Some(FetchedGit { tree, .. })) = store.record::<FetchedGit>(&key)
+        && store.holds_tree(&tree)
+    {
+        return Ok(tree);
+    }
+    let repo = repository(&path).map_err(fail)?;
     if !holds(&repo, &pin) {
         // A server that won't give a commit by its name gives every branch
         // and tag, among which it may be.
@@ -132,18 +148,31 @@ pub fn fetch_git(
     Ok(tree)
 }
 
-/// The bare repository of `url` kept in `store`'s `git/`, made if it is not
-/// there, named by its URL's digest.
-fn repository(store: &Store, url: &str) -> Result<PathBuf, String> {
-    let repo = store
+/// Where the bare repository of `url` is kept in `store`'s `git/`, named by
+/// its URL's digest.
+fn repository_path(store: &Store, url: &str) -> PathBuf {
+    store
         .root()
         .join("git")
-        .join(&Digest::of(url.as_bytes()).hex()[..32]);
+        .join(&Digest::of(url.as_bytes()).hex()[..32])
+}
+
+/// The bare repository at `repo`, made if it is not there.
+fn repository(repo: &Path) -> Result<PathBuf, String> {
     if !repo.join("HEAD").is_file() {
-        fs::create_dir_all(&repo).map_err(|error| error.to_string())?;
-        git(&repo, &["init", "--quiet", "--bare"])?;
+        fs::create_dir_all(repo).map_err(|error| error.to_string())?;
+        git(repo, &["init", "--quiet", "--bare"])?;
     }
-    Ok(repo)
+    Ok(repo.to_path_buf())
+}
+
+/// The lock of the repository at `repo`, which a fetch into it holds, one
+/// for each repository the process fetches into.
+fn lock_of(repo: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(repo.to_path_buf()).or_default())
 }
 
 /// Whether the repository `repo` holds the commit `commit`.

@@ -10,6 +10,18 @@ use pekit::record::Kept;
 use pekit::sandbox::StepSandbox;
 use pekit::store::Store;
 
+/// A temporary directory removed, sealed directories and all, when it is
+/// dropped, even by a test that fails: an overlay's work directory, which
+/// the kernel makes with no permissions, is more than `tempfile`'s own
+/// removal can remove.
+struct Scratch(tempfile::TempDir);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = pekit::layers::remove_tree(self.0.path());
+    }
+}
+
 /// Runs `script` under the static busybox in the sandbox at `root` of
 /// `sandbox`: whether it succeeded.
 fn run_in(sandbox: &StepSandbox, root: &str, script: &str) -> bool {
@@ -26,9 +38,9 @@ fn a_sandbox_of_a_staged_directory_is_an_overlay_read_upper_over_lower() {
         eprintln!("skipped: no static busybox on this host");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("store")).unwrap();
-    let tree = dir.path().join("tree");
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    let tree = dir.0.path().join("tree");
     for sub in ["bin", "keep", "redo"] {
         fs::create_dir_all(tree.join(sub)).unwrap();
     }
@@ -38,7 +50,7 @@ fn a_sandbox_of_a_staged_directory_is_an_overlay_read_upper_over_lower() {
     fs::write(tree.join("redo/b"), "low").unwrap();
     fs::write(tree.join("gone"), "low").unwrap();
     let digest = store.put_tree(&tree).unwrap();
-    let sandbox = StepSandbox::new(&dir.path().join("stage"), "t/s").unwrap();
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s").unwrap();
     sandbox.stage(&store, "/w/root", Kept::Dir(digest)).unwrap();
     // A staged input: an overlay, nothing copied.
     let root = sandbox.temp_dir().unwrap().unwrap();
@@ -78,11 +90,11 @@ fn a_sandbox_of_a_staged_directory_is_an_overlay_read_upper_over_lower() {
 #[test]
 fn a_composition_links_what_nothing_changes_and_is_sealed() {
     use std::os::unix::fs::MetadataExt;
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("store")).unwrap();
-    fs::write(dir.path().join("x"), "x").unwrap();
-    let entry = store.put_file(&dir.path().join("x")).unwrap();
-    let sandbox = StepSandbox::new(&dir.path().join("stage"), "t/s").unwrap();
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    fs::write(dir.0.path().join("x"), "x").unwrap();
+    let entry = store.put_file(&dir.0.path().join("x")).unwrap();
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s").unwrap();
     sandbox.stage(&store, "/w/x", Kept::File(entry)).unwrap();
     let composed = sandbox.temp_dir().unwrap().unwrap();
     let at = sandbox.host_path(&composed).unwrap();
@@ -116,6 +128,6 @@ fn a_composition_links_what_nothing_changes_and_is_sealed() {
     let root = sandbox.temp_dir().unwrap().unwrap();
     assert_eq!(sandbox.make_sandbox(&composed, &root), Some(Ok(())));
     // Its staging directory can still be removed.
-    pekit::layers::remove_tree(&dir.path().join("stage")).unwrap();
-    assert!(!dir.path().join("stage").exists());
+    pekit::layers::remove_tree(&dir.0.path().join("stage")).unwrap();
+    assert!(!dir.0.path().join("stage").exists());
 }
