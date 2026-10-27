@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use gcsl::check::Builtin;
 use gcsl::eval::Effects;
 use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 
@@ -232,6 +233,22 @@ impl HostView {
 }
 
 impl Effects for HostView {
+    /// The effects pekit isolates in a target's own code: fetches, which
+    /// are pinned by their digests or commits and kept in the store, the
+    /// unpacking of archives into the store, and the reads of a target's
+    /// files and directories. Every other effect a target makes is met in
+    /// program order (see GCSL's graph mode).
+    fn isolates(&self, builtin: Builtin) -> bool {
+        matches!(
+            builtin,
+            Builtin::Fetch
+                | Builtin::FetchGit
+                | Builtin::ArchiveUnpack
+                | Builtin::FileRead
+                | Builtin::DirFiles
+        )
+    }
+
     fn command(&self, command: Command) -> Result<Command, String> {
         let (words, cwd, env) = parts(&command);
         let mut wrapped = Command::new(bwrap()?);

@@ -237,4 +237,10 @@ impl Pool {
     pub fn next(&self) -> Option<Ran> {
         self.done.recv().ok()
     }
+
+    /// A job's outcome that is ready now, without waiting for one.
+    #[must_use]
+    pub fn ready(&self) -> Option<Ran> {
+        self.done.try_recv().ok()
+    }
 }

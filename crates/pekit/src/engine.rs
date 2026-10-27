@@ -1008,8 +1008,9 @@ struct StepRun {
     retries: u32,
     /// Whether an attempt of it has failed.
     failed_once: bool,
-    /// The effect its unit stopped for, if it did.
-    waiting: Option<NodeId>,
+    /// The effects its unit stopped for, if it did: it runs again once one
+    /// of them is given.
+    waiting: Vec<NodeId>,
     /// The unit whose run it stopped for, if it did, which computes a shared
     /// result it needs.
     waiting_unit: Option<u32>,
@@ -1199,8 +1200,8 @@ struct Root {
 enum Main {
     /// It may run.
     Runnable,
-    /// It stopped for this node's result.
-    Paused(NodeId),
+    /// It stopped for these nodes' results, its tasks each waiting for one.
+    Paused(Vec<NodeId>),
     /// It stopped for the run of another unit, which computes a shared
     /// result it needs: it may run again once anything else has run.
     Waiting,
@@ -1229,6 +1230,11 @@ impl Run<'_> {
                     ));
                 };
                 self.finished_effect(ran);
+                // Every other effect that has finished too, so that a unit
+                // waiting for several runs again once for all of them.
+                while let Some(ran) = self.pool.ready() {
+                    self.finished_effect(ran);
+                }
                 progressed = true;
             }
             // A unit waiting for another's shared result runs again once
@@ -1241,15 +1247,15 @@ impl Run<'_> {
                 ));
             }
             for index in 0..self.roots.len() {
-                let paused = match self.roots.get(index) {
+                let given = match self.roots.get(index) {
                     Some(Root {
-                        main: Main::Paused(node),
+                        main: Main::Paused(nodes),
                         done: None,
                         ..
-                    }) => *node,
+                    }) => nodes.iter().any(|&node| !self.is_waiting(node)),
                     _ => continue,
                 };
-                if !self.is_waiting(paused) {
+                if given {
                     if let Some(root) = self.roots.get_mut(index) {
                         root.main = Main::Runnable;
                     }
@@ -1321,19 +1327,21 @@ impl Run<'_> {
                 },
             });
             match ran {
-                Ok(Progress::Paused(node)) => {
-                    let step = self
-                        .graph
-                        .node(node)
-                        .filter(|found| found.kind() == NodeKind::Deferred);
+                Ok(Progress::Paused(nodes)) => {
+                    let step = nodes.iter().copied().find_map(|node| {
+                        self.graph
+                            .node(node)
+                            .filter(|found| found.kind() == NodeKind::Deferred)
+                            .map(|found| (node, found))
+                    });
                     match step {
-                        Some(_) if query => {
-                            root.stopped_at = vec![node];
+                        Some((node, _)) if query => {
+                            root.stopped_at.clone_from(&nodes);
                             root.waits = Some(node);
                             // Its value is never read: what it reached is.
                             root.done = Some(Ok(Value::Str(Rc::from(""))));
                         }
-                        Some(found) if no_dynamic => {
+                        Some((_, found)) if no_dynamic => {
                             root.done = Some(Err(BuildError::Dynamic(
                                 Diagnostic::error(
                                     "the target waits here for a step's result, a dynamic \
@@ -1343,7 +1351,7 @@ impl Run<'_> {
                                 .in_input(found.input()),
                             )));
                         }
-                        _ => root.main = Main::Paused(node),
+                        _ => root.main = Main::Paused(nodes),
                     }
                 }
                 Ok(Progress::Waiting(_)) => root.main = Main::Waiting,
@@ -1366,7 +1374,7 @@ impl Run<'_> {
                 continue;
             }
             match &root.main {
-                Main::Paused(node) => demands.push(*node),
+                Main::Paused(nodes) => demands.extend(nodes.iter().copied()),
                 Main::Holding(value) => {
                     let holes = self.graph.holes(value);
                     if self.query {
@@ -1885,8 +1893,8 @@ impl Run<'_> {
     fn finish_now(&mut self, id: NodeId, outcome: Result<Value, Diagnostic>) {
         self.graph.resolve(id, outcome);
         for step in self.steps.values_mut() {
-            if step.waiting == Some(id) {
-                step.waiting = None;
+            if step.waiting.contains(&id) {
+                step.waiting.clear();
             }
         }
     }
@@ -2133,7 +2141,7 @@ impl Run<'_> {
                 deadline: timeout.map(|limit| started + limit),
                 retries,
                 failed_once: false,
-                waiting: None,
+                waiting: Vec::new(),
                 waiting_unit: None,
             },
         );
@@ -2334,7 +2342,7 @@ impl Run<'_> {
         let runnable: Vec<NodeId> = self
             .steps
             .iter()
-            .filter(|(_, step)| step.waiting.is_none() && step.waiting_unit.is_none())
+            .filter(|(_, step)| step.waiting.is_empty() && step.waiting_unit.is_none())
             .map(|(&id, _)| id)
             .collect();
         let advanced = !runnable.is_empty();
@@ -2364,13 +2372,19 @@ impl Run<'_> {
             began,
         });
         match ran {
-            Ok((Progress::Paused(effect), reads)) => {
+            Ok((Progress::Paused(waits), reads)) => {
                 if let Some(step) = self.steps.get_mut(&id) {
-                    step.waiting = Some(effect);
+                    step.waiting.clone_from(&waits);
                     step.reads = reads;
                 }
                 let effects: Arc<dyn Effects + Send + Sync> = sandbox;
-                self.dispatch(effect, effects, deadline, Some(id))
+                for effect in waits {
+                    // One its unit waited for before is running already.
+                    if !self.in_flight.contains_key(&effect) && self.is_waiting(effect) {
+                        self.dispatch(effect, Arc::clone(&effects), deadline, Some(id))?;
+                    }
+                }
+                Ok(())
             }
             Ok((Progress::Waiting(unit), reads)) => {
                 if let Some(step) = self.steps.get_mut(&id) {
@@ -2691,7 +2705,7 @@ impl Run<'_> {
                 attempt,
                 retries: step.retries - 1,
                 failed_once: true,
-                waiting: None,
+                waiting: Vec::new(),
                 waiting_unit: None,
                 ..step
             },
