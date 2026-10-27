@@ -5,8 +5,9 @@
 //! A build emits an [`Event`] at each change in a step's life and each
 //! program it runs (see `design/engine.md`, E8): a step met, found in the
 //! store, started, finished or failed, and an effect queued and run; and at
-//! each run of a target's or a step's code, which GCSL's graph mode runs
-//! again from its start each time it stops for a result. The
+//! each run of a target's or a step's code, which GCSL's graph mode stops
+//! each time it waits for a result, and runs again, from where it stopped,
+//! once the result is given. The
 //! terminal's display and the Chrome trace (`--trace`) are made from them,
 //! and so will the web view be. Each is stamped with its time since the
 //! build began.

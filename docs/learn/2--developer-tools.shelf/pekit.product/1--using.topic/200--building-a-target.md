@@ -62,9 +62,10 @@ pekit build hello --gcsl-profile profile.txt
 ```
 
 The profile starts by counting how many times the targets' code and the
-steps' code ran, and how long that took. A target's code runs again from
-its start each time it stops to wait for a step or an effect, so a target
-that meets a hundred of them runs about a hundred times. Next comes a
+steps' code ran, and how long that took. A target's code stops each time
+it waits for a step or an effect, and carries on from there when the
+result is ready, so a target that meets a hundred of them runs about a
+hundred times, but runs no code twice. Next comes a
 table with a row for each function and built-in that ran, the most
 expensive first. Each row gives the time spent in the function's own
 body, its total time including the calls it made, and how many times it

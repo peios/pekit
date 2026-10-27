@@ -18,7 +18,11 @@
 //!   hermetic, under the host's view of the logical layout, one at a time,
 //!   in program order, since the target's unit stops at each.
 //!
-//! A unit runs again only once what it stopped for is given. A step that
+//! A unit runs again only once what it stopped for is given, carrying on
+//! from where it stopped. A target or a step that stopped for another
+//! unit's run, which computes a memoised call or a `lazy` it needs, runs
+//! again once anything else in the build has run; if nothing else can, the
+//! units wait for each other, and the build fails. A step that
 //! fails, by its code's own failure, is run again from its start in a fresh
 //! sandbox as its `#[retry]` allows, and one that passes only then is
 //! *flaky*; its `#[timeout]` spans every attempt. A step that succeeds is
@@ -1006,6 +1010,9 @@ struct StepRun {
     failed_once: bool,
     /// The effect its unit stopped for, if it did.
     waiting: Option<NodeId>,
+    /// The unit whose run it stopped for, if it did, which computes a shared
+    /// result it needs.
+    waiting_unit: Option<u32>,
     /// Its scratch directory, if it is marked `#[scratch]`, held for as long
     /// as it runs (see [Scratch directories](crate::scratch#scratch-directories)).
     scratch: Option<Scratch>,
@@ -1194,6 +1201,9 @@ enum Main {
     Runnable,
     /// It stopped for this node's result.
     Paused(NodeId),
+    /// It stopped for the run of another unit, which computes a shared
+    /// result it needs: it may run again once anything else has run.
+    Waiting,
     /// It ended with this value, whose holes are still waited for.
     Holding(Value),
 }
@@ -1221,6 +1231,15 @@ impl Run<'_> {
                 self.finished_effect(ran);
                 progressed = true;
             }
+            // A unit waiting for another's shared result runs again once
+            // anything else has run, the other unit perhaps; if nothing else
+            // can, the units wait for each other.
+            let waiting = self.wake_waiting(progressed);
+            if waiting && !progressed {
+                return Err(BuildError::Engine(
+                    "the build's targets and steps wait for each other's shared results".to_owned(),
+                ));
+            }
             for index in 0..self.roots.len() {
                 let paused = match self.roots.get(index) {
                     Some(Root {
@@ -1244,6 +1263,30 @@ impl Run<'_> {
                 ));
             }
         }
+    }
+
+    /// Lets every target and step that stopped for another unit's run run
+    /// again, if anything ran this round, `progressed`. Returns whether any
+    /// was waiting so.
+    fn wake_waiting(&mut self, progressed: bool) -> bool {
+        let mut waiting = false;
+        for root in &mut self.roots {
+            if root.done.is_none() && matches!(root.main, Main::Waiting) {
+                waiting = true;
+                if progressed {
+                    root.main = Main::Runnable;
+                }
+            }
+        }
+        for step in self.steps.values_mut() {
+            if step.waiting_unit.is_some() {
+                waiting = true;
+                if progressed {
+                    step.waiting_unit = None;
+                }
+            }
+        }
+        waiting
     }
 
     /// Runs the unit of each target that may run once: until it stops for a
@@ -1303,6 +1346,7 @@ impl Run<'_> {
                         _ => root.main = Main::Paused(node),
                     }
                 }
+                Ok(Progress::Waiting(_)) => root.main = Main::Waiting,
                 Ok(Progress::Done(value)) => root.main = Main::Holding(value),
                 Err(error) => root.done = Some(Err(BuildError::Invoke(error))),
             }
@@ -1340,7 +1384,7 @@ impl Run<'_> {
                     }
                     demands.extend(holes);
                 }
-                Main::Runnable => {}
+                Main::Runnable | Main::Waiting => {}
             }
         }
         demands
@@ -2090,6 +2134,7 @@ impl Run<'_> {
                 retries,
                 failed_once: false,
                 waiting: None,
+                waiting_unit: None,
             },
         );
         self.emit(EventKind::Started {
@@ -2289,7 +2334,7 @@ impl Run<'_> {
         let runnable: Vec<NodeId> = self
             .steps
             .iter()
-            .filter(|(_, step)| step.waiting.is_none())
+            .filter(|(_, step)| step.waiting.is_none() && step.waiting_unit.is_none())
             .map(|(&id, _)| id)
             .collect();
         let advanced = !runnable.is_empty();
@@ -2326,6 +2371,13 @@ impl Run<'_> {
                 }
                 let effects: Arc<dyn Effects + Send + Sync> = sandbox;
                 self.dispatch(effect, effects, deadline, Some(id))
+            }
+            Ok((Progress::Waiting(unit), reads)) => {
+                if let Some(step) = self.steps.get_mut(&id) {
+                    step.waiting_unit = Some(unit);
+                    step.reads = reads;
+                }
+                Ok(())
             }
             Ok((Progress::Done(value), reads)) => {
                 if let Some(step) = self.steps.get_mut(&id) {
@@ -2640,6 +2692,7 @@ impl Run<'_> {
                 retries: step.retries - 1,
                 failed_once: true,
                 waiting: None,
+                waiting_unit: None,
                 ..step
             },
         );

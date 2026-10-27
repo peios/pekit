@@ -6,9 +6,10 @@
 //! ([Profiling](gcsl::eval::profile#profiling)) and writes what it found to
 //! `FILE` as text. Its head counts the runs of the targets' code and of the
 //! steps' code, from the build's [events](crate::events), and how long they
-//! took: GCSL's graph mode runs a unit again from its start each time it
-//! stops for a result, so a target that meets a hundred steps and effects
-//! runs a hundred times. It says how much of that time was spent in
+//! took: GCSL's graph mode stops a unit each time it waits for a result,
+//! and runs it again, from where it stopped, once the result is given, so a
+//! target that meets a hundred steps and effects runs a hundred times, but
+//! runs no code twice. It says how much of that time was spent in
 //! functions, and so how much outside any, at the top level of the files.
 //! Its table has a row for each function and built-in that ran: its own
 //! time, its total, how many calls of it ran, how many of those found a
