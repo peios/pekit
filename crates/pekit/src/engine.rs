@@ -95,6 +95,9 @@ const TOOLCHAINS: &str = "toolchains";
 /// The context of the `keychain` module's profile.
 const KEYCHAIN_PROFILE: &str = "keychain_profile";
 
+/// The context the `libraries` module says what the lock pins in.
+const PINNED_LIBRARIES: &str = "pinned_libraries";
+
 /// The context of the `keychain` module's configuration.
 const KEYCHAIN_KEYS: &str = "keychain_keys";
 
@@ -550,7 +553,8 @@ pub fn program_command(
     (path, args): (&str, &[String]),
 ) -> Result<std::process::Command, BuildError> {
     use std::os::unix::fs::PermissionsExt as _;
-    let host = HostView::new(&loaded.root, &settings.outputs, "", &settings.scratch);
+    let host = HostView::new(&loaded.root, &settings.outputs, "", &settings.scratch)
+        .with_libraries(loaded.libraries.clone());
     let on_host = host.host_path(path).map_err(BuildError::Engine)?;
     let executable = fs::metadata(&on_host)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
@@ -734,7 +738,8 @@ fn prepare_roots(
                     &target.definition.dir,
                     &settings.scratch,
                 )
-                .with_keychain(Arc::clone(keychain)),
+                .with_keychain(Arc::clone(keychain))
+                .with_libraries(loaded.libraries.clone()),
             );
             let call = loaded.workspace.prepare_call_wrapped(
                 (&target.def_type, &target.qualified()),
@@ -769,7 +774,8 @@ fn prepare_roots(
 
 /// The root contexts every target of `loaded`'s workspace is evaluated in,
 /// as `settings` say, where the workspace declares each: `^host_platform`,
-/// `^platform` if the build is for another, and `^keychain_profile`.
+/// `^platform` if the build is for another, `^keychain_profile`, and
+/// `^pinned_libraries`, each library `pekit.lock` pins.
 fn root_contexts(loaded: &mut Loaded, settings: &Settings) -> Vec<(String, Value)> {
     let mut contexts = Vec::new();
     if loaded.workspace.declares_context(HOST_PLATFORM) {
@@ -785,6 +791,23 @@ fn root_contexts(loaded: &mut Loaded, settings: &Settings) -> Vec<(String, Value
     if loaded.workspace.declares_context(KEYCHAIN_PROFILE) {
         let profile = Value::Str(Rc::from(settings.profile.as_str()));
         contexts.push((KEYCHAIN_PROFILE.to_owned(), profile));
+    }
+    if loaded.workspace.declares_context(PINNED_LIBRARIES) {
+        let text = |text: &str| Plain::Str(text.to_owned());
+        let pins = loaded
+            .pinned
+            .iter()
+            .map(|pin| {
+                Plain::Record(vec![
+                    ("commit".to_owned(), text(&pin.commit)),
+                    ("dir".to_owned(), text(&pin.dir)),
+                    ("git".to_owned(), text(&pin.git)),
+                    ("path".to_owned(), text(&pin.path)),
+                ])
+            })
+            .collect();
+        let pins = loaded.workspace.from_plain(&Plain::List(pins));
+        contexts.push((PINNED_LIBRARIES.to_owned(), pins));
     }
     contexts
 }
@@ -2219,7 +2242,7 @@ impl Run<'_> {
             ));
         };
         // Read only if it changed since a build last put it in the store.
-        let host = self.loaded.root.join(rest);
+        let host = self.loaded.libraries.host(&self.loaded.root, rest);
         let (seen, now) = &mut self.workspace_seen;
         let unreadable = |error: io::Error| format!("cannot read `{path}`: {error}");
         let kept = if dir {

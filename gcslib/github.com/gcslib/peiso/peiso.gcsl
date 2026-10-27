@@ -71,7 +71,7 @@ fn assemble(
     tool: PeisoToolchain = toolchain.get(Toolchain::Peiso),
     ppk_tool: ppk.PpkToolchain = toolchain.get(Toolchain::Ppk),
 ) -> File {
-    let repo = dir("repository")
+    let repo = working_dir().dir("repository")
     let carried = [kernel.package, ...(for entry in packages { entry.package })]
     for pkg in carried {
         let fetched = exec([
@@ -84,7 +84,7 @@ fn assemble(
             repo.path,
         ])
     }
-    let spec = "{dir(".").path}/peios.toml"
+    let spec = "{working_dir().path}/peios.toml"
     let written = fs.write(spec, spec_of(kernel, packages, initramfs, liveboot))
     let built = exec([
         tool.peiso.path,

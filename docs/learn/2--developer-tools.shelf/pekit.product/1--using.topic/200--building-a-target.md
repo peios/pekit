@@ -27,6 +27,12 @@ read anything else in the workspace, and has no network. It sees the
 workspace at `/w` and results at `/pekit-out`, the same on every machine,
 so the paths in a build never depend on where your checkout is.
 
+A step has a directory of its own, where its programs run and where it
+writes what it makes. `working_dir()` names it, so a step that compiles
+gives `working_dir().file("main.o")`. A relative path such as
+`file("main.c")` is never in it: it's resolved against the directory of
+the file it's written in, the way it would be anywhere else.
+
 Steps that don't depend on each other run at the same time. `--jobs 4`
 runs at most four programs at once. By default pekit runs as many as the
 machine has processors. In a terminal, a line shows the steps running and
@@ -241,6 +247,24 @@ pekit needs a commit it doesn't have, so a workspace whose libraries are
 pinned builds offline. A strict build, `--strict`, fails unless its
 libraries are exactly those `pekit.lock` pins: every library it imports
 pinned, none differing from its pin, and `$GCSL_LIBRARY_PATH` unset.
+
+## Libraries with files of their own
+
+A library can build from files beside its `.gcsl` files, as the Peios
+SDK's library builds libpeios from the SDK's sources. A relative path in a
+library names its own files, and pekit places every library at
+`/w/.gcsl/libraries/<path>`, wherever it found it: exported by `pekit
+lock`, or in a directory of `$GCSL_LIBRARY_PATH` while you work on the
+library itself. So a step that builds from a library's files is the same
+step in every workspace that imports the library, and its outputs are
+shared through the store.
+
+Pekit tells a build's code what `pekit.lock` pins, through the GCSL
+standard library's `libraries` module. A library that takes something the
+same repository also gives another way can check that the two agree: the
+gcslib rust library fails a build whose `Cargo.lock` takes a git crate
+from a repository at another commit than `pekit.lock` pins a library from
+that repository at.
 
 ## Fetching files
 

@@ -30,11 +30,11 @@ fn workspace() -> tempfile::TempDir {
                 "workspace.gcsl",
                 "#[hermetic] def quick() -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"head -c 1048576 /dev/zero | tr '\\\\0' q > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n\
                  #[hermetic] def slow() -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"sleep 1; head -c 1048576 /dev/zero | tr '\\\\0' s > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             (
@@ -109,7 +109,7 @@ fn a_scratch_directory_is_evicted_whole_unless_a_run_holds_it() {
                 "#[hermetic] #[scratch] def warm(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"head -c 1048576 /dev/zero > /pekit-scratch/state; \
                  cat {src.path} > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", "one\n"),

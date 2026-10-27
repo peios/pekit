@@ -30,7 +30,7 @@ fn steps(comment: &str, word: &str) -> String {
          #[hermetic] def twice(src: File) -> File {{\n\
          \x20   let a = exec([\"sh\", \"-c\", \"tr a-z A-Z < {{src.path}} > up; echo t > /tmp/t\"])\n\
          \x20   let b = exec([\"sh\", \"-c\", \"cat up /tmp/t > out; echo {word} >> out\"])\n\
-         \x20   = file(\"out\")\n\
+         \x20   = working_dir().file(\"out\")\n\
          }}\n"
     )
 }
@@ -156,7 +156,7 @@ fn a_step_given_a_secret_has_no_program_found_or_recorded() {
              \x20   let a = exec([\"sh\", \"-c\", \"cat {{src.path}} > signed\"])\n\
              \x20   let b = exec_secret([\"sh\", \"-c\", \"wc -c < \\\"$KEY\\\" >> signed\"], \
              secrets = {{KEY = key.reveal().path}})\n\
-             \x20   = file(\"signed\")\n\
+             \x20   = working_dir().file(\"signed\")\n\
              }}\n"
         )
     };
@@ -241,7 +241,7 @@ fn a_program_sees_what_a_context_read_staged_by_its_contents() {
                  \x20   let a = exec([\"sh\", \"-c\", \"echo before > out\"])\n\
                  \x20   let n = ^notes\n\
                  \x20   let b = exec([\"sh\", \"-c\", \"cat /w/app/note.txt >> out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             (
@@ -268,10 +268,10 @@ fn a_program_sees_what_the_step_wrote_before_it() {
         format!(
             "import fs\n\
              #[hermetic] def wrote() -> File {{\n\
-             \x20   let at = \"{{dir(\".\").path}}/note\"\n\
+             \x20   let at = \"{{working_dir().path}}/note\"\n\
              \x20   let w = fs.write(at, \"{word}\")\n\
              \x20   let r = exec([\"sh\", \"-c\", \"cat note > out\"])\n\
-             \x20   = file(\"out\")\n\
+             \x20   = working_dir().file(\"out\")\n\
              }}\n\
              def build both() {{ = wrote() }}\n"
         )
@@ -309,7 +309,7 @@ fn a_program_is_keyed_by_where_its_step_writes() {
                 "workspace.gcsl",
                 "#[hermetic] def here(src: File, tag: String) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"pwd > out; cat {src.path} >> out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", "n\n"),
@@ -342,7 +342,7 @@ fn a_composition_placed_again_is_sealed_as_a_run_leaves_it() {
              \x20   let d = fs.compose_dir({{\"in/x\" = src}})\n\
              \x20   let a = exec([\"sh\", \"-c\", \"cat {{d.path}}/in/x > out\"])\n\
              \x20   let b = exec([\"sh\", \"-c\", \"stat -c %a {{d.path}}/in/x >> out; echo {word} >> out\"])\n\
-             \x20   = file(\"out\")\n\
+             \x20   = working_dir().file(\"out\")\n\
              }}\n\
              def build both() {{ = modes(file(\"x.txt\")) }}\n"
         )

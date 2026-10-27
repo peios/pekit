@@ -85,15 +85,15 @@ fn signing_workspace() -> tempfile::TempDir {
             "import keychain\n\
              #[hermetic] fn sign(src: File, key: Secret<File> = keychain.file(\"signing\")) -> File {\n\
              \x20   let ran = exec_secret([\"/bin/sh\", \"-c\", \"wc -c < \\\"$KEY\\\" > signed.txt; cat {src.path} >> signed.txt\"], secrets = {KEY = key.reveal().path})\n\
-             \x20   = file(\"signed.txt\")\n\
+             \x20   = working_dir().file(\"signed.txt\")\n\
              }\n\
              #[hermetic] fn peek(src: File) -> File {\n\
              \x20   let ran = exec([\"/bin/sh\", \"-c\", \"(cat /pekit-secrets/dev/signing || echo none) > peeked.txt 2>/dev/null\"])\n\
-             \x20   = file(\"peeked.txt\")\n\
+             \x20   = working_dir().file(\"peeked.txt\")\n\
              }\n\
              #[hermetic] fn asks() -> File {\n\
              \x20   let key = keychain.file(\"signing\")\n\
-             \x20   = file(\"never\")\n\
+             \x20   = working_dir().file(\"never\")\n\
              }\n\
              def build hello() { = sign(file(\"name.txt\")) }\n\
              def build both() {\n\

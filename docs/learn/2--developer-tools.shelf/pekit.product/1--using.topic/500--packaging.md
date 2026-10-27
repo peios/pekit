@@ -50,9 +50,9 @@ didn't change isn't packed again: changing `main.c` repacks
 changing the version alone repacks both and recompiles nothing.
 
 The ppk library asks the `toolchain` module for a `Toolchain::Ppk`, so a
-workspace registers the `ppk` tool it uses. A definition's relative paths
-are against its own file's directory, whoever runs it, so `dir("tools")`
-names a tool kept beside `workspace.gcsl`:
+workspace registers the `ppk` tool it uses. A relative path is against
+the directory of the file it's written in, so `dir("tools")` in
+`workspace.gcsl` names a tool kept beside it:
 
 ```text
 import * from "github.com/gcslib/ppk"

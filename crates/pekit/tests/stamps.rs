@@ -27,7 +27,7 @@ fn workspace(text: &str) -> tempfile::TempDir {
                 "workspace.gcsl",
                 "#[hermetic] def copy(src: File, d: Dir) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"cat {src.path} {d.path}/x > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", text),

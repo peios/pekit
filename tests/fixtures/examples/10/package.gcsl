@@ -10,7 +10,7 @@ import * from "github.com/gcslib/python"
 #[hermetic]
 fn shouted(src: File) -> File {
     let r = exec(["/bin/sh", "-c", "tr a-z A-Z < {src.path} > motd"])
-    = file("motd")
+    = working_dir().file("motd")
 }
 
 def package dev.example.motd() {
@@ -72,7 +72,7 @@ fn isolated(
     let python = "/opt/python/{py.python.path.strip_prefix(py.root.path).strip_prefix("/")}"
     let box = fs.compose(placed).sandbox(cwd = "/work", env = {PATH = "/opt/binutils"; PYTHONDONTWRITEBYTECODE = "1"})
     let ran = box.exec(python, "/work/isolate-static.py", "/work/libpeios.a", "/work/out.a", "--prefix", "peios")
-    let made = file("libpeios.a")
+    let made = working_dir().file("libpeios.a")
     fs.copy(box.file("/work/out.a").path, made.path)
     = made
 }

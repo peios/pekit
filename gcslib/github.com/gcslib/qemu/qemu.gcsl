@@ -62,7 +62,7 @@ def launcher(
     vm: QemuToolchain = toolchain.get(Toolchain::Qemu),
 ) -> File {
     let words = [vm.system.path, ...machine(iso, memory, vm)].join(" ")
-    let at = "{dir(".").path}/boot"
+    let at = "{working_dir().path}/boot"
     let written = fs.write(at, "#!/bin/sh\nexec {words} \"$@\"\n")
     let made = fs.set_executable(at, true)
     = file(at)

@@ -1050,6 +1050,34 @@ fn the_rust_library_builds_with_crates_from_a_git_repository() {
         .unwrap();
 }
 
+#[test]
+fn a_git_crate_must_be_at_the_commit_its_repository_s_library_is_pinned_at() {
+    let (_origin, url, commit) = greeting_repository();
+    let dir = tempfile::tempdir().unwrap();
+    greeting_app(dir.path(), (&url, &commit));
+    // The lock pins a library from the crate's repository at another
+    // commit; the library is there, so nothing is fetched to restore it.
+    let other = "0".repeat(40);
+    fs::create_dir_all(dir.path().join(".gcsl/libraries/example.org/greeting")).unwrap();
+    fs::write(
+        dir.path().join("pekit.lock"),
+        format!(
+            "{{\"libraries\": [{{\"path\": \"example.org/greeting\", \"git\": \"{url}.git\", \
+             \"dir\": \"\", \"commit\": \"{other}\", \"tree\": \"\"}}]}}\n"
+        ),
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let error = build_in(dir.path(), state.path(), "app").unwrap_err();
+    assert!(
+        error.contains(&format!(
+            "`Cargo.lock` pins `greeting` at `{commit}` of `{url}`, but `pekit.lock` pins the \
+             library `example.org/greeting` from the same repository at `{other}`"
+        )),
+        "{error}"
+    );
+}
+
 const RUST: &str = "import * from \"github.com/gcslib/gcc\"\n\
                     import * from \"github.com/gcslib/rust\"\n\
                     import Toolchain from toolchain\n\

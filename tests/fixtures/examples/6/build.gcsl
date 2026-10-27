@@ -11,8 +11,8 @@ def build embed() {
 #[hermetic]
 fn run_embed(tool: File, input: File, name: String) -> {header: File, source: File} {
     let ran = exec([tool.path, input.path, name, "."])
-    header = file("{name}.h")
-    source = file("{name}.c")
+    header = working_dir().file("{name}.h")
+    source = working_dir().file("{name}.c")
 }
 
 def build app() {

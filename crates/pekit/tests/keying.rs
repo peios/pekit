@@ -31,11 +31,11 @@ fn workspace(binding: &str) -> tempfile::TempDir {
                 "context flavour: String = \"plain\"\n\
                  #[hermetic] def plainly(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n\
                  #[hermetic] def flavoured(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"echo {^flavour} > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", "n\n"),
@@ -109,7 +109,7 @@ fn a_step_is_given_a_context_s_files_only_once_it_reads_it() {
                  \x20   let before = exec([\"sh\", \"-c\", \"{look} > before\"])\n\
                  \x20   let read = len(^notes)\n\
                  \x20   let after = exec([\"sh\", \"-c\", \"{look} > after; echo {read} >> after\"])\n\
-                 \x20   = [file(\"before\"), file(\"after\")]\n\
+                 \x20   = [working_dir().file(\"before\"), working_dir().file(\"after\")]\n\
                  }\n",
             ),
             (

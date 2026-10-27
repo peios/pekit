@@ -34,7 +34,7 @@ fn workspace(text: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
 /// A step that shouts its input file into its output.
 const SHOUT: &str = "#[hermetic] fn shout(src: File) -> File {\n\
                      \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
-                     \x20   file(\"out.txt\")\n\
+                     \x20   working_dir().file(\"out.txt\")\n\
                      }\n";
 
 #[test]
@@ -71,7 +71,7 @@ fn a_step_is_given_an_earlier_step_s_output() {
     let text = format!(
         "{SHOUT}#[hermetic] fn twice(src: File) -> File {{\n\
          \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {{src.path}} {{src.path}} > out.txt\"])\n\
-         \x20   file(\"out.txt\")\n\
+         \x20   working_dir().file(\"out.txt\")\n\
          }}\n\
          def build hello() {{ out = twice(shout(file(\"name.txt\"))) }}\n"
     );
@@ -87,7 +87,7 @@ fn a_step_is_given_an_earlier_step_s_output() {
 fn a_step_that_fails_fails_the_build_with_its_own_error() {
     let text = "#[hermetic] #[retry(2)] fn broken() -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 0.3; echo nope >&2; exit 3\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() { out = broken() }\n";
     let dir = workspace(text, &[]);
@@ -112,7 +112,7 @@ fn a_step_that_fails_fails_the_build_with_its_own_error() {
 fn a_step_s_timeout_stops_it() {
     let text = "#[hermetic] #[timeout(1s)] fn slow() -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 20\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() { out = slow() }\n";
     let dir = workspace(text, &[]);
@@ -126,7 +126,7 @@ fn a_step_s_timeout_stops_it() {
 /// A step that joins two files into its output.
 const JOIN: &str = "#[hermetic] fn join(a: File, b: File) -> File {\n\
                     \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {a.path} {b.path} > out.txt\"])\n\
-                    \x20   file(\"out.txt\")\n\
+                    \x20   working_dir().file(\"out.txt\")\n\
                     }\n";
 
 #[test]
@@ -153,7 +153,7 @@ fn a_step_whose_result_holds_a_secret_runs_each_time_and_keeps_its_files() {
     let text = format!(
         "{SHOUT}#[hermetic] fn sealed(src: File) -> {{out: File, key: Secret<String>}} {{\n\
          \x20   let r = exec([\"/bin/sh\", \"-c\", \"cp {{src.path}} out.txt\"])\n\
-         \x20   {{out = file(\"out.txt\"); key = secret(\"k3y\", \"test key\")}}\n\
+         \x20   {{out = working_dir().file(\"out.txt\"); key = secret(\"k3y\", \"test key\")}}\n\
          }}\n\
          def build hello() {{ out = shout(sealed(file(\"name.txt\")).out) }}\n"
     );
@@ -214,7 +214,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
     let text = format!(
         "{SHOUT}#[hermetic] fn copy(src: File) -> File {{\n\
          \x20   let r = exec([\"cp\", src.path, \"out.txt\"])\n\
-         \x20   file(\"out.txt\")\n\
+         \x20   working_dir().file(\"out.txt\")\n\
          }}\n\
          def build hello() {{ out = copy(shout(file(\"name.txt\"))) }}\n"
     );
@@ -270,7 +270,7 @@ fn a_target_is_evaluated_on_its_execution_platform() {
     // The prelude's contexts.
     let text = "#[hermetic] fn arch(a: String) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo {a} > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() { out = arch(\"{^host_platform.arch} for {^platform.arch}\") }\n";
     let dir = workspace(text, &[]);
@@ -340,7 +340,7 @@ fn steps_run_commands_in_sandboxes_of_their_own_directories() {
                 }\n\
                 #[hermetic] fn join(a: File, b: File) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {a.path} {b.path} > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() {\n\
                 \x20   out = join(inside(dir(\"root\"), \"one\"), inside(dir(\"root\"), \"two\"))\n\
@@ -362,7 +362,7 @@ fn a_step_that_needs_a_failed_step_s_result_fails_with_its_error_unrun() {
     let text = format!(
         "{SHOUT}{JOIN}#[hermetic] fn broken() -> File {{\n\
          \x20   let r = exec([\"/bin/sh\", \"-c\", \"exit 4\"])\n\
-         \x20   file(\"out.txt\")\n\
+         \x20   working_dir().file(\"out.txt\")\n\
          }}\n\
          def build hello() {{ out = join(broken(), shout(file(\"name.txt\"))) }}\n"
     );
@@ -391,7 +391,7 @@ fn a_step_s_compositions_link_its_inputs_and_no_program_changes_them() {
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"stat -c %h {d.path}/in/x > out.txt; \
                 (echo y > {d.path}/new || echo refused) >> out.txt 2>/dev/null; \
                 (echo y >> {d.path}/in/x || echo refused) >> out.txt 2>/dev/null\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() { out = probe(file(\"x.txt\")) }\n";
     let dir = workspace(text, &[("x.txt", "x\n")]);
@@ -426,7 +426,7 @@ fn a_step_s_sandbox_is_an_overlay_read_upper_over_lower() {
                 }\n\
                 #[hermetic] fn pick(i: {made: File, bin: Dir, sub: Dir}) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {i.made.path} > out.txt; ls {i.bin.path} >> out.txt; ls {i.sub.path} >> out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() { out = pick(inside(dir(\"root\"))) }\n";
     let dir = workspace(text, &[("root/bin/old", "old\n")]);
@@ -458,7 +458,7 @@ fn a_sandbox_of_what_the_step_changes_is_a_copy() {
     }
     let text = "#[hermetic] fn inside(bb: File) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"mkdir -p made/bin && cp {bb.path} made/bin/sh\"])\n\
-                \x20   let s = dir(\"made\").sandbox()\n\
+                \x20   let s = working_dir().dir(\"made\").sandbox()\n\
                 \x20   let w = s.exec(\"/bin/sh\", \"-c\", \"echo copied > /x\")\n\
                 \x20   s.file(\"/x\")\n\
                 }\n\
@@ -532,12 +532,12 @@ fn an_archive_is_unpacked_for_a_step_or_by_one() {
     let text = "import archive\n\
                 #[hermetic] fn read(d: Dir) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {d.path}/x.txt > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 #[hermetic] fn inner(a: File) -> File {\n\
                 \x20   let d = archive.unpack(a, strip = 1)\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {d.path}/x.txt {d.path}/x.txt > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() {\n\
                 \x20   out = [read(archive.unpack(file(\"src.tar.gz\"), strip = 1)), inner(file(\"src.tar.gz\"))]\n\
@@ -564,11 +564,11 @@ fn the_target_reads_a_step_s_outputs_as_the_build_goes() {
     // a step made, which it lists mid-build.
     let text = "#[hermetic] fn gen() -> Dir {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"mkdir out && echo 1 > out/a.c && echo 2 > out/b.c\"])\n\
-                \x20   dir(\"out\")\n\
+                \x20   working_dir().dir(\"out\")\n\
                 }\n\
                 #[hermetic] fn twice(f: File) -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {f.path} {f.path} > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build hello() {\n\
                 \x20   out = for f in gen().files() { twice(f) }\n\
@@ -616,7 +616,7 @@ fn a_step_is_given_the_toolchain_the_workspace_registers() {
                  import Toolchain from toolchain\n\
                  #[hermetic] fn compile(src: File, cchain: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
                  \x20   let r = exec([\"/bin/sh\", cchain.cc.path, src.path])\n\
-                 \x20   file(\"out.o\")\n\
+                 \x20   working_dir().file(\"out.o\")\n\
                  }\n\
                  def build hello() { out = compile(file(\"main.c\")) }\n",
             ),
@@ -660,7 +660,7 @@ fn with_no_toolchain_registered_a_step_compiles_with_the_host_s() {
                 import Toolchain from toolchain\n\
                 #[hermetic] fn compile(src: File, cchain: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
                 \x20   let r = exec([cchain.cc.path, \"-o\", \"hello\", src.path])\n\
-                \x20   file(\"hello\")\n\
+                \x20   working_dir().file(\"hello\")\n\
                 }\n\
                 def build hello() { out = compile(file(\"hello.c\")) }\n";
     let dir = workspace(

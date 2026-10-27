@@ -58,7 +58,7 @@ fn workspace(url: &str, commit: &str) -> tempfile::TempDir {
                 "workspace.gcsl",
                 "#[hermetic] def list(src: Dir) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"cat {src.path}/a.txt {src.path}/sub/b.txt {src.path}/l > out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             (

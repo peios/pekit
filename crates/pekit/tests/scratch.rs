@@ -31,7 +31,7 @@ fn workspace(text: &str) -> tempfile::TempDir {
                 "#[hermetic] #[scratch] def counts(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"echo run >> /pekit-scratch/runs; \
                  wc -l < /pekit-scratch/runs > out; cat {src.path} >> out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", text),
@@ -110,7 +110,7 @@ fn a_strict_build_gives_a_step_an_empty_scratch_directory() {
                 "#[hermetic] #[scratch] def counts(bb: File, src: File) -> File {\n\
                  \x20   let r = exec([bb.path, \"sh\", \"-c\", \"echo run >> /pekit-scratch/runs; \
                  {bb.path} wc -l < /pekit-scratch/runs > out; {bb.path} cat {src.path} >> out\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n",
             ),
             ("app/name.txt", "one\n"),
@@ -172,7 +172,7 @@ fn a_step_s_programs_neither_keep_nor_place_its_scratch_directory() {
             "# {comment}\n\
              #[hermetic] #[scratch] def warm(src: File) -> File {{\n\
              \x20   let r = exec([\"sh\", \"-c\", \"cat {{src.path}} > out; echo x >> /pekit-scratch/log\"])\n\
-             \x20   = file(\"out\")\n\
+             \x20   = working_dir().file(\"out\")\n\
              }}\n"
         )
     };

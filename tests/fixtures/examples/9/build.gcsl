@@ -12,7 +12,7 @@ def build msggen() {
 
 #[hermetic]
 fn generate(tool: File, input: File) -> Dir {
-    let out = dir("out")
+    let out = working_dir().dir("out")
     fs.mkdir(out.path)
     let ran = exec([tool.path, input.path, out.path])
     = out

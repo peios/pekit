@@ -26,7 +26,7 @@ fn write(root: &Path, files: &[(&str, &str)]) {
 /// A step that shouts its input file into its output.
 const SHOUT: &str = "#[hermetic] fn shout(src: File) -> File {\n\
                      \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
-                     \x20   file(\"out.txt\")\n\
+                     \x20   working_dir().file(\"out.txt\")\n\
                      }\n";
 
 /// A workspace of `files`, and its `workspace.gcsl`, empty.
@@ -206,7 +206,7 @@ fn one_call_made_in_two_contexts_is_two_steps_at_two_paths() {
                 #[hermetic] fn loud(src: File) -> File {\n\
                 \x20   let how = if ^case == \"upper\" { \"a-z A-Z\" } else { \"A-Z a-z\" }\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr {how} < {src.path} > out.txt\"])\n\
-                \x20   file(\"out.txt\")\n\
+                \x20   working_dir().file(\"out.txt\")\n\
                 }\n\
                 def build both() {\n\
                 \x20   up = loud(file(\"name.txt\"))\n\

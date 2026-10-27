@@ -42,7 +42,7 @@ def pack(
         panic("the ppk library runs ppk on the host's runtime alone, not `{tool.runtime.path}`")
     }
     let files = fs.compose_dir(pkg.files)
-    let out = dir("artifacts")
+    let out = working_dir().dir("artifacts")
     let ran = exec([
         tool.ppk.path,
         "pack",
@@ -77,7 +77,7 @@ def from_repository(
     arch: String = this_arch(),
     tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
 ) -> PpkPackage {
-    let out = dir("artifacts")
+    let out = working_dir().dir("artifacts")
     let ran = exec([
         tool.ppk.path,
         "fetch",

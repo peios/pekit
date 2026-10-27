@@ -16,6 +16,19 @@
 //! one name in one directory are an error, since `pekit run NAME` would run
 //! either ([`LoadError::BuildAndScript`]).
 //!
+//! # Libraries
+//!
+//! A library a workspace imports is at `/w/.gcsl/libraries/<path>` in the
+//! logical layout, where `pekit lock` exports it, wherever `gcsl-disk`
+//! found it: in `.gcsl/libraries`, or in a directory of
+//! `$GCSL_LIBRARY_PATH`. Its sources are given to GCSL there
+//! ([`gcsl::SourceFile::with_dir`]), so that a library's relative paths
+//! name its own files by the same paths in every workspace, and a step that
+//! builds from them is the same step, and shares its outputs, wherever the
+//! library is used. Its files are the workspace's files to the rest of the
+//! engine, put into the store and staged as they are; only where one is on
+//! the host differs, for a library found elsewhere ([`Libraries::host`]).
+//!
 //! A build leaves in the workspace what it evaluated: each file's top level
 //! and each memoised call's result, which name what it fetched, unpacked
 //! and built. Another build, `--check-reproducible`'s second or a release's
@@ -27,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use gcsl::workspace::{self, Workspace};
 
+use crate::lock::{LIBRARIES_DIR, Lock, Pinned};
 use crate::sandbox::WORKSPACE;
 use crate::target::{Target, select};
 use gcsl::diagnostic::Renderer;
@@ -49,6 +63,12 @@ pub struct Loaded {
     pub names: Vec<String>,
     /// The checked workspace.
     pub workspace: Workspace,
+    /// Where each library it imports was found (see
+    /// [Libraries](#libraries)).
+    pub libraries: Libraries,
+    /// Each library its `pekit.lock` pins, none if it has no lock: what the
+    /// `libraries` module's `pinned_libraries` gives its code.
+    pub pinned: Vec<Pinned>,
     /// What it was checked from: its files, named relative to the root, and
     /// the nested workspaces left out, so that it can be checked afresh
     /// ([`Loaded::ready`]).
@@ -93,6 +113,8 @@ pub enum LoadError {
     },
     /// A file or directory of the workspace could not be read.
     Read(gcsl_disk::ReadError),
+    /// Its `pekit.lock` could not be read: the error as it is shown.
+    Lock(String),
     /// A `build` and a `script` of one directory have one name.
     BuildAndScript {
         /// Their qualified name.
@@ -118,6 +140,7 @@ impl LoadError {
                 dir.display()
             ),
             LoadError::Read(error) => format!("error: {error}\n"),
+            LoadError::Lock(shown) => shown.clone(),
             LoadError::BuildAndScript { name } => format!(
                 "error: `{name}` is both a build and a script, so `pekit run` could run either: \
                  rename one\n"
@@ -136,8 +159,8 @@ impl LoadError {
 ///
 /// # Errors
 ///
-/// That no workspace holds `dir`, that a file of it cannot be read, or
-/// what its check found.
+/// That no workspace holds `dir`, that a file of it or its lock cannot be
+/// read, or what its check found.
 pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
     let canonical = dir.canonicalize().map_err(|_| LoadError::NoWorkspace {
         dir: dir.to_path_buf(),
@@ -153,16 +176,20 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     let read = gcsl_disk::read_workspace(&root, None).map_err(LoadError::Read)?;
+    let (relative, libraries) = place_libraries(read.relative);
+    let pinned = Lock::read(&root)
+        .map_err(|error| LoadError::Lock(error.render()))?
+        .map(|lock| lock.libraries)
+        .unwrap_or_default();
     // Rooted at `/w`, as every path in a build is (see [The logical
     // layout](crate::sandbox#the-logical-layout)): so `fileroot` names the
     // workspace's directories as steps see them, on every machine.
-    let (standard, checked) =
-        workspace::check_with_standard(&read.relative, &read.nested, WORKSPACE);
+    let (standard, checked) = workspace::check_with_standard(&relative, &read.nested, WORKSPACE);
     let mut names: Vec<String> = standard
         .iter()
         .map(|source| source.name().to_owned())
         .collect();
-    names.extend(read.relative.iter().map(|source| source.name().to_owned()));
+    names.extend(relative.iter().map(|source| source.name().to_owned()));
     let mut sources = standard;
     sources.extend(read.shown);
     match checked {
@@ -176,7 +203,9 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
                 sources,
                 names,
                 workspace,
-                checked_from: (read.relative, read.nested),
+                libraries,
+                pinned,
+                checked_from: (relative, read.nested),
                 used: false,
             })
         }
@@ -185,6 +214,64 @@ pub fn load(dir: &Path) -> Result<Loaded, LoadError> {
             diagnostics,
         }),
     }
+}
+
+/// Where each library a workspace imports was found on the host (see
+/// [Libraries](#libraries)).
+#[derive(Clone, Debug, Default)]
+pub struct Libraries {
+    /// Each library's path, `github.com/gcslib/gcc`, and its directory on
+    /// the host, canonical.
+    found: Vec<(String, PathBuf)>,
+}
+
+impl Libraries {
+    /// The host's path of `rest`, a path relative to the root `root` of the
+    /// workspace in the logical layout: in the directory a library was
+    /// found in, if it is under the library's place, `.gcsl/libraries/<path>`;
+    /// under `root` otherwise.
+    #[must_use]
+    pub fn host(&self, root: &Path, rest: &str) -> PathBuf {
+        let in_library = rest
+            .strip_prefix(LIBRARIES_DIR)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .and_then(|rest| {
+                self.found.iter().find_map(|(path, host)| {
+                    let inner = rest.strip_prefix(path.as_str())?;
+                    if inner.is_empty() {
+                        return Some(host.clone());
+                    }
+                    inner.strip_prefix('/').map(|inner| host.join(inner))
+                })
+            });
+        in_library.unwrap_or_else(|| root.join(rest))
+    }
+}
+
+/// `sources`, each library's files given to GCSL at the library's place in
+/// the logical layout, and where each library was found (see
+/// [Libraries](#libraries)).
+fn place_libraries(sources: Vec<SourceFile>) -> (Vec<SourceFile>, Libraries) {
+    let prefix = format!("{}/", workspace::LIBRARIES);
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let placed = sources
+        .into_iter()
+        .map(|source| {
+            let (Some(host), Some(name)) = (source.dir(), source.name().strip_prefix(&prefix))
+            else {
+                return source;
+            };
+            let path = name.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned();
+            if !found.iter().any(|(known, _)| *known == path) {
+                found.push((path.clone(), PathBuf::from(host)));
+            }
+            source.with_dir(format!("{WORKSPACE}/{LIBRARIES_DIR}/{path}"))
+        })
+        .collect();
+    // The longest first, so that a library's path never takes another's
+    // that it is a prefix of.
+    found.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    (placed, Libraries { found })
 }
 
 /// The qualified name of a `build` of `workspace` that a `script` of its

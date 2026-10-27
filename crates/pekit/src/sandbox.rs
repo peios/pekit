@@ -53,6 +53,7 @@ use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 use crate::layers::{Layers, Overlay};
 use crate::record::Kept;
 use crate::keychain::{IN_A_STEP, Keychain};
+use crate::load::Libraries;
 use crate::scratch::SCRATCH;
 use crate::store::{Seen, Store};
 
@@ -191,6 +192,9 @@ pub struct HostView {
     temps: AtomicU32,
     /// The keychain that answers for the build's secrets, if it has one.
     keychain: Option<Arc<Keychain>>,
+    /// Where the libraries the workspace imports were found (see
+    /// [Libraries](crate::load#libraries)).
+    libraries: Libraries,
 }
 
 impl HostView {
@@ -206,7 +210,16 @@ impl HostView {
             temp: temp.to_path_buf(),
             temps: AtomicU32::new(0),
             keychain: None,
+            libraries: Libraries::default(),
         }
+    }
+
+    /// The view whose libraries were found where `libraries` says (see
+    /// [Libraries](crate::load#libraries)).
+    #[must_use]
+    pub fn with_libraries(mut self, libraries: Libraries) -> Self {
+        self.libraries = libraries;
+        self
     }
 
     /// The view whose secrets `keychain` answers for (see
@@ -267,7 +280,7 @@ impl Effects for HostView {
 
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
         if let Some(rest) = under(path, WORKSPACE) {
-            return Ok(self.workspace.join(rest));
+            return Ok(self.libraries.host(&self.workspace, rest));
         }
         if let Some(rest) = under(path, OUTPUTS) {
             return Ok(self.outputs.join(rest));
@@ -704,12 +717,6 @@ impl Effects for StepSandbox {
 
     fn working_dir(&self) -> Result<PathBuf, String> {
         Ok(PathBuf::from(&self.own))
-    }
-
-    /// A step's code is in the step's own directory, whatever definition
-    /// made it, so that a step's key never holds its definition.
-    fn follows_definitions(&self) -> bool {
-        false
     }
 
     fn temp_dir(&self) -> Option<Result<String, String>> {

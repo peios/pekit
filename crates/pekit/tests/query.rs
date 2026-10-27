@@ -27,15 +27,15 @@ fn workspace() -> tempfile::TempDir {
                 "app/build.gcsl",
                 "#[hermetic] fn upper(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > up\"])\n\
-                 \x20   file(\"up\")\n\
+                 \x20   working_dir().file(\"up\")\n\
                  }\n\
                  #[hermetic] fn steady() -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"echo steady > s\"])\n\
-                 \x20   file(\"s\")\n\
+                 \x20   working_dir().file(\"s\")\n\
                  }\n\
                  #[hermetic] fn joined(a: File, b: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"cat {a.path} {b.path} > j\"])\n\
-                 \x20   file(\"j\")\n\
+                 \x20   working_dir().file(\"j\")\n\
                  }\n\
                  def build chain() { = joined(upper(file(\"in.txt\")), steady()) }\n\
                  def build waits() {\n\

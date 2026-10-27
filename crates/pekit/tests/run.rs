@@ -18,11 +18,11 @@ fn write(root: &Path, files: &[(&str, &str)]) {
 /// program that shows its arguments and exits with status 3.
 const STEPS: &str = "#[hermetic] fn shout(src: File) -> File {\n\
                      \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
-                     \x20   file(\"out.txt\")\n\
+                     \x20   working_dir().file(\"out.txt\")\n\
                      }\n\
                      #[hermetic] fn tool() -> File {\n\
                      \x20   let r = exec([\"sh\", \"-c\", \"printf '#!/bin/sh\\\\necho got \\\"$@\\\"\\\\nexit 3\\\\n' > tool; chmod +x tool\"])\n\
-                     \x20   file(\"tool\")\n\
+                     \x20   working_dir().file(\"tool\")\n\
                      }\n";
 
 /// A workspace whose `app` has builds `loud`, which shouts `name.txt`,

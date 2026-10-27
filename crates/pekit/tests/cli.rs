@@ -24,7 +24,7 @@ fn workspace() -> tempfile::TempDir {
                 "app/build.gcsl",
                 "#[hermetic] fn shout(src: File) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
-                 \x20   file(\"out.txt\")\n\
+                 \x20   working_dir().file(\"out.txt\")\n\
                  }\n\
                  def build hello() { out = shout(file(\"name.txt\")) }\n",
             ),
@@ -139,7 +139,7 @@ fn a_build_s_trace_is_written_where_asked() {
 fn a_library_s_steps_key_the_same_wherever_the_library_is_found() {
     let library = "#[hermetic] def shout(src: File) -> File {\n\
                    \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out.txt\"])\n\
-                   \x20   file(\"out.txt\")\n\
+                   \x20   working_dir().file(\"out.txt\")\n\
                    }\n";
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -305,11 +305,11 @@ fn clean_removes_the_outputs_and_with_cache_the_store() {
 const DRIFTING: &str = "#[hermetic] fn stamp() -> Dir {\n\
                         \x20   let r = exec([\"sh\", \"-c\", \"mkdir -p out/sub; echo same > out/a; \
                         date +%s%N > out/sub/t\"])\n\
-                        \x20   dir(\"out\")\n\
+                        \x20   working_dir().dir(\"out\")\n\
                         }\n\
                         #[hermetic] fn steady() -> File {\n\
                         \x20   let r = exec([\"sh\", \"-c\", \"echo steady > s\"])\n\
-                        \x20   file(\"s\")\n\
+                        \x20   working_dir().file(\"s\")\n\
                         }\n\
                         def build drift() { = stamp() }\n\
                         def build calm() { = steady() }\n";
@@ -446,7 +446,7 @@ fn check_reproducible_builds_with_a_toolchain_its_definition_unpacked() {
                  import Toolchain from toolchain\n\
                  #[hermetic] fn named(c: toolchain.CToolchain = toolchain.get(Toolchain::C)) -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"cat {c.cc.path} > out.txt\"])\n\
-                 \x20   file(\"out.txt\")\n\
+                 \x20   working_dir().file(\"out.txt\")\n\
                  }\n\
                  def build cc() { = named() }\n",
             ),
@@ -478,7 +478,7 @@ fn a_step_failing_in_a_library_is_reported_at_the_workspace_s_call() {
                 "#[hermetic]\n\
                  fn fails() -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"echo broken >&2; exit 3\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n\
                  def make() -> File { fails() }\n",
             ),
@@ -488,7 +488,7 @@ fn a_step_failing_in_a_library_is_reported_at_the_workspace_s_call() {
                  #[hermetic]\n\
                  fn own() -> File {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"exit 4\"])\n\
-                 \x20   = file(\"out\")\n\
+                 \x20   = working_dir().file(\"out\")\n\
                  }\n\
                  def build lib() { = tools.make() }\n\
                  def build mine() { = own() }\n",
@@ -581,7 +581,7 @@ fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
                 "app/build.gcsl",
                 "#[hermetic] fn made() -> Dir {\n\
                  \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; echo inside > out/f\"])\n\
-                 \x20   dir(\"out\")\n\
+                 \x20   working_dir().dir(\"out\")\n\
                  }\n\
                  def build reads() { = made().file(\"f\").read() }\n",
             ),
@@ -624,12 +624,12 @@ fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
         format!(
             "{kvm}#[hermetic] fn looks() -> File {{\n\
              \x20   let r = exec([\"sh\", \"-c\", \"if test -c /dev/kvm; then echo kvm; else echo none; fi > o\"])\n\
-             \x20   file(\"o\")\n\
+             \x20   working_dir().file(\"o\")\n\
              }}\n\
              def build looked() {{ = looks() }}\n\
              #[device(\"floppy\")] #[hermetic] fn odd() -> File {{\n\
              \x20   let r = exec([\"true\"])\n\
-             \x20   file(\"o\")\n\
+             \x20   working_dir().file(\"o\")\n\
              }}\n\
              def build oddly() {{ = odd() }}\n"
         )
