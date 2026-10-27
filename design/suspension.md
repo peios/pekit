@@ -468,7 +468,7 @@ changes made:
 On authd, a no-change build went from 1.87 s to 0.78 s, and GCSL's
 evaluation from 1.13 s to 0.26 s: `fetch` is called once per fetch.
 
-## Stage 4 proposal (2026-10-27, for Jack before pekit depends on it)
+## Stage 4 (agreed with Jack, 2026-10-27)
 
 Forking is the remaining lever: a target still stops at each of its
 effects in turn, about 250 round trips for `nss`. The first cut forks
@@ -490,8 +490,11 @@ crate loops that dominate. Before any fork code:
   on many at once. pekit's target state holds the set, demands them all,
   and runs the unit again when any is given. `--no-dynamic` and query
   mode, which look at one node today, look at each.
-- **`GraphHost` carries the host's isolation predicate**: which effects it
-  isolates. This is rule 2's frontier, enforced inside GCSL rather than
+- **The host says which effects it isolates**, through a method of its
+  `Effects`, `isolates(builtin)`, false by default (agreed with Jack,
+  2026-10-27). Each unit has its own `Effects`, so a target and a step's
+  sandbox answer as fits them: a step's `exec`s share its sandbox and stay
+  ordered. This is rule 2's frontier, enforced inside GCSL rather than
   published: a task makes a node for an effect the host does not isolate
   only when no task earlier in program order is live, so such effects
   still reach the host in program order, one at a time, as pekit relies
