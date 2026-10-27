@@ -381,3 +381,11 @@ Examples 7 and 10 need layer E's `test` and the Peios packages.
   keeps the host's working directory, so that a memoised function that
   runs one is one call for every definition; and a step's code is in its
   own directory always. GCSL `eval/files.rs`, "The working directory".
+  Superseded (Jack, 2026-10-27, PEI-1597): a relative path is against the
+  directory of the file it is written in, wherever it runs and whoever
+  calls it, as a name is bound where it is written; a function that works
+  on its caller's files takes a `File` or a `Dir`. The standard library's
+  code works for its caller. A step names its own directory with
+  `working_dir()`. Found while making the Peios SDK a library that builds
+  from its own files, which a caller-relative rule cannot express. GCSL
+  `eval/files.rs`, "Where a path is".
