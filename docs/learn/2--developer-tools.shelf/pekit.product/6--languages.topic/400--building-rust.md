@@ -158,9 +158,16 @@ def build ppk() {
 gives a directory of the binaries `bins`, each by its name. `packages`
 names the workspace's packages to build, as Cargo's `-p` does.
 
-The whole of `cargo build` is one step, so changing one source file builds
-the workspace again, as Cargo would. Either way of building takes its
-crates from `rust.vendored`, so no crate is fetched again.
+The whole of `cargo build` is one step, so changing one source file runs it
+again. Cargo's target directory is kept between runs in the step's
+[scratch directory](~pekit/writing-steps#keep-state-between-runs), so the
+crates of `vendor` aren't compiled again. The workspace's own crates, and
+crates it takes by their paths, are always compiled again. Cargo judges
+them by their files' modification times, which a file put back as it was
+can make look older than the last build.
+
+Either way of building takes its crates from `rust.vendored`, so no crate
+is fetched again.
 
 ## Where crates come from
 
