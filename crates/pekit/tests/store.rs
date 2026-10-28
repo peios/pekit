@@ -1,7 +1,7 @@
 //! Tests of the content store, receipts and records.
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use gcsl::eval::plain::Plain;
@@ -91,6 +91,15 @@ fn a_tree_s_identical_files_are_materialised_as_files_of_their_own() {
         let mode = fs::metadata(back.join(path)).unwrap().permissions().mode();
         assert_eq!(mode & 0o222, 0, "{path}");
     }
+    // The first a link to the blob, the others to copies of it the store
+    // keeps, which the same tree made again links, copying nothing more.
+    let again = dir.path().join("again");
+    store.materialise_tree(&digest, &again).unwrap();
+    let again_inode = |path: &str| fs::metadata(again.join(path)).unwrap().ino();
+    for path in ["a", "b", "sub/c"] {
+        assert_eq!(inode(path), again_inode(path), "{path}");
+    }
+    assert!(store.is_materialised(&digest, &again));
 }
 
 /// The receipt of a step given `args`, its files' contents those of the
@@ -122,17 +131,15 @@ fn a_tree_materialised_is_known_so_until_anything_of_it_changes() {
     fs::write(at.join("c"), "other").unwrap();
     fs::set_permissions(at.join("c"), fs::Permissions::from_mode(0o444)).unwrap();
     assert!(!store.is_materialised(&tree, &at));
-    // A copy, the second file of a blob, changed and made read-only again.
-    let at = fresh();
-    let copy = ["a", "sub/b"]
-        .into_iter()
-        .map(|name| at.join(name))
-        .find(|path| fs::metadata(path).unwrap().nlink() == 1)
-        .unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o644)).unwrap();
-    fs::write(&copy, "sane").unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o444)).unwrap();
-    assert!(!store.is_materialised(&tree, &at));
+    // A file of its own put in the place of the second of a blob, a link
+    // to the store's copy of it, of other contents or the same.
+    for contents in ["sane", "same"] {
+        let at = fresh();
+        fs::remove_file(at.join("sub/b")).unwrap();
+        fs::write(at.join("sub/b"), contents).unwrap();
+        fs::set_permissions(at.join("sub/b"), fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(store.is_materialised(&tree, &at), contents == "same");
+    }
     // A link that leads elsewhere.
     let at = fresh();
     fs::remove_file(at.join("l")).unwrap();

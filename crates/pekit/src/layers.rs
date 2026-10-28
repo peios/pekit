@@ -9,7 +9,11 @@
 //!
 //! - **A composition** hard-links each file it places that nothing can
 //!   change, a staged input's or another composition's, and copies any other
-//!   ([`Layers::place_file`]). Once it is done it is *sealed*: its files made
+//!   ([`Layers::place_file`]). A file it places twice, as a toolchain's
+//!   runtime is placed both on its own and within the toolchain, is a link
+//!   to the store's blob once and to a copy the store keeps of it each other
+//!   time, so that no two of its files are one, and none is copied anew.
+//!   Once it is done it is *sealed*: its files made
 //!   read-only on the host, and it bound read-only to every command, so that
 //!   no program can change it, and nothing a store's blob through it. Its
 //!   directories keep their modes, since a sandbox's merged directories show
@@ -31,12 +35,26 @@
 //!   sandbox's own root is its upper layer, which is where GCSL itself writes
 //!   into it, such as the working directory it makes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use crate::store::{FileEntry, Store};
+
+/// How a composition places a file that nothing can change
+/// ([`Layers::place_file`]).
+enum Placing {
+    /// As a link to it.
+    Link,
+    /// As a link to the copy of this number of the store's blob of these
+    /// contents and mode.
+    Copy(FileEntry, u32),
+    /// As a copy of its own.
+    Fresh,
+}
 
 /// An overlay sandbox (see [Compositions and sandboxes](#compositions-and-sandboxes)).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +84,10 @@ struct Known {
     /// a link to: GCSL makes one composition at a time, and ends each by
     /// sealing it.
     placing: HashSet<(u64, u64)>,
+    /// Of each blob of the store the composition being made has a link to,
+    /// by its contents and mode, which of it it links: 0 the blob, any
+    /// other the copy of that number.
+    copies: HashMap<FileEntry, HashSet<u32>>,
     /// The files placed since the last composition was sealed that a
     /// program could write, each with its mode: what sealing the next makes
     /// read-only.
@@ -220,16 +242,34 @@ impl Layers {
     /// file system and the composition has no other link to it, else a copy
     /// of its own. So two files of a composition are never one, whatever
     /// the store shares between them, as two of a tree it stages are not
-    /// ([`crate::store::Store::materialise_tree`]).
+    /// ([`crate::store::Store::materialise_tree`]). A file that is a link
+    /// to a blob of `store`, or to a copy of one, that the composition
+    /// links already is a link to another copy of the blob, which the store
+    /// keeps ([`Store::link_copy`]): placed again, as each composition of a
+    /// toolchain places it, it is copied no more.
     ///
     /// # Errors
     ///
     /// That it could not be placed.
-    pub fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {
+    pub fn place_file(
+        &self,
+        source: &Path,
+        target: &Path,
+        store: Option<&Store>,
+    ) -> io::Result<()> {
         let meta = fs::metadata(source)?;
         if self.is_unchanging(source) {
-            let first = self.known().placing.insert((meta.dev(), meta.ino()));
-            if first && fs::hard_link(source, target).is_ok() {
+            let node = (meta.dev(), meta.ino());
+            let origin = store.and_then(|store| store.origin(node));
+            let placing = self.placing(node, origin);
+            let linked = match (placing, store) {
+                (Placing::Link, _) => fs::hard_link(source, target).is_ok(),
+                (Placing::Copy(entry, copy), Some(store)) => {
+                    store.link_copy(&entry, copy, target).is_ok()
+                }
+                (Placing::Copy(..) | Placing::Fresh, _) => false,
+            };
+            if linked {
                 self.note_mode(target, meta.permissions().mode());
                 return Ok(());
             }
@@ -238,6 +278,26 @@ impl Layers {
         // A copy has its source's mode.
         self.note_mode(target, meta.permissions().mode());
         Ok(())
+    }
+
+    /// How the composition being made places a file that nothing can
+    /// change, of device and inode `node`, a link to the blob or copy of
+    /// the store `origin` says, if it is one.
+    fn placing(&self, node: (u64, u64), origin: Option<(FileEntry, u32)>) -> Placing {
+        let mut known = self.known();
+        let first = known.placing.insert(node);
+        let Some((entry, copy)) = origin else {
+            return if first { Placing::Link } else { Placing::Fresh };
+        };
+        let copies = known.copies.entry(entry).or_default();
+        if first && copies.insert(copy) {
+            return Placing::Link;
+        }
+        let Some(other) = (1..u32::MAX).find(|other| !copies.contains(other)) else {
+            return Placing::Fresh;
+        };
+        copies.insert(other);
+        Placing::Copy(entry, other)
     }
 
     /// Notes the file at `target`, of mode `mode`, for sealing, if a
@@ -261,6 +321,7 @@ impl Layers {
             let mut known = self.known();
             // The next composition links each file anew.
             known.placing.clear();
+            known.copies.clear();
             std::mem::take(&mut known.writable)
         };
         // What was placed elsewhere, as a sandbox's copy is, is no part of

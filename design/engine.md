@@ -161,6 +161,16 @@ recorded duration start once it is staged. A finished step's staging
 directory is renamed and removed by a thread of its own, which the build
 waits for before it ends (see `sweep.rs`).
 
+*Changed 2026-10-28 (PEI-1598, for Jack to confirm).* A tree staged, or a
+composition, that holds one content at several paths gave the first a link
+to the blob and copied it for each other, so that no two of its files are
+one (L6a). A step composing a toolchain with its runtime, a subtree of it,
+copied every file of the runtime: 2.4 million copies in one rebuild of
+authd. The store now keeps numbered copies of a blob, `DIGEST.r1` and on,
+made the first time they are needed, and each other path is a link to one
+(`Store::link_copy`): still a file of its own, but copied once, not in
+every step. No record names a copy, so an eviction removes them first.
+
 **Retry and timeout.** A step's `#[retry]` and `#[timeout]` are the
 engine's: a retry reruns the step unit in a fresh sandbox, an
 infrastructure failure (the sandbox, the store, a lost job) retries

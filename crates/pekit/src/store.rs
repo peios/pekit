@@ -10,7 +10,13 @@
 //!   directory named by the digest's first two hex digits, read-only. Being
 //!   executable is no part of contents, but a file's mode is shared by every
 //!   link to it, so an executable copy, `DIGEST.x`, sits beside the plain
-//!   one when one is needed;
+//!   one when one is needed. So do numbered copies of a blob, `DIGEST.r1`
+//!   and on, `DIGEST.x.r1` for an executable one, made the first time they
+//!   are needed and kept: a tree or a composition that holds one content at
+//!   several paths has each a file of its own, the first a link to the blob
+//!   and each other a link to a copy, so that placing it copies nothing
+//!   that was copied before ([`Store::link_copy`]). No record names a copy,
+//!   so an eviction removes them first, as costing nothing to make again;
 //! - a directory is a *tree*: its entries, sorted by name, each a file by
 //!   digest and executability, a directory by its own tree's digest, or a
 //!   symbolic link by its target, encoded canonically and stored as a blob
@@ -287,14 +293,16 @@ pub struct Tree {
 /// The number of the next temporary file this process writes.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// The blobs a process linked a file to.
+/// The blobs, and the copies of blobs, a process linked a file to.
 #[derive(Debug, Default)]
 struct Linked {
-    /// Each, by the device and inode it shares with every link.
-    nodes: HashMap<(u64, u64), FileEntry>,
-    /// Each, by its contents and mode: those whose device and inode are
-    /// known already.
-    entries: HashSet<FileEntry>,
+    /// Each, by the device and inode it shares with every link: its
+    /// contents and mode, and which it is, 0 the blob and any other the copy
+    /// of that number.
+    nodes: HashMap<(u64, u64), (FileEntry, u32)>,
+    /// Each, by its contents and mode and which it is: those whose device
+    /// and inode are known already.
+    entries: HashSet<(FileEntry, u32)>,
 }
 
 /// A content store (see [The store](#the-store)).
@@ -625,19 +633,20 @@ impl Store {
     ///
     /// That the store does not hold it, or `at` cannot be written.
     pub fn materialise_file(&self, entry: &FileEntry, at: &Path) -> io::Result<()> {
-        self.materialise_as(entry, at, true)
+        self.materialise_as(entry, at, 0)
     }
 
     /// Makes the file `entry` at `at`, a path that does not exist: a hard
-    /// link to its blob if `link` and one can be made, else a read-only copy
-    /// of its own.
-    fn materialise_as(&self, entry: &FileEntry, at: &Path, link: bool) -> io::Result<()> {
+    /// link to its blob if `copy` is 0, else to its copy of that number
+    /// ([`Store::link_copy`]), or a read-only copy of its own if no link can
+    /// be made.
+    fn materialise_as(&self, entry: &FileEntry, at: &Path, copy: u32) -> io::Result<()> {
         // At once, if its blob and `at`'s directory are there, as they are
         // for every file of a tree but the first of its directory.
-        if link {
+        if copy == 0 {
             let blob = self.blob_path(&entry.digest, entry.executable);
             if fs::hard_link(&blob, at).is_ok() {
-                self.note_linked(entry, &blob);
+                self.note_linked((entry, 0), &blob);
                 return Ok(());
             }
         }
@@ -645,8 +654,12 @@ impl Store {
         if let Some(parent) = at.parent() {
             fs::create_dir_all(parent)?;
         }
-        if link && fs::hard_link(&blob, at).is_ok() {
-            self.note_linked(entry, &blob);
+        let linked = if copy == 0 {
+            fs::hard_link(&blob, at).map(|()| self.note_linked((entry, 0), &blob))
+        } else {
+            self.link_copy(entry, copy, at)
+        };
+        if linked.is_ok() {
             return Ok(());
         }
         fs::copy(&blob, at)?;
@@ -654,18 +667,68 @@ impl Store {
         fs::set_permissions(at, fs::Permissions::from_mode(mode))
     }
 
-    /// Notes that a file was linked to `blob`, the blob of `entry`, unless
-    /// its device and inode are known already.
-    fn note_linked(&self, entry: &FileEntry, blob: &Path) {
+    /// Makes `at`, a path that does not exist in a directory that does, a
+    /// hard link to the copy numbered `copy`, from 1, of the blob of
+    /// `entry`, made from the blob the first time it is needed (see [The
+    /// store](#the-store)).
+    ///
+    /// # Errors
+    ///
+    /// That the store does not hold the blob, or the copy or the link
+    /// cannot be made.
+    pub fn link_copy(&self, entry: &FileEntry, copy: u32, at: &Path) -> io::Result<()> {
+        let path = self.copy_path(entry, copy);
+        if fs::hard_link(&path, at).is_err() {
+            let source = self.blob_of_mode(entry)?;
+            let temp = self.temp_path();
+            fs::copy(&source, &temp)?;
+            let mode = if entry.executable { 0o555 } else { 0o444 };
+            fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+            // A copy another process made first is as good.
+            if fs::hard_link(&temp, &path).is_ok()
+                && let Ok(mut used) = self.used.lock()
+            {
+                used.added += entry.size;
+            }
+            fs::remove_file(&temp)?;
+            fs::hard_link(&path, at)?;
+        }
+        self.note_linked((entry, copy), &path);
+        Ok(())
+    }
+
+    /// Where the copy numbered `copy` of the blob of `entry` is, or would be
+    /// (see [The store](#the-store)).
+    fn copy_path(&self, entry: &FileEntry, copy: u32) -> PathBuf {
+        let blob = self.blob_path(&entry.digest, entry.executable);
+        let mut name = blob.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".r{copy}"));
+        blob.with_file_name(name)
+    }
+
+    /// Which blob, or copy of a blob, the file of device and inode `node` is
+    /// a link to, if this process linked a file to it: its contents and
+    /// mode, and 0 for the blob or the copy's number.
+    #[must_use]
+    pub fn origin(&self, node: (u64, u64)) -> Option<(FileEntry, u32)> {
+        self.linked.lock().ok()?.nodes.get(&node).copied()
+    }
+
+    /// Notes that a file was linked to `path`, the blob of `entry` if `copy`
+    /// is 0, else its copy of that number, unless its device and inode are
+    /// known already.
+    fn note_linked(&self, (entry, copy): (&FileEntry, u32), path: &Path) {
         let Ok(mut linked) = self.linked.lock() else {
             return;
         };
-        if linked.entries.contains(entry) {
+        if linked.entries.contains(&(*entry, copy)) {
             return;
         }
-        if let Ok(meta) = fs::metadata(blob) {
-            linked.nodes.insert((meta.dev(), meta.ino()), *entry);
-            linked.entries.insert(*entry);
+        if let Ok(meta) = fs::metadata(path) {
+            linked
+                .nodes
+                .insert((meta.dev(), meta.ino()), (*entry, copy));
+            linked.entries.insert((*entry, copy));
         }
     }
 
@@ -883,7 +946,9 @@ impl Store {
             return None;
         }
         let node = (meta.dev(), meta.ino());
-        let entry = *self.linked.lock().ok()?.nodes.get(&node)?;
+        let (entry, 0) = *self.linked.lock().ok()?.nodes.get(&node)? else {
+            return None;
+        };
         let blob = fs::metadata(self.blob_path(&entry.digest, entry.executable)).ok()?;
         ((blob.dev(), blob.ino()) == node).then_some(entry)
     }
@@ -966,23 +1031,24 @@ impl Store {
 
     /// Whether the directory at `at` is the tree `digest` as
     /// [`Store::materialise_tree`] makes it, and nothing more: each file
-    /// the first of its blob a link to it, any other a read-only copy of its
-    /// contents, each directory and symbolic link as the tree has it. A
-    /// link can't be changed without its blob, which is read-only, and a
-    /// file put in its place is another; a copy is read again.
+    /// the first of its blob a link to it, any other a link to the copy of
+    /// it of its number, each directory and symbolic link as the tree has
+    /// it. A link can't be changed without its blob or copy, which is
+    /// read-only, and a file put in its place is another; a file of its own,
+    /// made where no link could be, is read again.
     #[must_use]
     pub fn is_materialised(&self, digest: &Digest, at: &Path) -> bool {
-        self.materialised_with(digest, at, &mut HashSet::new())
+        self.materialised_with(digest, at, &mut HashMap::new())
             .unwrap_or(false)
     }
 
-    /// [`Store::is_materialised`], `linked` the blobs, by digest and mode,
-    /// that a file of the tree is a link to already.
+    /// [`Store::is_materialised`], `linked` how many files of the tree are
+    /// links to each blob, by its contents and mode, already.
     fn materialised_with(
         &self,
         digest: &Digest,
         at: &Path,
-        linked: &mut HashSet<(Digest, bool)>,
+        linked: &mut HashMap<FileEntry, u32>,
     ) -> io::Result<bool> {
         let tree = self.read_tree(digest)?;
         let mut names = HashSet::new();
@@ -1000,18 +1066,27 @@ impl Store {
             let meta = fs::symlink_metadata(&path)?;
             let same = match entry {
                 TreeEntry::File { file, .. } => {
-                    let first = linked.insert((file.digest, file.executable));
+                    let count = linked.entry(*file).or_default();
+                    let copy = *count;
+                    *count += 1;
+                    let linked = |source: PathBuf| {
+                        fs::metadata(source)
+                            .is_ok_and(|blob| (blob.dev(), blob.ino()) == (meta.dev(), meta.ino()))
+                    };
                     meta.is_file()
                         && (meta.permissions().mode() & 0o111 != 0) == file.executable
                         && meta.permissions().mode() & 0o222 == 0
                         && meta.len() == file.size
-                        && if first {
-                            fs::metadata(self.blob_path(&file.digest, file.executable)).is_ok_and(
-                                |blob| (blob.dev(), blob.ino()) == (meta.dev(), meta.ino()),
-                            )
+                        && if copy == 0 {
+                            linked(self.blob_path(&file.digest, file.executable))
                         } else {
-                            self.put_file_once(&path)
-                                .is_ok_and(|read| read.digest == file.digest)
+                            // A copy of its own where no link to the
+                            // store's could be made.
+                            linked(self.copy_path(file, copy))
+                                || (meta.nlink() == 1
+                                    && self
+                                        .put_file_once(&path)
+                                        .is_ok_and(|read| read.digest == file.digest))
                         }
                 }
                 TreeEntry::Dir { tree, .. } => {
@@ -1034,7 +1109,8 @@ impl Store {
     /// not exist, every file materialised ([`Store::materialise_file`]), but
     /// that each of its files is a file of its own, as in the tree it was
     /// made from: the first file of a blob is a link to it, and any other of
-    /// the same contents and mode a read-only copy. Two identical files of
+    /// the same contents and mode a link to a copy of it, the second to the
+    /// first copy and on ([`Store::link_copy`]). Two identical files of
     /// the tree are never one file, which `cp` refuses to copy between and
     /// `tar` would archive as a hard link.
     ///
@@ -1042,23 +1118,25 @@ impl Store {
     ///
     /// That the store does not hold it, or `at` cannot be written.
     pub fn materialise_tree(&self, digest: &Digest, at: &Path) -> io::Result<()> {
-        self.materialise_tree_into(digest, at, &mut HashSet::new())
+        self.materialise_tree_into(digest, at, &mut HashMap::new())
     }
 
-    /// [`Store::materialise_tree`], `linked` the blobs, by digest and mode,
-    /// that a file of the tree is a link to already.
+    /// [`Store::materialise_tree`], `linked` how many files of the tree are
+    /// links to each blob, by its contents and mode, already.
     fn materialise_tree_into(
         &self,
         digest: &Digest,
         at: &Path,
-        linked: &mut HashSet<(Digest, bool)>,
+        linked: &mut HashMap<FileEntry, u32>,
     ) -> io::Result<()> {
         fs::create_dir_all(at)?;
         for entry in self.read_tree(digest)?.entries {
             match entry {
                 TreeEntry::File { name, file } => {
-                    let first = linked.insert((file.digest, file.executable));
-                    self.materialise_as(&file, &at.join(name), first)?;
+                    let count = linked.entry(file).or_default();
+                    let copy = *count;
+                    *count += 1;
+                    self.materialise_as(&file, &at.join(name), copy)?;
                 }
                 TreeEntry::Dir { name, tree } => {
                     self.materialise_tree_into(&tree, &at.join(name), linked)?;

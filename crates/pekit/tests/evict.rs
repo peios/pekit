@@ -243,3 +243,35 @@ fn a_tree_known_complete_is_walked_again_once_an_eviction_ran() {
     assert_eq!(built(dir.path(), state.path(), None), (1, 1));
     assert_eq!(built(dir.path(), state.path(), None), (0, 2));
 }
+
+#[test]
+fn a_blob_s_copies_are_counted_in_the_store_and_evicted_as_unnamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    let tree = dir.path().join("tree");
+    let big = "x".repeat(1 << 20);
+    write(&tree, &[("a", &big), ("b", &big)]);
+    let digest = store.put_tree(&tree).unwrap();
+    // Its second file a link to the blob's first copy.
+    let made = dir.path().join("made");
+    store.materialise_tree(&digest, &made).unwrap();
+    let copies = || -> usize {
+        fs::read_dir(dir.path().join("store/cas"))
+            .unwrap()
+            .flatten()
+            .flat_map(|shard| fs::read_dir(shard.path()).unwrap().flatten())
+            .filter(|blob| blob.file_name().to_string_lossy().ends_with(".r1"))
+            .count()
+    };
+    assert_eq!(copies(), 1);
+    // Measured with the blob: a store of two megabytes and more.
+    let state = dir.path();
+    ledger(state, 0, 2 * 86_400);
+    pekit::evict::evict(&store, &store.used(), 64 << 20).unwrap();
+    assert!(ledgered(state) > 2 << 20, "{}", ledgered(state));
+    // No record names it: evicted with what is cheapest to make again,
+    // the files made from it still there.
+    pekit::evict::evict(&store, &store.used(), 1).unwrap();
+    assert_eq!(copies(), 0);
+    assert_eq!(fs::read_to_string(made.join("b")).unwrap(), big);
+}

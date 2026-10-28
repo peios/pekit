@@ -138,3 +138,36 @@ fn a_composition_links_what_nothing_changes_and_is_sealed() {
     pekit::layers::remove_tree(&dir.0.path().join("stage")).unwrap();
     assert!(!dir.0.path().join("stage").exists());
 }
+
+#[test]
+fn a_file_a_composition_places_twice_is_a_link_to_a_copy_the_store_keeps() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    fs::write(dir.0.path().join("x"), "x").unwrap();
+    let entry = store.put_file(&dir.0.path().join("x")).unwrap();
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s")
+        .unwrap()
+        .with_contexts(std::collections::HashMap::new(), store.clone());
+    sandbox.stage(&store, "/w/x", Kept::File(entry)).unwrap();
+    let staged = sandbox.host_path("/w/x").unwrap();
+    // Each of two compositions places it twice: the blob and its first
+    // copy, the same two in each, so that the second copies nothing.
+    let mut placed = Vec::new();
+    for _ in 0..2 {
+        let composed = sandbox.temp_dir().unwrap().unwrap();
+        let at = sandbox.host_path(&composed).unwrap();
+        for name in ["x", "again"] {
+            sandbox.place_file(&staged, &at.join(name)).unwrap();
+        }
+        sandbox.composed(&composed);
+        let inode = |name: &str| fs::metadata(at.join(name)).unwrap().ino();
+        placed.push((inode("x"), inode("again")));
+        assert_eq!(fs::read_to_string(at.join("again")).unwrap(), "x");
+        assert!(fs::write(at.join("again"), "changed").is_err());
+    }
+    assert_eq!(placed[0], placed[1]);
+    let (blob, copy) = placed[0];
+    assert_eq!(blob, fs::metadata(&staged).unwrap().ino());
+    assert_ne!(blob, copy);
+}

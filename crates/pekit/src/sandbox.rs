@@ -691,7 +691,7 @@ impl Effects for StepSandbox {
     }
 
     fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {
-        self.layers.place_file(source, target)
+        self.layers.place_file(source, target, self.store.as_ref())
     }
 
     fn context_read(&self, key: &str) {
