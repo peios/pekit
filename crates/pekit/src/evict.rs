@@ -617,7 +617,7 @@ fn records_of(
 }
 
 /// Every string of 64 hex digits in `value`: what may name a blob.
-fn digests_in(value: &Value, found: &mut Vec<String>) {
+pub(crate) fn digests_in(value: &Value, found: &mut Vec<String>) {
     match value {
         Value::String(text) if Digest::from_hex(text).is_some() => found.push(text.clone()),
         Value::Array(items) => items.iter().for_each(|item| digests_in(item, found)),
@@ -648,7 +648,7 @@ fn named_blobs(
     }
     // A tree's encoding begins so; a file's is not read to find it isn't one.
     let Some(tree) = Digest::from_hex(digest)
-        .filter(|digest| looks_like_tree(store, digest))
+        .filter(|digest| store.is_tree_blob(digest))
         .and_then(|digest| store.read_tree(&digest).ok())
     else {
         trees.insert(digest.to_owned(), Vec::new());
@@ -660,16 +660,6 @@ fn named_blobs(
     }
     found.extend(within.iter().cloned());
     trees.insert(digest.to_owned(), within);
-}
-
-/// Whether the blob `digest` of `store` begins as a tree's encoding does,
-/// read no further.
-fn looks_like_tree(store: &Store, digest: &Digest) -> bool {
-    const BEGINNING: &[u8] = b"{\"entries\":";
-    let mut start = [0u8; BEGINNING.len()];
-    File::open(store.blob_path(digest, false))
-        .and_then(|mut file| io::Read::read_exact(&mut file, &mut start))
-        .is_ok_and(|()| start == BEGINNING)
 }
 
 /// The digests a tree's entries name.

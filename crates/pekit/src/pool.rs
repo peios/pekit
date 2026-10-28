@@ -10,7 +10,8 @@
 //! or a target's read of an output to answer from the store
 //! ([Exposure](crate::exposure#exposure)), or the engine's own work for a
 //! step: staging its sandbox before it runs, and keeping the files of its
-//! result in the store once it has given one. That work places and hashes
+//! result in the store once it has given one, and finding records in, and
+//! writing them to, the remote cache ([`crate::remote`]). That work places and hashes
 //! whole trees, and so is done here, beside the programs, never on the
 //! thread that evaluates.
 //! Each reports what it came to, a [`Ran`], with the thread that ran it and
@@ -37,8 +38,9 @@ use crate::git_fetch::{fetch_git, git_path};
 use crate::programs::{ProgramRan, ProgramWork, perform_program};
 use crate::sandbox::StepSandbox;
 use crate::layers::remove_tree;
-use crate::record::{Kept, StoreError, keep_files};
-use crate::store::{FileEntry, Store};
+use crate::record::{Kept, StoreError, keep_files, merge_remote_manifest};
+use crate::remote::Remote;
+use crate::store::{Digest, FileEntry, Store};
 use crate::unpack::{unpack, unpack_key, unpacked_path};
 
 /// What a thread of the pool does (see [The pool](#the-pool)).
@@ -112,6 +114,33 @@ pub enum Work {
         /// The store.
         store: Store,
     },
+    /// Finds the first of the records `keys` in the remote cache, putting
+    /// it into `store` with all it names (see [The remote
+    /// cache](crate::remote#the-remote-cache)); or, if `manifest`, merges
+    /// the manifest `keys` names into `store`'s.
+    Remote {
+        /// The remote cache.
+        remote: Arc<Remote>,
+        /// The records' keys, in the order they are asked for.
+        keys: Vec<Digest>,
+        /// Whether the key is a manifest's, merged rather than replaced.
+        manifest: bool,
+        /// The store.
+        store: Store,
+    },
+    /// Writes the records `keys` of `store`, and all they name, to the
+    /// remote cache, and the manifest `manifest`, merged with the cache's
+    /// first.
+    Upload {
+        /// The remote cache.
+        remote: Arc<Remote>,
+        /// The records' keys.
+        keys: Vec<Digest>,
+        /// The manifest's key.
+        manifest: Option<Digest>,
+        /// The store.
+        store: Store,
+    },
     /// Answers a target's read of an output from the store (see
     /// [Exposure](crate::exposure#exposure)).
     Read {
@@ -156,6 +185,12 @@ pub enum Done {
     /// The files of a step's result kept ([`Work::Keep`]), by logical
     /// path, or why they could not be.
     Kept(Result<HashMap<String, Kept>, StoreError>),
+    /// Whether one of the records asked for was found in the remote cache
+    /// ([`Work::Remote`]), or why the cache could not be asked.
+    Remote(Result<bool, String>),
+    /// The records were written to the remote cache ([`Work::Upload`]), or
+    /// why they could not be.
+    Uploaded(Result<(), String>),
 }
 
 /// One job: a node's work, until its deadline.
@@ -185,44 +220,14 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
             sha256,
             store,
             span,
-        } => match fetch(&store, &url, &sha256) {
-            Ok(entry) => {
-                let path = fetched_path(&url, &entry.digest);
-                let file = Plain::File {
-                    path: path.clone(),
-                    identity: None,
-                };
-                (Ok(file), vec![(path, Kept::File(entry))], Done::Effect)
-            }
-            Err((message, note)) => {
-                let mut error = Diagnostic::error(message, span);
-                if let Some(note) = note {
-                    error = error.with_note(note);
-                }
-                (Err(error), Vec::new(), Done::Effect)
-            }
-        },
+        } => fetched(&store, (&url, &sha256), span),
         Work::FetchGit {
             url,
             commit,
             store,
             scratch,
             span,
-        } => match fetch_git(&store, (&url, &commit), &scratch) {
-            Ok(tree) => {
-                let path = git_path(&url, &commit.trim().to_ascii_lowercase());
-                let dir = Plain::Dir {
-                    path: path.clone(),
-                    identity: None,
-                };
-                (Ok(dir), vec![(path, Kept::Dir(tree))], Done::Effect)
-            }
-            Err(message) => (
-                Err(Diagnostic::error(message, span)),
-                Vec::new(),
-                Done::Effect,
-            ),
-        },
+        } => fetched_git(&store, (&url, &commit), &scratch, span),
         Work::Unpack {
             archive,
             shown,
@@ -260,6 +265,18 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
             });
             (outcome, Vec::new(), Done::Effect)
         }
+        Work::Remote {
+            remote,
+            keys,
+            manifest,
+            store,
+        } => looked_for(&remote, &keys, manifest, &store),
+        Work::Upload {
+            remote,
+            keys,
+            manifest,
+            store,
+        } => uploaded(&remote, &keys, manifest.as_ref(), &store),
         Work::Stage {
             sandbox,
             given,
@@ -271,6 +288,99 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
             store,
         } => keep(plain, &sandbox, &store),
     }
+}
+
+/// Answers a `fetch` of `url` pinned by `sha256` from `store`, its call at
+/// `span` ([`Work::Fetch`]).
+fn fetched(store: &Store, (url, sha256): (&str, &str), span: Span) -> Performed {
+    match fetch(store, url, sha256) {
+        Ok(entry) => {
+            let path = fetched_path(url, &entry.digest);
+            let file = Plain::File {
+                path: path.clone(),
+                identity: None,
+            };
+            (Ok(file), vec![(path, Kept::File(entry))], Done::Effect)
+        }
+        Err((message, note)) => {
+            let mut error = Diagnostic::error(message, span);
+            if let Some(note) = note {
+                error = error.with_note(note);
+            }
+            (Err(error), Vec::new(), Done::Effect)
+        }
+    }
+}
+
+/// Answers a `fetch_git` of `url` at `commit` from `store`, checked out at
+/// `scratch` first, its call at `span` ([`Work::FetchGit`]).
+fn fetched_git(
+    store: &Store,
+    (url, commit): (&str, &str),
+    scratch: &std::path::Path,
+    span: Span,
+) -> Performed {
+    match fetch_git(store, (url, commit), scratch) {
+        Ok(tree) => {
+            let path = git_path(url, &commit.trim().to_ascii_lowercase());
+            let dir = Plain::Dir {
+                path: path.clone(),
+                identity: None,
+            };
+            (Ok(dir), vec![(path, Kept::Dir(tree))], Done::Effect)
+        }
+        Err(message) => (
+            Err(Diagnostic::error(message, span)),
+            Vec::new(),
+            Done::Effect,
+        ),
+    }
+}
+
+/// Looks for the first of the records `keys` in the remote cache `remote`,
+/// putting it into `store`; or, if `manifest`, merges the manifest they
+/// name into `store`'s ([`Work::Remote`]).
+fn looked_for(remote: &Remote, keys: &[Digest], manifest: bool, store: &Store) -> Performed {
+    let mut found = Ok(false);
+    for key in keys {
+        let asked = if manifest {
+            merge_remote_manifest(remote, store, key).map(|()| false)
+        } else {
+            remote.find(store, key)
+        };
+        match asked {
+            Ok(false) => {}
+            Ok(true) => {
+                found = Ok(true);
+                break;
+            }
+            Err(error) => {
+                found = Err(error.to_string());
+                break;
+            }
+        }
+    }
+    (Ok(Plain::Empty), Vec::new(), Done::Remote(found))
+}
+
+/// Writes the records `keys` of `store` to the remote cache `remote`, and
+/// the manifest `manifest`, merged with the cache's first ([`Work::Upload`]).
+fn uploaded(
+    remote: &Remote,
+    keys: &[Digest],
+    manifest: Option<&Digest>,
+    store: &Store,
+) -> Performed {
+    let uploaded = manifest
+        .iter()
+        .try_for_each(|key| merge_remote_manifest(remote, store, key))
+        .and_then(|()| {
+            keys.iter()
+                .chain(manifest)
+                .try_for_each(|key| remote.upload(store, key))
+        })
+        .map_err(|error| error.to_string());
+    (Ok(Plain::Empty), Vec::new(), Done::Uploaded(uploaded))
 }
 
 /// Stages `given` in the step's sandbox `sandbox` from `store`

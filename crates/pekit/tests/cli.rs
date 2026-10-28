@@ -1,5 +1,7 @@
 //! Tests of the `pekit` command, run as someone runs it.
 
+mod cache;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -41,6 +43,11 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PEKIT_CACHE_DIR", cache)
         .env("PEKIT_STATE_DIR", cache.join("state"))
+        // A remote cache only where a test names one.
+        .env_remove("PEKIT_REMOTE_CACHE")
+        .env_remove("PEKIT_REMOTE_INSTANCE")
+        .env_remove("PEKIT_REMOTE_UPLOAD")
+        .env_remove("PEKIT_REMOTE_HEADERS")
         .output()
         .unwrap()
 }
@@ -76,6 +83,75 @@ fn a_target_is_built_and_then_found_in_the_store() {
         out,
         "built app/hello: 0 steps run, 1 found in the store\n  pekit-out/app/hello/shout/out.txt\n"
     );
+}
+
+#[test]
+fn a_step_one_machine_uploads_another_finds_in_the_remote_cache() {
+    let served = cache::serve(1 << 20);
+    let dir = workspace();
+    let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let flags = ["--remote-cache", served.url.as_str()];
+    let uploaded = pekit(
+        dir.path(),
+        first.path(),
+        &[&["build", "app/hello", "--remote-upload"][..], &flags].concat(),
+    );
+    let (out, err) = printed(&uploaded);
+    assert!(uploaded.status.success(), "{err}");
+    assert!(
+        out.starts_with("built app/hello: 1 step run, 0 found in the store\n"),
+        "{out}"
+    );
+    // The step's record and its manifest.
+    assert_eq!(served.cache.held.lock().unwrap().actions.len(), 2);
+    // Another store, as another machine's: found in the cache, run nowhere.
+    let found = pekit(
+        dir.path(),
+        second.path(),
+        &[&["build", "app/hello"][..], &flags].concat(),
+    );
+    let (out, err) = printed(&found);
+    assert!(found.status.success(), "{err}");
+    assert_eq!(
+        out,
+        "built app/hello: 0 steps run, 1 found in the store (1 from the remote cache)\n  \
+         pekit-out/app/hello/shout/out.txt\n"
+    );
+    let built = dir.path().join("pekit-out/app/hello/shout/out.txt");
+    assert_eq!(fs::read_to_string(built).unwrap(), "WORLD\n");
+}
+
+#[test]
+fn a_remote_cache_that_is_down_is_warned_of_and_built_without() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let url = format!("grpc://127.0.0.1:{port}");
+    let built = pekit(
+        dir.path(),
+        cache.path(),
+        &["build", "app/hello", "--remote-cache", &url],
+    );
+    let (out, err) = printed(&built);
+    assert!(built.status.success(), "{err}");
+    assert!(out.starts_with("built app/hello: 1 step run"), "{out}");
+    assert!(
+        err.contains("the build went on without the remote cache"),
+        "{err}"
+    );
+    // A URL that names no cache is an error before anything is built.
+    let named = pekit(
+        dir.path(),
+        cache.path(),
+        &["build", "app/hello", "--remote-cache", "localhost:9092"],
+    );
+    let (_, err) = printed(&named);
+    assert_eq!(named.status.code(), Some(1));
+    assert!(err.contains("its URL begins `grpc://`"), "{err}");
 }
 
 #[test]

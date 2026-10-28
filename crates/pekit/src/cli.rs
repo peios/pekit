@@ -42,6 +42,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
@@ -59,6 +60,7 @@ use crate::platform::ExecutionPlatform;
 use crate::layers::remove_tree;
 use crate::load::{LoadError, Loaded, load};
 use crate::release::Repository;
+use crate::remote::{Remote, RemoteSettings, header_of};
 use crate::lock;
 use crate::store::Store;
 use crate::sandbox::HostTools;
@@ -307,6 +309,77 @@ struct Shared {
     /// What the build allows.
     #[command(flatten)]
     allows: AllowFlags,
+    /// The remote cache.
+    #[command(flatten)]
+    remote: RemoteFlags,
+}
+
+/// The shared flags of the remote cache (see [`Shared`] and [The remote
+/// cache](crate::remote#the-remote-cache)).
+#[derive(Debug, clap::Args)]
+struct RemoteFlags {
+    /// The remote cache to find steps in, `grpc://HOST:PORT` or
+    /// `grpcs://HOST:PORT`, in place of `PEKIT_REMOTE_CACHE`.
+    #[arg(long = "remote-cache", value_name = "URL")]
+    cache: Option<String>,
+    /// The remote cache's instance name, in place of
+    /// `PEKIT_REMOTE_INSTANCE`.
+    #[arg(long = "remote-instance", value_name = "NAME")]
+    instance: Option<String>,
+    /// Write each step this build records to the remote cache, as
+    /// `PEKIT_REMOTE_UPLOAD=1` does.
+    #[arg(long = "remote-upload")]
+    upload: bool,
+    /// A header every call to the remote cache carries, `NAME: VALUE`,
+    /// besides each line of `PEKIT_REMOTE_HEADERS`.
+    #[arg(long = "remote-header", value_name = "HEADER")]
+    headers: Vec<String>,
+}
+
+/// The remote cache `flags` and the environment name, if they name one:
+/// each flag in place of its variable, the headers of both.
+fn remote_of(flags: &RemoteFlags) -> Result<Option<Arc<Remote>>, String> {
+    let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let Some(url) = flags
+        .cache
+        .clone()
+        .or_else(|| variable("PEKIT_REMOTE_CACHE"))
+    else {
+        return Ok(None);
+    };
+    let upload = flags.upload
+        || match variable("PEKIT_REMOTE_UPLOAD").as_deref() {
+            None | Some("0" | "false") => false,
+            Some("1" | "true") => true,
+            Some(other) => {
+                return Err(format!(
+                    "`PEKIT_REMOTE_UPLOAD={other}` says neither: write `1` or `0`"
+                ));
+            }
+        };
+    let mut headers = Vec::new();
+    for line in variable("PEKIT_REMOTE_HEADERS")
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .chain(flags.headers.iter().cloned())
+    {
+        headers.push(header_of(&line)?);
+    }
+    let settings = RemoteSettings {
+        url,
+        instance: flags
+            .instance
+            .clone()
+            .or_else(|| variable("PEKIT_REMOTE_INSTANCE"))
+            .unwrap_or_default(),
+        headers,
+        upload,
+    };
+    Remote::connect(&settings)
+        .map(|remote| Some(Arc::new(remote)))
+        .map_err(|error| error.to_string())
 }
 
 /// The shared flags of what is taken from the store (see [`Shared`]).
@@ -429,6 +502,7 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     };
     let counts = steps_counted(&outcomes);
     warn_of_eviction(&outcomes, terminal);
+    warn_of_remote(&outcomes, terminal);
     let mut failed = false;
     for (target, outcome) in targets.iter().zip(&outcomes.targets) {
         match outcome {
@@ -850,6 +924,14 @@ fn released(
             no_dynamic: false,
             strict: true,
         },
+        // The environment's, if it names one: what a release finds in it
+        // is checked by running every step again.
+        remote: RemoteFlags {
+            cache: None,
+            instance: None,
+            upload: false,
+            headers: Vec::new(),
+        },
     };
     let (checked, publishing) = (shared(true), shared(false));
     let Some(mut loaded) = load_for(at, &checked, terminal) else {
@@ -1216,6 +1298,7 @@ fn package_command(
     }
     let _ = writeln!(terminal.out, "{}", steps_counted(&outcomes));
     warn_of_eviction(&outcomes, terminal);
+    warn_of_remote(&outcomes, terminal);
     if failed {
         ExitCode::FAILURE
     } else {
@@ -1339,7 +1422,22 @@ fn steps_counted(outcomes: &Outcomes) -> String {
         1 => " (1 program found)".to_owned(),
         found => format!(" ({found} programs found)"),
     };
-    format!("{ran} {steps} run{programs}, {cached} found in the store")
+    let remotely = match outcomes.found_remotely {
+        0 => String::new(),
+        found => format!(" ({found} from the remote cache)"),
+    };
+    format!("{ran} {steps} run{programs}, {cached} found in the store{remotely}")
+}
+
+/// Warns on `terminal` that the remote cache could not be used, if it could
+/// not in `outcomes`' build: which fails no build, its steps run here.
+fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
+    if let Some(message) = &outcomes.remote_failed {
+        let _ = writeln!(
+            terminal.err,
+            "warning: {message}; the build went on without the remote cache"
+        );
+    }
 }
 
 /// The settings a command builds `loaded`'s workspace with, as `shared`
@@ -1350,6 +1448,13 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
     let cache = cache_dir();
     let cache_limit = match limit_of(std::env::var("PEKIT_CACHE_LIMIT").ok().as_deref()) {
         Ok(limit) => limit,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return None;
+        }
+    };
+    let remote = match remote_of(&shared.remote) {
+        Ok(remote) => remote,
         Err(message) => {
             let _ = writeln!(terminal.err, "error: {message}");
             return None;
@@ -1417,6 +1522,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         cache_limit,
         profile_gcsl: shared.gcsl_profile.is_some(),
         exposing: Exposing::AsNeeded,
+        remote,
     })
 }
 
