@@ -18,8 +18,9 @@ target, and a step. It takes about five minutes.
 
 You need:
 
-- pekit. To build it from a checkout of its source, run
-  `cargo install --path crates/pekit --locked` in the checkout.
+- pekit. To build it from its source, run
+  `cargo install --git https://github.com/peios/pekit pekit --locked`, or
+  `cargo install --path crates/pekit --locked` in a checkout.
 - bubblewrap, the `bwrap` program, which pekit runs every step in.
 - A C compiler from your distribution's packages, as `/usr/bin/cc`. A step
   can see the host's `/usr`, but not `/usr/local`.
