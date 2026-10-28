@@ -609,6 +609,8 @@ fn build_roots(
     })?;
     // A stamp cache that can't be kept is a workspace read again next time.
     let _ = keep_workspace_stamps(&run.store, &run.loaded.root, &run.workspace_seen.0);
+    // What a killed build left that can't be removed is left for the next.
+    let _ = crate::sweep::sweep_stale(&run.store, &settings.scratch);
     let evicted = settings.cache_limit.map(|limit| {
         evict(&run.store, &run.store.used(), limit).map_err(|error| error.to_string())
     });
@@ -727,7 +729,7 @@ fn new_run<'a>(
         sweeper: Sweeper::new(
             settings
                 .scratch
-                .join(format!("swept-{}", std::process::id())),
+                .join(format!("swept-{}", crate::sweep::token())),
         ),
     })
 }
@@ -889,7 +891,7 @@ fn keep_workspace_stamps(store: &Store, root: &Path, seen: &Seen) -> io::Result<
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let temp = path.with_extension(format!("tmp-{}", crate::sweep::token()));
     fs::write(&temp, serde_json::to_vec(&kept).map_err(io::Error::other)?)?;
     fs::rename(&temp, &path)
 }
@@ -2347,7 +2349,7 @@ impl Run<'_> {
         let fresh =
             self.settings
                 .scratch
-                .join(format!("kept-{}-{}", std::process::id(), id.number()));
+                .join(format!("kept-{}-{}", crate::sweep::token(), id.number()));
         let platform = &self.settings.platform;
         let scratch = Scratch::of(
             self.store.root(),
@@ -2438,7 +2440,7 @@ impl Run<'_> {
     fn stage_dir(&self, id: NodeId, attempt: u32) -> PathBuf {
         self.settings.scratch.join(format!(
             "step-{}-{}-{attempt}",
-            std::process::id(),
+            crate::sweep::token(),
             id.number()
         ))
     }

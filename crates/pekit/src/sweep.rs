@@ -9,14 +9,121 @@
 //! while the build goes on. The build waits for that thread before it ends,
 //! so that it leaves nothing behind, and fails as it would have had it
 //! removed the directory itself if one cannot be removed.
+//!
+//! # Names of its own
+//!
+//! Every pekit process names what it makes in a directory others share,
+//! the store's `tmp/` and the scratch directory, with its *token*, 16 hex
+//! digits drawn at random once ([`token`]): never its process's number,
+//! which another process sharing the store, in another PID namespace say,
+//! may have too.
+//!
+//! What a process was killed before it removed is removed by another
+//! ([`sweep_stale`]), once it holds the store's lock exclusively, as an
+//! eviction does: then no other process has the store open, so nothing in
+//! the store's `tmp/`, and no staging directory, swept directory, unpacking
+//! or checkout in the scratch directory, is any but its own.
 
-use std::fs;
-use std::io;
+use std::fmt::Write as _;
+use std::fs::{self, TryLockError};
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use crate::layers::remove_tree;
+use crate::store::{Digest, Store};
+
+/// This process's token (see [Names of its own](#names-of-its-own)).
+#[must_use]
+pub fn token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let mut bytes = [0u8; 8];
+        let drawn =
+            fs::File::open("/dev/urandom").and_then(|mut random| random.read_exact(&mut bytes));
+        if drawn.is_err() {
+            // As unlikely to be another's: this process, and now.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let seed = format!(
+                "{} {} {:?}",
+                std::process::id(),
+                now.as_nanos(),
+                thread::current().id()
+            );
+            bytes.copy_from_slice(&Digest::of(seed.as_bytes()).bytes()[..8]);
+        }
+        bytes.iter().fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+    })
+}
+
+/// The kinds of what a build makes in the scratch directory, which it
+/// names `KIND-TOKEN…`.
+const SCRATCH_KINDS: [&str; 5] = ["step-", "swept-", "kept-", "unpack-", "git-"];
+
+/// Removes what processes that are gone left in `store`'s `tmp/` and in the
+/// scratch directory `scratch`, if no other process has the store open
+/// (see [Names of its own](#names-of-its-own)): whether it could look.
+///
+/// # Errors
+///
+/// That the store's lock could not be taken or given back, or something
+/// left could not be removed.
+pub fn sweep_stale(store: &Store, scratch: &Path) -> io::Result<bool> {
+    match store.held().try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            store.held().lock_shared()?;
+            return Ok(false);
+        }
+        Err(TryLockError::Error(error)) => {
+            store.held().lock_shared()?;
+            return Err(error);
+        }
+    }
+    let swept = sweep_held(&store.root().join("tmp"), scratch);
+    // Held shared again, as every process that has the store holds it.
+    store.held().lock_shared()?;
+    swept.map(|()| true)
+}
+
+/// Removes what is not this process's in `tmp` and of a build's kinds in
+/// `scratch`, the store's lock held exclusively.
+fn sweep_held(tmp: &Path, scratch: &Path) -> io::Result<()> {
+    let own = token();
+    let entries = |dir: &Path| -> io::Result<Vec<fs::DirEntry>> {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries.collect(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    };
+    let remove = |path: &Path| -> io::Result<()> {
+        if fs::symlink_metadata(path)?.is_dir() {
+            remove_tree(path)
+        } else {
+            fs::remove_file(path)
+        }
+    };
+    for entry in entries(tmp)? {
+        if !entry.file_name().to_string_lossy().contains(own) {
+            remove(&entry.path())?;
+        }
+    }
+    for entry in entries(scratch)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if SCRATCH_KINDS.iter().any(|kind| name.starts_with(kind)) && !name.contains(own) {
+            remove(&entry.path())?;
+        }
+    }
+    Ok(())
+}
 
 /// A thread removing the directories a build is done with (see
 /// [Sweeping](#sweeping)).

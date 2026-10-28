@@ -7,13 +7,20 @@
 //! (see `design/libraries.md`, L6a). Its sandbox ([`crate::sandbox::StepSandbox`])
 //! answers both itself:
 //!
-//! - **A composition** hard-links each file it places that nothing can
-//!   change, a staged input's or another composition's, and copies any other
-//!   ([`Layers::place_file`]). A file it places twice, as a toolchain's
-//!   runtime is placed both on its own and within the toolchain, is a link
-//!   to the store's blob once and to a copy the store keeps of it each other
-//!   time, so that no two of its files are one, and none is copied anew.
-//!   Once it is done it is *sealed*: its files made
+//! - **A composition** mounts each directory it places whole that is a tree
+//!   of the store of [`MOUNT_FILES`] files or more, materialised (see
+//!   [Materialised trees](crate::store::trees#materialised-trees)), on an
+//!   empty directory of its own, its *mount point* ([`Layers::place_tree`]):
+//!   every command sees the tree there, read-only, and GCSL finds what it
+//!   holds there too. It hard-links each other file it places that nothing
+//!   can change, a staged input's, a materialised tree's or another
+//!   composition's, and copies any other ([`Layers::place_file`]). A content
+//!   it places twice, as a toolchain's runtime is placed both on its own and
+//!   within the toolchain, is a link to the store's blob once and to a copy
+//!   the store keeps of it each other time, and a tree it mounts that holds
+//!   a content it has already is an instance of the tree whose files of it
+//!   link later copies, so that no two of its files are one, and none is
+//!   copied anew. Once it is done it is *sealed*: its files made
 //!   read-only on the host, and it bound read-only to every command, so that
 //!   no program can change it, and nothing a store's blob through it. Its
 //!   directories keep their modes, since a sandbox's merged directories show
@@ -23,7 +30,11 @@
 //! - **A sandbox** of a directory that nothing can change is an overlay
 //!   ([`Layers::make_sandbox`]): its commands see the directory as their
 //!   `/`, their writes kept in the sandbox's own directory, the *upper*
-//!   layer, never in the directory, the *lower* one. A sandbox of any other
+//!   layer, never in the directory, the *lower* one. Each tree mounted in
+//!   the directory is an overlay of its own, *nested* on its mount point,
+//!   whose upper layer is a directory of the step's own outputs, so that a
+//!   command writes there too; but it cannot move or remove the mount
+//!   point itself, which a copy would let it. A sandbox of any other
 //!   directory is copied, as plain GCSL does.
 //! - **A path in an overlay sandbox** is read upper over lower
 //!   ([`Layers::resolve`]), as the overlay shows it to its commands: what the
@@ -31,9 +42,19 @@
 //!   0, which hides what the lower has; else what the lower has, unless an
 //!   upper directory on the way is *opaque* (`user.overlay.opaque`), which
 //!   hides all the lower has below it. A directory both layers have is merged
-//!   into a new tree of hard links, a snapshot of it as it is then. The
-//!   sandbox's own root is its upper layer, which is where GCSL itself writes
-//!   into it, such as the working directory it makes.
+//!   into a new tree of hard links, a snapshot of it as it is then, as is
+//!   one that holds a nested overlay's mount point. A path in a nested
+//!   overlay is read from its layers. The sandbox's own root is its upper
+//!   layer, which is where GCSL itself writes into it, such as the working
+//!   directory it makes, and GCSL writes a path of it in the upper layer of
+//!   the overlay it is in ([`Layers::write_target`]).
+//! - **A step's mounts** are the directories its staged inputs and its
+//!   compositions mount, each a materialised tree on a mount point
+//!   ([`Mount`]), which its commands are given read-only and its paths are
+//!   found in ([`Layers::mounted_path`]); what walks a directory on the
+//!   host finds a mount point's contents in its tree
+//!   ([`Layers::contents`]), and what puts one into the store takes the
+//!   tree's digest ([`Layers::mounted`]).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -42,7 +63,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::store::{FileEntry, Store};
+use crate::store::{Digest, FileEntry, Store};
 
 /// How a composition places a file that nothing can change
 /// ([`Layers::place_file`]).
@@ -56,6 +77,39 @@ enum Placing {
     Fresh,
 }
 
+/// The fewest files and symbolic links a tree of the store has that a step
+/// mounts, rather than placing each of them: each mount costs every
+/// program the step runs a little.
+pub const MOUNT_FILES: u64 = 64;
+
+/// A materialised tree a step mounts (see [Compositions and
+/// sandboxes](#compositions-and-sandboxes)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mount {
+    /// Its path, as GCSL code names it.
+    pub logical: String,
+    /// Its mount point, an empty directory on the host.
+    pub point: PathBuf,
+    /// The materialised tree, on the host.
+    pub source: PathBuf,
+    /// The tree's digest.
+    pub digest: Digest,
+}
+
+/// An overlay nested in an overlay sandbox, on the mount point of a tree
+/// mounted in the directory the sandbox is of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nested {
+    /// Its path, relative to the sandbox's root.
+    pub at: String,
+    /// The tree, on the host: its lower layer.
+    pub lower: PathBuf,
+    /// Its writes, on the host: its upper layer.
+    pub upper: PathBuf,
+    /// The overlay's work directory, on the host's file system of `upper`.
+    pub work: PathBuf,
+}
+
 /// An overlay sandbox (see [Compositions and sandboxes](#compositions-and-sandboxes)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Overlay {
@@ -67,6 +121,8 @@ pub struct Overlay {
     pub upper: PathBuf,
     /// The overlay's work directory, on the host's file system of `upper`.
     pub work: PathBuf,
+    /// The overlays nested in it, by their paths.
+    pub nested: Vec<Nested>,
 }
 
 /// What a step's sandbox knows of its compositions and sandboxes.
@@ -85,9 +141,11 @@ struct Known {
     /// sealing it.
     placing: HashSet<(u64, u64)>,
     /// Of each blob of the store the composition being made has a link to,
-    /// by its contents and mode, which of it it links: 0 the blob, any
-    /// other the copy of that number.
-    copies: HashMap<FileEntry, HashSet<u32>>,
+    /// by its contents and mode, one more than the highest of it it links,
+    /// 0 the blob and any other the copy of that number: the next it may.
+    copy_next: HashMap<FileEntry, u32>,
+    /// The step's mounts.
+    mounts: Vec<Mount>,
     /// The files placed since the last composition was sealed that a
     /// program could write, each with its mode: what sealing the next makes
     /// read-only.
@@ -106,6 +164,9 @@ pub struct Layers {
     changing: PathBuf,
     /// Where work directories and merged directories are made.
     scratch: PathBuf,
+    /// Where the store's materialised trees are, which nothing changes, if
+    /// the step has a store.
+    trees: Option<PathBuf>,
     /// What it knows.
     known: Mutex<Known>,
 }
@@ -218,8 +279,17 @@ impl Layers {
             unchanging,
             changing: changing.to_path_buf(),
             scratch: scratch.to_path_buf(),
+            trees: None,
             known: Mutex::new(Known::default()),
         }
+    }
+
+    /// The layers of a step whose store keeps its materialised trees at
+    /// `trees`.
+    #[must_use]
+    pub fn with_trees(mut self, trees: PathBuf) -> Self {
+        self.trees = Some(trees);
+        self
     }
 
     /// What it knows, even if a thread panicked holding it.
@@ -230,11 +300,22 @@ impl Layers {
     }
 
     /// Whether nothing can change the file or directory at `path` on the
-    /// host: a staged input's, or a sealed composition's.
-    fn is_unchanging(&self, path: &Path) -> bool {
+    /// host: a staged input's, a materialised tree's, or a sealed
+    /// composition's.
+    #[must_use]
+    pub fn is_unchanging(&self, path: &Path) -> bool {
         let staged =
             self.unchanging.iter().any(|dir| within(path, dir)) && !within(path, &self.changing);
-        staged || self.known().sealed.iter().any(|(_, dir)| within(path, dir))
+        staged
+            || self.in_store(path)
+            || self.known().sealed.iter().any(|(_, dir)| within(path, dir))
+    }
+
+    /// Whether `path`, on the host, is in a materialised tree of the store,
+    /// which nothing may change.
+    #[must_use]
+    pub fn in_store(&self, path: &Path) -> bool {
+        self.trees.as_ref().is_some_and(|trees| within(path, trees))
     }
 
     /// Places the file at `source` at `target`, both on the host, for a
@@ -260,7 +341,8 @@ impl Layers {
         let meta = fs::metadata(source)?;
         if self.is_unchanging(source) {
             let node = (meta.dev(), meta.ino());
-            let origin = store.and_then(|store| store.origin(node));
+            let origin =
+                store.and_then(|store| store.origin(node).or_else(|| store.file_in(source)));
             let placing = self.placing(node, origin);
             let linked = match (placing, store) {
                 (Placing::Link, _) => fs::hard_link(source, target).is_ok(),
@@ -289,15 +371,132 @@ impl Layers {
         let Some((entry, copy)) = origin else {
             return if first { Placing::Link } else { Placing::Fresh };
         };
-        let copies = known.copies.entry(entry).or_default();
-        if first && copies.insert(copy) {
+        let next = known.copy_next.entry(entry).or_default();
+        if first && copy >= *next {
+            *next = copy + 1;
             return Placing::Link;
         }
-        let Some(other) = (1..u32::MAX).find(|other| !copies.contains(other)) else {
+        let Some(after) = next.checked_add(1) else {
             return Placing::Fresh;
         };
-        copies.insert(other);
+        let other = std::mem::replace(next, after);
         Placing::Copy(entry, other)
+    }
+
+    /// Places the directory at `source` at `target`, both on the host, whole,
+    /// for the composition being made, if it is a tree of `store` of
+    /// [`MOUNT_FILES`] files or more: mounted at `target`, `logical` as GCSL
+    /// code names it, as an instance of the tree whose files link no blob or
+    /// copy the composition links already (see [Compositions and
+    /// sandboxes](#compositions-and-sandboxes)). `None` for any other,
+    /// whose entries GCSL places.
+    pub fn place_tree(
+        &self,
+        (source, target): (&Path, &Path),
+        logical: String,
+        store: &Store,
+    ) -> Option<io::Result<()>> {
+        let digest = store.tree_in(source)?;
+        match store.file_count(&digest) {
+            Ok(count) if count >= MOUNT_FILES => {}
+            Ok(_) => return None,
+            Err(error) => return Some(Err(error)),
+        }
+        Some(self.mount_composed(&digest, (target, logical), store))
+    }
+
+    /// Mounts the tree `digest` of `store` at `target`, `logical` as GCSL
+    /// code names it, for the composition being made, as
+    /// [`Layers::place_tree`] does.
+    fn mount_composed(
+        &self,
+        digest: &Digest,
+        (target, logical): (&Path, String),
+        store: &Store,
+    ) -> io::Result<()> {
+        let counts = store.blob_counts(digest)?;
+        let mut bases = Vec::new();
+        {
+            let mut known = self.known();
+            for (entry, count) in counts.iter() {
+                let next = known.copy_next.entry(*entry).or_default();
+                if *next > 0 {
+                    bases.push((*entry, *next));
+                }
+                *next = next.saturating_add(*count);
+            }
+        }
+        bases.sort_by_key(|(entry, _)| (entry.digest, entry.executable));
+        let source = store.materialised(digest, &bases)?;
+        fs::create_dir(target)?;
+        self.mount(Mount {
+            logical,
+            point: target.to_path_buf(),
+            source,
+            digest: *digest,
+        });
+        Ok(())
+    }
+
+    /// Notes the step's mount `mount`.
+    pub fn mount(&self, mount: Mount) {
+        self.known().mounts.push(mount);
+    }
+
+    /// The step's mounts, and its sealed compositions, each as GCSL code
+    /// names it and on the host, each after any it is in: what every
+    /// command binds read-only.
+    #[must_use]
+    pub fn binds(&self) -> Vec<(String, PathBuf)> {
+        let known = self.known();
+        let mut binds = known.sealed.clone();
+        binds.extend(
+            known
+                .mounts
+                .iter()
+                .map(|mount| (mount.logical.clone(), mount.source.clone())),
+        );
+        binds.sort();
+        binds
+    }
+
+    /// The digest of the tree mounted on each of the step's mount points,
+    /// by where it is on the host.
+    #[must_use]
+    pub fn mounted(&self) -> HashMap<PathBuf, Digest> {
+        self.known()
+            .mounts
+            .iter()
+            .map(|mount| (mount.point.clone(), mount.digest))
+            .collect()
+    }
+
+    /// Where the contents of the directory at `host` are, if it is one of
+    /// the step's mount points: its tree.
+    #[must_use]
+    pub fn contents(&self, host: &Path) -> Option<PathBuf> {
+        self.known()
+            .mounts
+            .iter()
+            .find(|mount| mount.point == host)
+            .map(|mount| mount.source.clone())
+    }
+
+    /// Where `path`, as GCSL code names it, is on the host if it is in one
+    /// of the step's mounts, the innermost.
+    #[must_use]
+    pub fn mounted_path(&self, path: &str) -> Option<PathBuf> {
+        let known = self.known();
+        let (mount, rest) = known
+            .mounts
+            .iter()
+            .filter_map(|mount| Some((mount, inside(path, &mount.logical)?)))
+            .max_by_key(|(mount, _)| mount.logical.len())?;
+        Some(if rest.is_empty() {
+            mount.source.clone()
+        } else {
+            mount.source.join(rest)
+        })
     }
 
     /// Notes the file at `target`, of mode `mode`, for sealing, if a
@@ -321,7 +520,7 @@ impl Layers {
             let mut known = self.known();
             // The next composition links each file anew.
             known.placing.clear();
-            known.copies.clear();
+            known.copy_next.clear();
             std::mem::take(&mut known.writable)
         };
         // What was placed elsewhere, as a sandbox's copy is, is no part of
@@ -361,26 +560,63 @@ impl Layers {
 
     /// Makes the sandbox of the directory at `lower` on the host whose root
     /// is `root`, as GCSL code names it, at `upper` on the host, as an
-    /// overlay if nothing can change `lower`: whether it did.
+    /// overlay if nothing can change `lower`: whether it did. Each tree
+    /// mounted in `lower` is an overlay nested in it, whose upper layer
+    /// `fresh` makes.
     ///
     /// # Errors
     ///
-    /// That its work directory could not be made.
-    pub fn make_sandbox(&self, root: &str, lower: &Path, upper: &Path) -> io::Result<bool> {
+    /// That a work directory or an upper layer could not be made.
+    pub fn make_sandbox(
+        &self,
+        root: &str,
+        (lower, upper): (&Path, &Path),
+        fresh: &dyn Fn() -> io::Result<PathBuf>,
+    ) -> io::Result<bool> {
         if !self.is_unchanging(lower) {
             return Ok(false);
         }
-        let mut known = self.known();
-        let work = self.scratch.join(format!("overlay-work-{}", known.next));
-        known.next += 1;
-        fs::create_dir_all(&work)?;
-        known.overlays.push(Overlay {
+        let mut mounted: Vec<(String, PathBuf)> = self
+            .known()
+            .mounts
+            .iter()
+            .filter_map(|mount| {
+                let at = mount.point.strip_prefix(lower).ok()?.to_str()?;
+                (!at.is_empty()).then(|| (at.to_owned(), mount.source.clone()))
+            })
+            .collect();
+        mounted.sort();
+        let mut nested = Vec::new();
+        for (at, tree) in mounted {
+            nested.push(Nested {
+                at,
+                lower: tree,
+                upper: fresh()?,
+                work: self.work_dir()?,
+            });
+        }
+        let work = self.work_dir()?;
+        self.known().overlays.push(Overlay {
             root: root.to_owned(),
             lower: lower.to_path_buf(),
             upper: upper.to_path_buf(),
             work,
+            nested,
         });
         Ok(true)
+    }
+
+    /// A new overlay work directory, on the host's file system of the
+    /// step's own outputs.
+    fn work_dir(&self) -> io::Result<PathBuf> {
+        let work = {
+            let mut known = self.known();
+            let work = self.scratch.join(format!("overlay-work-{}", known.next));
+            known.next += 1;
+            work
+        };
+        fs::create_dir_all(&work)?;
+        Ok(work)
     }
 
     /// The overlay sandbox whose root is `root`, as GCSL code names it.
@@ -393,6 +629,15 @@ impl Layers {
             .cloned()
     }
 
+    /// The overlay sandbox `path`, as GCSL code names it, is in, and its
+    /// path relative to the sandbox's root.
+    fn overlay_of(&self, path: &str) -> Option<(Overlay, String)> {
+        self.known().overlays.iter().find_map(|overlay| {
+            let rest = inside(path, &overlay.root)?;
+            Some((overlay.clone(), rest.to_owned()))
+        })
+    }
+
     /// Where `path`, as GCSL code names it, is on the host if it is in an
     /// overlay sandbox (see [Compositions and
     /// sandboxes](#compositions-and-sandboxes)); `None` if it is in none.
@@ -401,26 +646,57 @@ impl Layers {
     ///
     /// That a directory both layers have could not be merged.
     pub fn resolve(&self, path: &str) -> Option<io::Result<PathBuf>> {
-        let overlay = self.known().overlays.iter().find_map(|overlay| {
-            let rest = path.strip_prefix(&overlay.root)?;
-            if rest.is_empty() || rest.starts_with('/') {
-                Some((overlay.clone(), rest.trim_start_matches('/').to_owned()))
-            } else {
-                None
-            }
-        })?;
-        let (overlay, rest) = overlay;
+        let (overlay, rest) = self.overlay_of(path)?;
         if rest.is_empty() {
             return Some(Ok(overlay.upper));
         }
-        Some(self.merged(&overlay, &rest))
+        Some(match nested_of(&overlay, &rest) {
+            Some((nested, inner)) => self.merged((&nested.upper, &nested.lower), (inner, &[])),
+            None => self.merged((&overlay.upper, &overlay.lower), (&rest, &overlay.nested)),
+        })
     }
 
-    /// Where `rest`, a path relative to the root of `overlay`, is on the host,
-    /// upper over lower.
-    fn merged(&self, overlay: &Overlay, rest: &str) -> io::Result<PathBuf> {
-        let mut upper = overlay.upper.clone();
-        let mut lower = Some(overlay.lower.clone());
+    /// Where GCSL writes `path`, as GCSL code names it, if it is in an
+    /// overlay sandbox: in the upper layer of the overlay it is in, its
+    /// directory made there if the sandbox shows one. `None` if it is in
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// That its directory could not be made.
+    pub fn write_target(&self, path: &str) -> Option<io::Result<PathBuf>> {
+        let (overlay, rest) = self.overlay_of(path)?;
+        if rest.is_empty() {
+            return Some(Ok(overlay.upper));
+        }
+        let (upper, inner) = match nested_of(&overlay, &rest) {
+            Some((nested, inner)) => (nested.upper.clone(), inner.to_owned()),
+            None => (overlay.upper.clone(), rest.clone()),
+        };
+        if let Some((parent, _)) = inner.rsplit_once('/')
+            && !is_dir(&upper.join(parent))
+            && let Some((shown, _)) = path.rsplit_once('/')
+            && self
+                .resolve(shown)
+                .is_some_and(|dir| dir.is_ok_and(|dir| is_dir(&dir)))
+            && let Err(error) = fs::create_dir_all(upper.join(parent))
+        {
+            return Some(Err(error));
+        }
+        Some(Ok(upper.join(inner)))
+    }
+
+    /// Where `rest`, a path relative to the root of an overlay of the layers
+    /// `upper` over `lower`, is on the host, upper over lower, the overlays
+    /// `nested` in it (see [Compositions and
+    /// sandboxes](#compositions-and-sandboxes)).
+    fn merged(
+        &self,
+        (upper, lower): (&Path, &Path),
+        (rest, nested): (&str, &[Nested]),
+    ) -> io::Result<PathBuf> {
+        let mut upper = upper.to_path_buf();
+        let mut lower = Some(lower.to_path_buf());
         let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
         for (at, part) in parts.iter().enumerate() {
             upper.push(part);
@@ -438,29 +714,84 @@ impl Layers {
             }
         }
         let lower = lower.filter(|lower| present(lower));
+        // A directory that holds a nested overlay's mount point is merged
+        // with what that overlay shows.
+        let holds = nested
+            .iter()
+            .any(|nested| inside(&nested.at, rest).is_some_and(|inner| !inner.is_empty()));
+        let lower_dir = lower.as_deref().filter(|lower| is_dir(lower));
+        if holds && (is_dir(&upper) || (!present(&upper) && lower_dir.is_some())) {
+            return self.merge_dirs((&upper, lower_dir), (rest, nested));
+        }
         match lower {
             Some(lower) if !present(&upper) => Ok(lower),
-            Some(lower) if is_dir(&upper) && is_dir(&lower) => self.merge_dirs(&upper, &lower),
+            Some(lower) if is_dir(&upper) && is_dir(&lower) => {
+                if empty_dir(&upper) {
+                    Ok(lower)
+                } else {
+                    self.merge_dirs((&upper, Some(&lower)), (rest, nested))
+                }
+            }
             _ => Ok(upper),
         }
     }
 
-    /// A new tree of hard links of the directory `upper` merged over `lower`.
-    fn merge_dirs(&self, upper: &Path, lower: &Path) -> io::Result<PathBuf> {
+    /// A new tree of hard links of the directory `upper` merged over
+    /// `lower`, at `rest` relative to its overlay's root, the overlays
+    /// `nested` in it.
+    fn merge_dirs(
+        &self,
+        (upper, lower): (&Path, Option<&Path>),
+        (rest, nested): (&str, &[Nested]),
+    ) -> io::Result<PathBuf> {
         let at = {
             let mut known = self.known();
             let at = self.scratch.join(format!("merged-{}", known.next));
             known.next += 1;
             at
         };
-        merge_into(upper, Some(lower), &at)?;
+        merge_into((upper, lower), &at, (rest, nested))?;
         Ok(at)
     }
 }
 
+/// `path` under the logical root `root`, if it is it or under it: the rest,
+/// relative, `""` for the root itself.
+fn inside<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if root.is_empty() {
+        return Some(path);
+    }
+    let rest = path.strip_prefix(root)?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.strip_prefix('/')
+}
+
+/// The overlay nested in `overlay` that `rest`, a path relative to its
+/// root, is in, the innermost, and its path in it.
+fn nested_of<'a>(overlay: &'a Overlay, rest: &'a str) -> Option<(&'a Nested, &'a str)> {
+    overlay
+        .nested
+        .iter()
+        .filter_map(|nested| Some((nested, inside(rest, &nested.at)?)))
+        .max_by_key(|(nested, _)| nested.at.len())
+}
+
+/// Whether the directory at `path` holds nothing.
+fn empty_dir(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 /// Makes at `at` the tree of `upper` over `lower`, if there is one, of hard
-/// links, each whiteout hiding what is below it.
-fn merge_into(upper: &Path, lower: Option<&Path>, at: &Path) -> io::Result<()> {
+/// links, each whiteout hiding what is below it, `rest` its path relative
+/// to its overlay's root, each overlay of `nested` merged at its mount
+/// point.
+fn merge_into(
+    (upper, lower): (&Path, Option<&Path>),
+    at: &Path,
+    (rest, nested): (&str, &[Nested]),
+) -> io::Result<()> {
     fs::create_dir_all(at)?;
     let lower = lower.filter(|_| !opaque(upper));
     let mut names: Vec<std::ffi::OsString> = Vec::new();
@@ -476,22 +807,29 @@ fn merge_into(upper: &Path, lower: Option<&Path>, at: &Path) -> io::Result<()> {
     }
     names.sort();
     for name in names {
+        let inner = if rest.is_empty() {
+            name.to_string_lossy().into_owned()
+        } else {
+            format!("{rest}/{}", name.to_string_lossy())
+        };
         let top = upper.join(&name);
         let below = lower.map(|lower| lower.join(&name));
         let target = at.join(&name);
-        if present(&top) {
+        if let Some(mounted) = nested.iter().find(|nested| nested.at == inner) {
+            merge_into((&mounted.upper, Some(&mounted.lower)), &target, ("", &[]))?;
+        } else if present(&top) {
             if whiteout(&top) {
                 continue;
             }
             if is_dir(&top) {
                 let below = below.filter(|below| is_dir(below));
-                merge_into(&top, below.as_deref(), &target)?;
+                merge_into((&top, below.as_deref()), &target, (&inner, nested))?;
             } else {
                 link_entry(&top, &target)?;
             }
         } else if let Some(below) = below {
             if is_dir(&below) {
-                merge_into(&below, None, &target)?;
+                merge_into((&below, None), &target, (&inner, nested))?;
             } else {
                 link_entry(&below, &target)?;
             }

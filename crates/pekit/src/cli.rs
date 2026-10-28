@@ -814,7 +814,7 @@ fn release_command(args: &ReleaseArgs, cwd: &Path, terminal: &mut Terminal<'_>) 
     }
     let tree = cache_dir()
         .join("scratch")
-        .join(format!("release-{}", std::process::id()));
+        .join(format!("release-{}", crate::sweep::token()));
     if let Err(message) = repository.export(&tree) {
         let _ = remove_tree(&tree);
         return fail(terminal, &message);

@@ -51,12 +51,12 @@ use gcsl::check::Builtin;
 use gcsl::eval::Effects;
 use gcsl::eval::effects::{KeychainAnswer, KeychainSecret};
 
-use crate::layers::{Layers, Overlay};
+use crate::layers::{Layers, MOUNT_FILES, Mount, Overlay};
 use crate::record::Kept;
 use crate::keychain::{IN_A_STEP, Keychain};
 use crate::load::Libraries;
 use crate::scratch::SCRATCH;
-use crate::store::{Seen, Store};
+use crate::store::{Digest, Seen, Store};
 
 /// The workspace's root in the logical layout.
 pub const WORKSPACE: &str = "/w";
@@ -150,13 +150,25 @@ fn sandboxed(
     wrapped.arg("--die-with-parent");
     match root {
         Root::Dir(root) => wrapped.arg("--bind").arg(root).arg("/"),
-        Root::Overlay(overlay) => wrapped
-            .arg("--overlay-src")
-            .arg(&overlay.lower)
-            .arg("--overlay")
-            .arg(&overlay.upper)
-            .arg(&overlay.work)
-            .arg("/"),
+        Root::Overlay(overlay) => {
+            wrapped
+                .arg("--overlay-src")
+                .arg(&overlay.lower)
+                .arg("--overlay")
+                .arg(&overlay.upper)
+                .arg(&overlay.work)
+                .arg("/");
+            for nested in &overlay.nested {
+                wrapped
+                    .arg("--overlay-src")
+                    .arg(&nested.lower)
+                    .arg("--overlay")
+                    .arg(&nested.upper)
+                    .arg(&nested.work)
+                    .arg(format!("/{}", nested.at));
+            }
+            &mut wrapped
+        }
     };
     wrapped.args(["--proc", "/proc", "--dev", "/dev"]);
     for device in devices {
@@ -327,7 +339,7 @@ impl Effects for HostView {
         let number = self.temps.fetch_add(1, Ordering::Relaxed);
         let dir = self
             .temp
-            .join(format!("pekit-{}-{number}", std::process::id()));
+            .join(format!("pekit-{}-{number}", crate::sweep::token()));
         Some(
             fs::create_dir_all(&dir)
                 .map(|()| dir.to_string_lossy().into_owned())
@@ -364,6 +376,9 @@ pub struct StepSandbox {
     host: HostTools,
     /// The number of the next temporary directory.
     temps: AtomicU32,
+    /// The number of the next upper layer of an overlay nested in one of its
+    /// sandboxes.
+    uppers: AtomicU32,
     /// Its compositions and sandboxes.
     layers: Layers,
     /// The secret files it is given, each its path as it sees it and where
@@ -431,6 +446,7 @@ impl StepSandbox {
             own,
             host: HostTools::default(),
             temps: AtomicU32::new(0),
+            uppers: AtomicU32::new(0),
             layers,
             secrets: Mutex::new(Vec::new()),
             devices: Vec::new(),
@@ -457,8 +473,42 @@ impl StepSandbox {
     #[must_use]
     pub fn with_contexts(mut self, pending: HashMap<String, Pending>, store: Store) -> Self {
         self.pending = Mutex::new(pending);
+        self.layers = self.layers.with_trees(store.trees_root());
         self.store = Some(store);
         self
+    }
+
+    /// The digest of the tree mounted on each of its mount points, by where
+    /// it is on the host: what is put into the store of a directory that
+    /// holds one (see [Compositions and
+    /// sandboxes](crate::layers#compositions-and-sandboxes)).
+    #[must_use]
+    pub fn mounted(&self) -> HashMap<PathBuf, Digest> {
+        self.layers.mounted()
+    }
+
+    /// The path as GCSL code names it of `host`, a path under its staging
+    /// directory's view of the workspace, the outputs or `/tmp`.
+    fn logical_of(&self, host: &Path) -> Option<String> {
+        [("w", WORKSPACE), ("out", OUTPUTS), ("tmp", "/tmp")]
+            .into_iter()
+            .find_map(|(dir, root)| {
+                let rest = host.strip_prefix(self.stage.join(dir)).ok()?.to_str()?;
+                Some(if rest.is_empty() {
+                    root.to_owned()
+                } else {
+                    format!("{root}/{rest}")
+                })
+            })
+    }
+
+    /// Where `path`, a path under `/w`, `/pekit-out` or `/tmp`, is in its
+    /// staging directory, whatever is mounted there.
+    fn staged_path(&self, path: &str) -> Result<PathBuf, String> {
+        [("w", WORKSPACE), ("out", OUTPUTS), ("tmp", "/tmp")]
+            .into_iter()
+            .find_map(|(dir, root)| Some(self.stage.join(dir).join(under(path, root)?)))
+            .ok_or_else(|| "it is outside the step".to_owned())
     }
 
     /// Its own output directory and its `/tmp`, on the host: what its
@@ -583,18 +633,32 @@ impl StepSandbox {
     }
 
     /// Stages `kept`, a file or a directory from `store`, at `path`, a path
-    /// under `/w` or `/pekit-out`.
+    /// under `/w` or `/pekit-out`: a directory of [`MOUNT_FILES`] files or
+    /// more mounted, materialised in the store, on an empty directory, and
+    /// any other linked file by file (see [Compositions and
+    /// sandboxes](crate::layers#compositions-and-sandboxes)).
     ///
     /// # Errors
     ///
     /// That `path` is under neither, or it cannot be staged.
     pub fn stage(&self, store: &Store, path: &str, kept: Kept) -> io::Result<()> {
-        let at = self.host_path(path).map_err(io::Error::other)?;
-        if at.exists() {
+        if self.host_path(path).map_err(io::Error::other)?.exists() {
             return Ok(());
         }
+        let at = self.staged_path(path).map_err(io::Error::other)?;
         match kept {
             Kept::File(entry) => store.materialise_file(&entry, &at),
+            Kept::Dir(tree) if store.file_count(&tree)? >= MOUNT_FILES => {
+                let source = store.materialised(&tree, &[])?;
+                fs::create_dir_all(&at)?;
+                self.layers.mount(Mount {
+                    logical: path.to_owned(),
+                    point: at,
+                    source,
+                    digest: tree,
+                });
+                Ok(())
+            }
             Kept::Dir(tree) => store.materialise_tree(&tree, &at),
         }
     }
@@ -622,8 +686,8 @@ impl Effects for StepSandbox {
             .arg(OUTPUTS);
         let own = self.host_path(&self.own)?;
         wrapped.arg("--bind").arg(own).arg(&self.own);
-        // Its compositions, which nothing may change.
-        for (path, host) in self.layers.sealed() {
+        // Its mounts and compositions, which nothing may change.
+        for (path, host) in self.layers.binds() {
             wrapped.arg("--ro-bind").arg(host).arg(path);
         }
         if let Some(why) = self
@@ -694,6 +758,16 @@ impl Effects for StepSandbox {
         self.layers.place_file(source, target, self.store.as_ref())
     }
 
+    fn place_tree(&self, source: &Path, target: &Path) -> Option<io::Result<()>> {
+        let store = self.store.as_ref()?;
+        let logical = self.logical_of(target)?;
+        self.layers.place_tree((source, target), logical, store)
+    }
+
+    fn contents(&self, host: &Path) -> Option<PathBuf> {
+        self.layers.contents(host)
+    }
+
     fn context_read(&self, key: &str) {
         let Some(pending) = self
             .pending
@@ -734,7 +808,17 @@ impl Effects for StepSandbox {
         let (Ok(lower), Ok(upper)) = (self.host_path(source), self.host_path(root)) else {
             return None;
         };
-        match self.layers.make_sandbox(root, &lower, &upper) {
+        // Each nested overlay's upper layer a directory of its own outputs,
+        // as the sandbox's own is, numbered apart from GCSL's temporary
+        // directories, whose paths its values hold.
+        let fresh = || {
+            let number = self.uppers.fetch_add(1, Ordering::Relaxed);
+            let at = self
+                .host_path(&format!("{}/.pekit-upper-{number}", self.own))
+                .map_err(io::Error::other)?;
+            fs::create_dir_all(&at).map(|()| at)
+        };
+        match self.layers.make_sandbox(root, (&lower, &upper), &fresh) {
             Ok(true) => Some(Ok(())),
             Ok(false) => None,
             Err(error) => Some(Err(error.to_string())),
@@ -744,6 +828,9 @@ impl Effects for StepSandbox {
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
         if let Some(resolved) = self.layers.resolve(path) {
             return resolved.map_err(|error| error.to_string());
+        }
+        if let Some(mounted) = self.layers.mounted_path(path) {
+            return Ok(mounted);
         }
         if let Some(rest) = under(path, WORKSPACE) {
             return Ok(self.stage.join("w").join(rest));
@@ -766,6 +853,23 @@ impl Effects for StepSandbox {
             return Ok(host.clone());
         }
         Err("it is outside the step".to_owned())
+    }
+
+    /// Where GCSL writes `path`: in an overlay sandbox, its upper layer;
+    /// never in what nothing may change, its inputs, the store's trees every
+    /// step shares, or its finished compositions.
+    fn write_path(&self, path: &str) -> Result<PathBuf, String> {
+        if let Some(target) = self.layers.write_target(path) {
+            return target.map_err(|error| error.to_string());
+        }
+        let host = self.host_path(path)?;
+        if self.layers.is_unchanging(&host) {
+            return Err(
+                "it is an input of the step, or a finished composition, which nothing may change"
+                    .to_owned(),
+            );
+        }
+        Ok(host)
     }
 
     fn keychain(&self, secret: &KeychainSecret<'_>) -> Option<Result<KeychainAnswer, String>> {

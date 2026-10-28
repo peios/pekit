@@ -268,7 +268,7 @@ impl Ledger {
     fn put(root: &Path, bytes: u64, walked: u64) -> io::Result<()> {
         let temp = root
             .join("tmp")
-            .join(format!("size-{}", std::process::id()));
+            .join(format!("size-{}", crate::sweep::token()));
         fs::write(&temp, format!("{bytes} {walked}\n"))?;
         fs::rename(&temp, root.join("size"))
     }
@@ -302,11 +302,14 @@ fn journal(root: &Path, used: &Used) -> io::Result<()> {
         text.push_str(name);
         text.push('\n');
     }
-    let temp = dir.join(format!(".{}-{stamp}", std::process::id()));
+    let temp = dir.join(format!(".{}-{stamp}", crate::sweep::token()));
     let mut out = File::create(&temp)?;
     out.write_all(text.as_bytes())?;
     out.sync_all()?;
-    fs::rename(&temp, dir.join(format!("{}-{stamp}", std::process::id())))
+    fs::rename(
+        &temp,
+        dir.join(format!("{}-{stamp}", crate::sweep::token())),
+    )
 }
 
 /// [`evict`], its lock held exclusively.
@@ -329,8 +332,10 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
         Ledger::write(root, measured)?;
         return Ok(None);
     }
-    // No tree is known to be complete once a blob may be gone.
+    // No tree is known to be complete once a blob may be gone, and none
+    // materialised holds a link to one.
     store.forget_complete()?;
+    store.forget_materialised()?;
     let state_path = root.join("eviction.json");
     let mut state: Priorities = fs::read(&state_path)
         .ok()
@@ -378,7 +383,7 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     state.evicted.retain(|hex| records.contains_key(hex));
     let temp = root
         .join("tmp")
-        .join(format!("eviction-{}", std::process::id()));
+        .join(format!("eviction-{}", crate::sweep::token()));
     fs::write(&temp, serde_json::to_vec(&state).map_err(io::Error::other)?)?;
     fs::rename(&temp, &state_path)?;
     for journal in journals {

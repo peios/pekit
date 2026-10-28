@@ -171,6 +171,18 @@ made the first time they are needed, and each other path is a link to one
 (`Store::link_copy`): still a file of its own, but copied once, not in
 every step. No record names a copy, so an eviction removes them first.
 
+*Changed 2026-10-28 (Jack, PEI-1598).* A large tree a step is given or
+composes is mounted from the store, not linked into its staging directory
+(see `design/libraries.md`, L6a). What is put into the store of a
+directory that holds a mount point, a composition's or a writable tree a
+program changed, takes the mounted tree's digest unread. An eviction
+removes every materialised tree before it removes a blob. Temporary and
+staging names carry a random token of the process, never its process
+number, which another process sharing the store, in another PID namespace,
+may have too. What a killed build left in the store's `tmp/` and the
+scratch directory is removed by the next build that finds the store's lock
+free (see `sweep.rs`).
+
 **Retry and timeout.** A step's `#[retry]` and `#[timeout]` are the
 engine's: a retry reruns the step unit in a fresh sandbox, an
 infrastructure failure (the sandbox, the store, a lost job) retries

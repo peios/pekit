@@ -250,7 +250,7 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         ),
         ("n".to_owned(), Plain::Int(1)),
     ]);
-    let files = keep_files(&result, &store, &host).unwrap();
+    let files = keep_files(&result, &store, &host, &std::collections::HashMap::new()).unwrap();
     let kept = stored(&result, &files).unwrap();
     assert_eq!(kept.plain(), result);
     let [(path, Kept::File(entry))] = kept.files()[..] else {
@@ -278,7 +278,13 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         value: Box::new(Plain::Str("k3y".to_owned())),
     };
     let with_secret = Plain::List(vec![result.clone(), secret]);
-    let files = keep_files(&with_secret, &store, &host).unwrap();
+    let files = keep_files(
+        &with_secret,
+        &store,
+        &host,
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
     assert!(files.contains_key("/pekit-out/hello"));
     assert!(matches!(
         stored(&with_secret, &files),

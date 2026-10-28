@@ -87,7 +87,7 @@ pub fn unpack(
     let began = std::time::Instant::now();
     let fail = |reason: String| format!("`archive.unpack` could not unpack `{shown}`: {reason}");
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = scratch.join(format!("unpack-{}-{number}", std::process::id()));
+    let dir = scratch.join(format!("unpack-{}-{number}", crate::sweep::token()));
     remove_tree(&dir).map_err(|error| fail(error.to_string()))?;
     fs::create_dir_all(&dir).map_err(|error| fail(error.to_string()))?;
     let unpacked = extract(store, archive, strip, &dir)

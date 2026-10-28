@@ -171,3 +171,167 @@ fn a_file_a_composition_places_twice_is_a_link_to_a_copy_the_store_keeps() {
     assert_eq!(blob, fs::metadata(&staged).unwrap().ino());
     assert_ne!(blob, copy);
 }
+
+/// A tree of `count` files under `lib`, one named `dup` of the contents
+/// `x`, made at `at` and put into `store`: its digest.
+fn large_tree(store: &Store, at: &Path, count: u64) -> pekit::store::Digest {
+    fs::create_dir_all(at.join("lib")).unwrap();
+    for number in 0..count {
+        fs::write(at.join(format!("lib/f{number}")), format!("{number}")).unwrap();
+    }
+    fs::write(at.join("dup"), "x").unwrap();
+    store.put_tree(at).unwrap()
+}
+
+/// The words of `command`, as text.
+fn words(command: &Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn a_large_given_directory_is_mounted_from_its_materialised_tree() {
+    use std::collections::HashMap;
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    let large = large_tree(&store, &dir.0.path().join("large"), 70);
+    let small = large_tree(&store, &dir.0.path().join("small"), 3);
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s")
+        .unwrap()
+        .with_contexts(HashMap::new(), store.clone());
+    sandbox.stage(&store, "/w/large", Kept::Dir(large)).unwrap();
+    sandbox.stage(&store, "/w/small", Kept::Dir(small)).unwrap();
+    // The large one is its materialised tree, on an empty directory; the
+    // small one linked file by file.
+    let tree = store.trees_root().join(large.hex());
+    assert_eq!(
+        sandbox.host_path("/w/large/lib/f3").unwrap(),
+        tree.join("lib/f3")
+    );
+    let point = dir.0.path().join("stage/w/large");
+    assert_eq!(fs::read_dir(&point).unwrap().count(), 0);
+    assert_eq!(sandbox.mounted(), HashMap::from([(point.clone(), large)]));
+    assert_eq!(sandbox.contents(&point), Some(tree.clone()));
+    assert!(
+        sandbox
+            .host_path("/w/small/lib/f1")
+            .unwrap()
+            .starts_with(dir.0.path().join("stage"))
+    );
+    // Its programs see it read-only.
+    let command = sandbox.command(Command::new("true")).unwrap();
+    let words = words(&command);
+    let bound = words.windows(3).any(|three| {
+        three[0] == "--ro-bind" && three[1] == tree.to_str().unwrap() && three[2] == "/w/large"
+    });
+    assert!(bound, "{words:?}");
+    // GCSL changes nothing of it, which every step shares.
+    for path in ["/w/large/new", "/w/large/lib/f1", "/w/small/lib/f1"] {
+        assert!(sandbox.write_path(path).is_err(), "{path}");
+    }
+    assert!(sandbox.write_path("/pekit-out/t/s/new").is_ok());
+    // Kept as its tree, unread.
+    let result = gcsl::eval::plain::Plain::Dir {
+        path: "/w/large".to_owned(),
+        identity: None,
+    };
+    let host = |path: &str| sandbox.host_path(path).unwrap();
+    let kept = pekit::record::keep_files(&result, &store, &host, &sandbox.mounted()).unwrap();
+    assert_eq!(kept["/w/large"], Kept::Dir(large));
+}
+
+#[test]
+fn a_composition_mounts_a_large_tree_and_a_sandbox_of_it_nests_an_overlay() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    let busybox = Path::new("/usr/bin/busybox");
+    if !busybox.exists() {
+        eprintln!("skipped: no static busybox on this host");
+        return;
+    }
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    let large = large_tree(&store, &dir.0.path().join("large"), 70);
+    fs::write(dir.0.path().join("x"), "x").unwrap();
+    let dup = store.put_file(&dir.0.path().join("x")).unwrap();
+    let shell = store.put_file(busybox).unwrap();
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s")
+        .unwrap()
+        .with_contexts(HashMap::new(), store.clone());
+    sandbox.stage(&store, "/w/large", Kept::Dir(large)).unwrap();
+    sandbox.stage(&store, "/w/x", Kept::File(dup)).unwrap();
+    sandbox
+        .stage(&store, "/w/busybox", Kept::File(shell))
+        .unwrap();
+    // A composition of busybox, `x` and the large tree.
+    let composed = sandbox.temp_dir().unwrap().unwrap();
+    let at = sandbox.host_path(&composed).unwrap();
+    fs::create_dir_all(at.join("bin")).unwrap();
+    fs::create_dir_all(at.join("opt")).unwrap();
+    let host = |path: &str| sandbox.host_path(path).unwrap();
+    sandbox
+        .place_file(&host("/w/busybox"), &at.join("bin/busybox"))
+        .unwrap();
+    std::os::unix::fs::symlink("busybox", at.join("bin/sh")).unwrap();
+    sandbox.place_file(&host("/w/x"), &at.join("dup")).unwrap();
+    let source = host("/w/large");
+    assert!(matches!(
+        sandbox.place_tree(&source, &at.join("opt/large")),
+        Some(Ok(()))
+    ));
+    // A tree that is no tree of the store is GCSL's to place.
+    assert!(
+        sandbox
+            .place_tree(&dir.0.path().join("large"), &at.join("other"))
+            .is_none()
+    );
+    sandbox.composed(&composed);
+    // The tree is mounted, an instance whose `dup` is no file the
+    // composition has already.
+    let mounted = host(&format!("{composed}/opt/large/dup"));
+    assert!(mounted.starts_with(store.trees_root()));
+    assert_ne!(
+        fs::metadata(&mounted).unwrap().ino(),
+        fs::metadata(at.join("dup")).unwrap().ino()
+    );
+    assert_eq!(fs::read_to_string(&mounted).unwrap(), "x");
+    // Kept as the tree of the same files copied would be.
+    let copied = dir.0.path().join("copied");
+    fs::create_dir_all(copied.join("bin")).unwrap();
+    fs::copy(busybox, copied.join("bin/busybox")).unwrap();
+    std::os::unix::fs::symlink("busybox", copied.join("bin/sh")).unwrap();
+    fs::write(copied.join("dup"), "x").unwrap();
+    store.copy_tree(&large, &copied.join("opt/large")).unwrap();
+    let result = gcsl::eval::plain::Plain::Dir {
+        path: composed.clone(),
+        identity: None,
+    };
+    let kept = pekit::record::keep_files(&result, &store, &host, &sandbox.mounted()).unwrap();
+    assert_eq!(kept[&composed], Kept::Dir(store.put_tree(&copied).unwrap()));
+    // A sandbox of it: the tree an overlay of its own, which a program
+    // writes in, the tree unchanged, but its mount point stays.
+    let root = sandbox.temp_dir().unwrap().unwrap();
+    assert_eq!(sandbox.make_sandbox(&composed, &root), Some(Ok(())));
+    let script = "cat /opt/large/dup && echo new > /opt/large/new && echo top > /top";
+    assert!(run_in(&sandbox, &root, script));
+    assert!(!run_in(&sandbox, &root, "busybox mv /opt/large /opt/gone"));
+    let read = |path: &str| fs::read_to_string(host(&format!("{root}{path}")));
+    assert_eq!(read("/opt/large/new").unwrap(), "new\n");
+    assert_eq!(read("/opt/large/lib/f5").unwrap(), "5");
+    assert_eq!(read("/top").unwrap(), "top\n");
+    assert!(!store.trees_root().join(large.hex()).join("new").exists());
+    // A directory that holds the mount point shows what the overlay does.
+    let opt = host(&format!("{root}/opt/large"));
+    assert!(opt.join("new").exists() && opt.join("lib/f69").exists());
+    let parent = host(&format!("{root}/opt"));
+    assert!(parent.join("large/new").exists() && parent.join("large/dup").exists());
+    // GCSL writes in the sandbox's layers, never the tree.
+    let written = sandbox
+        .write_path(&format!("{root}/opt/large/lib/g"))
+        .unwrap();
+    assert!(!written.starts_with(store.trees_root()));
+    fs::write(&written, "g").unwrap();
+    assert_eq!(read("/opt/large/lib/g").unwrap(), "g");
+}

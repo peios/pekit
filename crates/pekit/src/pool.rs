@@ -287,7 +287,7 @@ fn stage(sandbox: &StepSandbox, given: &[(String, Kept)], store: &Store) -> Perf
 /// sandbox is `sandbox` ([`Work::Keep`]): its outcome `plain` again.
 fn keep(plain: Plain, sandbox: &StepSandbox, store: &Store) -> Performed {
     let host = |path: &str| sandbox.host_path(path).unwrap_or_default();
-    let kept = keep_files(&plain, store, &host);
+    let kept = keep_files(&plain, store, &host, &sandbox.mounted());
     (Ok(plain), Vec::new(), Done::Kept(kept))
 }
 

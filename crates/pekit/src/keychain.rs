@@ -71,7 +71,7 @@ impl Keychain {
         if !path.exists() {
             let mut key = [0; 32];
             fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
-            let made = state.join(format!(".{KEY_FILE}.{}", std::process::id()));
+            let made = state.join(format!(".{KEY_FILE}.{}", crate::sweep::token()));
             fs::OpenOptions::new()
                 .write(true)
                 .create(true)

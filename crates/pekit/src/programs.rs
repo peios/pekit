@@ -170,8 +170,10 @@ pub fn perform_program(
 fn captured(sandbox: &StepSandbox, store: &Store) -> Option<(Digest, Digest)> {
     let (own, tmp) = sandbox.writable().ok()?;
     let sealed = sandbox.sealed();
+    let mounted = sandbox.mounted();
     let mut seen = sandbox.seen()?;
     seen.fix(sealed);
+    seen.mount(mounted);
     let own = store.put_tree_seen(&own, &mut seen, &unkeepable).ok()??;
     let tmp = store.put_tree_seen(&tmp, &mut seen, &unkeepable).ok()??;
     Some((own, tmp))
@@ -195,11 +197,12 @@ fn replay(
         return Ok(false);
     };
     let mut placing = Vec::new();
+    let mounted = sandbox.mounted();
     for (path, before, after) in [(&own, now.0, found.own), (&tmp, now.1, found.tmp)] {
         if before == after {
             continue;
         }
-        if let Ok(beside) = placed_beside(store, path, &after) {
+        if let Ok(beside) = placed_beside(store, path, (&after, &mounted)) {
             placing.push((path.clone(), beside));
         } else {
             for (_, beside) in &placing {
@@ -231,18 +234,27 @@ fn replay(
 }
 
 /// The tree `tree` from `store`, copied beside `path`, under a name of its
-/// own: where it is.
+/// own, but each mount point of `mounted` under `path`, by where it is, of
+/// its tree, left empty for it to be mounted on again: where it is.
 ///
 /// # Errors
 ///
 /// That the store lacks something of it, or it cannot be written.
-fn placed_beside(store: &Store, path: &Path, tree: &Digest) -> io::Result<PathBuf> {
+fn placed_beside(
+    store: &Store,
+    path: &Path,
+    (tree, mounted): (&Digest, &HashMap<PathBuf, Digest>),
+) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-    let beside = path.with_file_name(format!(".{name}.replay-{}", std::process::id()));
+    let beside = path.with_file_name(format!(".{name}.replay-{}", crate::sweep::token()));
     remove_tree(&beside)?;
-    if let Err(error) = store.copy_tree(tree, &beside) {
+    let mounted: HashMap<PathBuf, Digest> = mounted
+        .iter()
+        .filter_map(|(point, digest)| Some((beside.join(point.strip_prefix(path).ok()?), *digest)))
+        .collect();
+    if let Err(error) = store.copy_tree_mounted(tree, &beside, &mounted) {
         let _ = remove_tree(&beside);
         return Err(error);
     }

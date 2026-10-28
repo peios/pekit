@@ -88,17 +88,20 @@ pub enum StoreError {
 }
 
 /// Puts every file and directory `plain`, a step's result, names into
-/// `store`, from where `host` says each is on the host's file system: what
-/// the store keeps of each, by its path (see [Records](#records)).
+/// `store`, from where `host` says each is on the host's file system, the
+/// tree mounted on each of the step's mount points, `mounted` by where it
+/// is, unread: what the store keeps of each, by its path (see
+/// [Records](#records)).
 ///
 /// # Errors
 ///
 /// A file or directory it names that cannot be read: one the step did not
 /// make, say.
-pub fn keep_files(
+pub fn keep_files<S: BuildHasher>(
     plain: &Plain,
     store: &Store,
     host: &dyn Fn(&str) -> PathBuf,
+    mounted: &HashMap<PathBuf, Digest, S>,
 ) -> Result<HashMap<String, Kept>, StoreError> {
     let mut kept = HashMap::new();
     for (path, dir) in plain.files() {
@@ -111,9 +114,9 @@ pub fn keep_files(
             error,
         };
         let entry = if dir {
-            Kept::Dir(store.put_tree(&at).map_err(io)?)
+            Kept::Dir(store.put_tree_mounted(&at, mounted).map_err(io)?)
         } else {
-            Kept::File(store.put_file(&at).map_err(io)?)
+            Kept::File(store.put_file_known(&at).map_err(io)?)
         };
         kept.insert(path.to_owned(), entry);
     }

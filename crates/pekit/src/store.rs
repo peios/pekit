@@ -30,7 +30,11 @@
 //! - `complete/` marks each tree found to have every content it names, at
 //!   any depth, by its digest, so that a record's tree is walked for that
 //!   once, not in every build that finds the record ([`Store::holds_tree`]).
-//!   An eviction removes every mark before it removes a blob.
+//!   An eviction removes every mark before it removes a blob;
+//! - `trees/` holds trees made once as directories, of links to their
+//!   blobs, for steps to mount (see [Materialised
+//!   trees](trees#materialised-trees)), which an eviction removes before
+//!   it removes a blob too.
 //!
 //! A file is put into the store by hashing it as it is copied ([`Store::put_file`]),
 //! and taken out by a hard link to its blob, or a copy where a link cannot
@@ -62,6 +66,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+
+pub mod trees;
 
 /// What a file was when it was put into the store (see [Trees seen
 /// before](#trees-seen-before)): its device and inode, size, mode, and the
@@ -107,6 +113,11 @@ pub struct Seen {
     /// The digest of each of them put, by its path.
     #[serde(skip)]
     dirs: HashMap<PathBuf, Digest>,
+    /// The digest of the tree mounted on each mount point, by where it is,
+    /// which a walk does not read (see [Materialised
+    /// trees](trees#materialised-trees)).
+    #[serde(skip)]
+    mounted: HashMap<PathBuf, Digest>,
 }
 
 impl Seen {
@@ -125,6 +136,12 @@ impl Seen {
     pub fn changed(&mut self) {
         self.dirs.clear();
     }
+
+    /// Says that the tree of each digest of `mounted` is mounted on the
+    /// mount point it is by.
+    pub fn mount(&mut self, mounted: HashMap<PathBuf, Digest>) {
+        self.mounted = mounted;
+    }
 }
 
 /// Now, as the clock of the file system `path` is on tells it, as coarsely
@@ -135,7 +152,7 @@ impl Seen {
 ///
 /// That no file can be made beside it.
 pub fn clock_beside(path: &Path) -> io::Result<(i64, i64)> {
-    let probe = path.with_file_name(format!(".pekit-probe-{}", std::process::id()));
+    let probe = path.with_file_name(format!(".pekit-probe-{}", crate::sweep::token()));
     File::create(&probe)?;
     let now = fs::symlink_metadata(&probe).map(|meta| (meta.ctime(), meta.ctime_nsec()));
     fs::remove_file(&probe)?;
@@ -325,6 +342,9 @@ pub struct Store {
     /// Each tree this process found it holds every content of: nothing is
     /// evicted while a process has the store open.
     complete: Arc<Mutex<HashSet<Digest>>>,
+    /// What it knows of the materialised trees (see [Materialised
+    /// trees](trees#materialised-trees)).
+    materialised: Arc<Mutex<trees::Materialised>>,
 }
 
 /// How a tree was found complete (see [`Store::holds_tree`]).
@@ -371,6 +391,7 @@ impl Store {
             used: Arc::default(),
             trees: Arc::default(),
             complete: Arc::default(),
+            materialised: Arc::default(),
         })
     }
 
@@ -506,7 +527,7 @@ impl Store {
         let number = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         self.root
             .join("tmp")
-            .join(format!("{}-{number}", std::process::id()))
+            .join(format!("{}-{number}", crate::sweep::token()))
     }
 
     /// Puts the file at `path`, read, into the store, hashing it as it is
@@ -518,6 +539,19 @@ impl Store {
     pub fn put_file(&self, path: &Path) -> io::Result<FileEntry> {
         let executable = fs::metadata(path)?.permissions().mode() & 0o111 != 0;
         self.put_reader(&mut File::open(path)?, executable)
+    }
+
+    /// [`Store::put_file`], a file of a materialised tree not read, but
+    /// taken as its tree has it.
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be read, or the store written.
+    pub fn put_file_known(&self, path: &Path) -> io::Result<FileEntry> {
+        match self.file_in(path) {
+            Some((entry, _)) => Ok(entry),
+            None => self.put_file(path),
+        }
     }
 
     /// Puts what `source` reads into the store as a blob, executable if
@@ -777,6 +811,26 @@ impl Store {
     /// That something under it cannot be read, a name is not UTF-8, or the
     /// store cannot be written.
     pub fn put_tree(&self, path: &Path) -> io::Result<Digest> {
+        self.put_tree_mounted(path, &HashMap::new())
+    }
+
+    /// [`Store::put_tree`], neither a directory that is a mount point of
+    /// `mounted`, by where it is, nor one of a materialised tree, read, but
+    /// its tree's digest taken (see [Materialised
+    /// trees](trees#materialised-trees)).
+    ///
+    /// # Errors
+    ///
+    /// That something under it cannot be read, a name is not UTF-8, or the
+    /// store cannot be written.
+    pub fn put_tree_mounted<S: std::hash::BuildHasher>(
+        &self,
+        path: &Path,
+        mounted: &HashMap<PathBuf, Digest, S>,
+    ) -> io::Result<Digest> {
+        if let Some(digest) = mounted.get(path).copied().or_else(|| self.tree_in(path)) {
+            return Ok(digest);
+        }
         let mut entries = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
@@ -791,12 +845,12 @@ impl Store {
             } else if kind.is_dir() {
                 TreeEntry::Dir {
                     name,
-                    tree: self.put_tree(&at)?,
+                    tree: self.put_tree_mounted(&at, mounted)?,
                 }
             } else {
                 TreeEntry::File {
                     name,
-                    file: self.put_file(&at)?,
+                    file: self.put_file_known(&at)?,
                 }
             });
         }
@@ -860,7 +914,7 @@ impl Store {
                 let target = fs::read_link(&at)?.to_string_lossy().into_owned();
                 TreeEntry::Link { name, target }
             } else if kind.is_dir() {
-                if let Some(tree) = walk.seen.dirs.get(&at) {
+                if let Some(tree) = walk.seen.mounted.get(&at).or(walk.seen.dirs.get(&at)) {
                     TreeEntry::Dir { name, tree: *tree }
                 } else {
                     if (walk.refuse)(&at, &meta) {
@@ -1155,11 +1209,32 @@ impl Store {
     ///
     /// That the store does not hold it, or `at` cannot be written.
     pub fn copy_tree(&self, digest: &Digest, at: &Path) -> io::Result<()> {
+        self.copy_tree_mounted(digest, at, &HashMap::new())
+    }
+
+    /// [`Store::copy_tree`], but each directory that is a mount point of
+    /// `mounted`, by where it is, of its tree, made empty, for its tree to
+    /// be mounted on it again.
+    ///
+    /// # Errors
+    ///
+    /// That the store does not hold it, or `at` cannot be written.
+    pub fn copy_tree_mounted<S: std::hash::BuildHasher>(
+        &self,
+        digest: &Digest,
+        at: &Path,
+        mounted: &HashMap<PathBuf, Digest, S>,
+    ) -> io::Result<()> {
         fs::create_dir_all(at)?;
+        if mounted.get(at) == Some(digest) {
+            return Ok(());
+        }
         for entry in self.read_tree(digest)?.entries {
             match entry {
                 TreeEntry::File { name, file } => self.copy_file(&file, &at.join(name))?,
-                TreeEntry::Dir { name, tree } => self.copy_tree(&tree, &at.join(name))?,
+                TreeEntry::Dir { name, tree } => {
+                    self.copy_tree_mounted(&tree, &at.join(name), mounted)?;
+                }
                 TreeEntry::Link { name, target } => symlink(target, at.join(name))?,
             }
         }

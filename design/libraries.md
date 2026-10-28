@@ -134,6 +134,24 @@ upper layer of the step's own; reading a file or directory of it reads the
 upper layer over the lower. GCSL gains the `Effects` hooks for both, with
 copying as the default.
 
+*Changed 2026-10-28 (Jack, PEI-1598).* Hard-linking still cost every compile
+of authd two farms of 17,000 links, one staging the toolchain and one
+composing it, and as many removals: a third of the pool's time. A tree of
+64 files or more is now *materialised* once in the store (`trees/`, see
+`store/trees.rs`) and mounted read-only, both where a step is given it and
+where a composition places it whole. GCSL's composer defers a directory it
+places until nothing else can be placed in it, then offers it to the host
+whole (`Effects::place_tree`), and finds what a mounted one holds where the
+host says (`Effects::contents`). A sandbox of a composition is an overlay of
+its skeleton with an overlay of its own nested on each mount, its upper
+layer in the step's outputs, so a command still writes anywhere in it. It
+can't move or remove a mount point, though, where a copy would let it. A
+composition still has no two files that are one: a tree whose contents it
+holds already is mounted as an instance of it whose files link later
+copies. GCSL code in a step can't write into the store through a mount
+(`Effects::write_path`). A sandbox's copy is now a copy, never a link, so
+that a program can't change a blob through it.
+
 ### L6. The host snapshot answers for the host's own tools
 
 A workspace that registers no toolchain gets `system_c`, whose files are

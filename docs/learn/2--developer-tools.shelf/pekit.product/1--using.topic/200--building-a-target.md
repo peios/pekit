@@ -33,6 +33,16 @@ gives `working_dir().file("main.o")`. A relative path such as
 `file("main.c")` is never in it: it's resolved against the directory of
 the file it's written in, the way it would be anywhere else.
 
+A step can't change what it's given. Its programs see its inputs
+read-only, and `fs.write`, `fs.mkdir`, `fs.copy` and `fs.set_executable`
+refuse a path in one, or in a directory the step composed once
+`fs.compose` has made it. A `Dir.sandbox` of something a step composed
+is its own to change: its programs can write anywhere in it, and nothing
+they write reaches the inputs. A large directory the composition placed
+whole, such as a toolchain, is mounted, though, so a program can write
+inside it but can't move or remove the directory itself: it gets "Device
+or resource busy".
+
 Steps that don't depend on each other run at the same time. `--jobs 4`
 runs at most four programs at once. By default pekit runs as many as the
 machine has processors. In a terminal, a line shows the steps running and

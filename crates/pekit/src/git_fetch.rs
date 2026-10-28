@@ -133,7 +133,7 @@ pub fn fetch_git(
         }
     }
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = scratch.join(format!("git-{}-{number}", std::process::id()));
+    let dir = scratch.join(format!("git-{}-{number}", crate::sweep::token()));
     let tree = checked_out(store, &repo, (&pin, &dir)).map_err(fail);
     let _ = remove_tree(&dir);
     let _ = fs::remove_file(dir.with_extension("index"));

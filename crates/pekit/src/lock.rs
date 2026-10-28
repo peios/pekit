@@ -161,7 +161,7 @@ impl Lock {
         let mut text =
             serde_json::to_string_pretty(self).map_err(|error| LockError::Io(error.to_string()))?;
         text.push('\n');
-        let temp = root.join(format!(".{LOCK_FILE}.{}", std::process::id()));
+        let temp = root.join(format!(".{LOCK_FILE}.{}", crate::sweep::token()));
         fs::write(&temp, text).map_err(|error| io_error(&temp, &error))?;
         fs::rename(&temp, &path).map_err(|error| io_error(&path, &error))
     }
@@ -427,7 +427,7 @@ fn export(root: &Path, cache: &Path, pin: &Pinned) -> Result<(), LockError> {
         ".{}.{}",
         dir.file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
-        std::process::id()
+        crate::sweep::token()
     ));
     if temp.exists() {
         remove_tree(&temp).map_err(|error| io_error(&temp, &error))?;

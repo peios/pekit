@@ -275,3 +275,62 @@ fn a_blob_s_copies_are_counted_in_the_store_and_evicted_as_unnamed() {
     assert_eq!(copies(), 0);
     assert_eq!(fs::read_to_string(made.join("b")).unwrap(), big);
 }
+
+#[test]
+fn an_eviction_removes_every_materialised_tree_before_any_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    let tree = dir.path().join("tree");
+    write(&tree, &[("a", &"x".repeat(1 << 20))]);
+    let digest = store.put_tree(&tree).unwrap();
+    let materialised = store.materialised(&digest, &[]).unwrap();
+    // An eviction that need evict nothing leaves it.
+    ledger(dir.path(), 0, 0);
+    pekit::evict::evict(&store, &store.used(), 64 << 20).unwrap();
+    assert!(materialised.is_dir());
+    ledger(dir.path(), 0, 2 * 86_400);
+    pekit::evict::evict(&store, &store.used(), 1).unwrap();
+    assert!(!store.trees_root().exists());
+}
+
+#[test]
+fn what_a_killed_build_left_is_swept_once_no_other_process_has_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    let scratch = dir.path().join("scratch");
+    let own = pekit::sweep::token();
+    assert_eq!(own.len(), 16);
+    let tmp = dir.path().join("store/tmp");
+    write(
+        dir.path(),
+        &[
+            ("store/tmp/0123456789abcdef-3", "left"),
+            (&format!("store/tmp/{own}-4"), "mine"),
+            ("scratch/step-0123456789abcdef-1-0/w/a", "left"),
+            ("scratch/swept-0123456789abcdef-2/a", "left"),
+            (&format!("scratch/step-{own}-1-0/w/a"), "mine"),
+            ("scratch/named/a", "a step's scratch directory"),
+        ],
+    );
+    // Not while another process has the store open.
+    let other = Store::open(store.root()).unwrap();
+    assert!(!pekit::sweep::sweep_stale(&store, &scratch).unwrap());
+    assert!(tmp.join("0123456789abcdef-3").exists());
+    drop(other);
+    assert!(pekit::sweep::sweep_stale(&store, &scratch).unwrap());
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&tmp), [format!("{own}-4")]);
+    assert_eq!(
+        names(&scratch),
+        ["named".to_owned(), format!("step-{own}-1-0")]
+    );
+    // The store is held shared again, as every process holds it.
+    assert!(Store::open(store.root()).is_ok());
+}
