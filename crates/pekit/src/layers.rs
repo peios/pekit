@@ -66,6 +66,10 @@ struct Known {
     /// a link to: GCSL makes one composition at a time, and ends each by
     /// sealing it.
     placing: HashSet<(u64, u64)>,
+    /// The files placed since the last composition was sealed that a
+    /// program could write, each with its mode: what sealing the next makes
+    /// read-only.
+    writable: Vec<(PathBuf, u32)>,
 }
 
 /// A step's compositions and sandboxes (see [Compositions and
@@ -222,26 +226,50 @@ impl Layers {
     ///
     /// That it could not be placed.
     pub fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {
+        let meta = fs::metadata(source)?;
         if self.is_unchanging(source) {
-            let meta = fs::metadata(source)?;
             let first = self.known().placing.insert((meta.dev(), meta.ino()));
             if first && fs::hard_link(source, target).is_ok() {
+                self.note_mode(target, meta.permissions().mode());
                 return Ok(());
             }
         }
-        fs::copy(source, target).map(|_| ())
+        fs::copy(source, target)?;
+        // A copy has its source's mode.
+        self.note_mode(target, meta.permissions().mode());
+        Ok(())
+    }
+
+    /// Notes the file at `target`, of mode `mode`, for sealing, if a
+    /// program could write it.
+    fn note_mode(&self, target: &Path, mode: u32) {
+        if mode & 0o222 != 0 {
+            self.known().writable.push((target.to_path_buf(), mode));
+        }
     }
 
     /// Seals the finished composition at `root`, as GCSL code names it, at
-    /// `host` on the host.
+    /// `host` on the host: makes each file placed in it that a program
+    /// could write read-only. Every file of it was placed
+    /// ([`Layers::place_file`]), but its symbolic links.
     ///
     /// # Errors
     ///
-    /// That it could not be made read-only.
+    /// That one could not be made read-only.
     pub fn composed(&self, root: &str, host: &Path) -> io::Result<()> {
-        // The next composition links each file anew.
-        self.known().placing.clear();
-        seal(host)?;
+        let writable = {
+            let mut known = self.known();
+            // The next composition links each file anew.
+            known.placing.clear();
+            std::mem::take(&mut known.writable)
+        };
+        // What was placed elsewhere, as a sandbox's copy is, is no part of
+        // it.
+        for (path, mode) in writable {
+            if within(&path, host) {
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode & !0o222))?;
+            }
+        }
         self.known()
             .sealed
             .push((root.to_owned(), host.to_path_buf()));

@@ -119,11 +119,18 @@ fn a_composition_links_what_nothing_changes_and_is_sealed() {
         fs::metadata(&made).unwrap().ino(),
         fs::metadata(at.join("made")).unwrap().ino()
     );
+    // A copy placed elsewhere, as a sandbox's copy is, is no part of it.
+    let elsewhere = sandbox
+        .host_path(&sandbox.temp_dir().unwrap().unwrap())
+        .unwrap();
+    sandbox.place_file(&made, &elsewhere.join("made")).unwrap();
     // Sealed: none of its files can be changed, the linked blob least of
     // all, and a sandbox of it is an overlay.
     sandbox.composed(&composed);
     assert!(fs::write(at.join("x"), "changed").is_err());
     assert!(fs::write(at.join("made"), "changed").is_err());
+    assert!(fs::write(at.join("again"), "changed").is_err());
+    fs::write(elsewhere.join("made"), "changed").unwrap();
     assert_eq!(fs::read_to_string(&staged).unwrap(), "x");
     let root = sandbox.temp_dir().unwrap().unwrap();
     assert_eq!(sandbox.make_sandbox(&composed, &root), Some(Ok(())));

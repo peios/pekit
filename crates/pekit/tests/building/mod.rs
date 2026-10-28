@@ -32,6 +32,8 @@ pub struct Options<'a> {
     pub reuse: Reuse,
     /// How large the store may be as it ends, if it has a limit.
     pub cache_limit: Option<u64>,
+    /// Which outputs it writes under `pekit-out/`.
+    pub exposing: Exposing,
 }
 
 impl Default for Options<'_> {
@@ -42,6 +44,7 @@ impl Default for Options<'_> {
             strict: false,
             reuse: Reuse::Store,
             cache_limit: None,
+            exposing: Exposing::AsNeeded,
         }
     }
 }
@@ -90,6 +93,7 @@ pub fn observed_with(
         strict,
         reuse,
         cache_limit,
+        exposing,
     }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
     let arch = arch.to_owned();
@@ -112,6 +116,7 @@ pub fn observed_with(
             let mut settings = settings(&root, &state, (&arch, &profile));
             settings.reuse = reuse;
             settings.cache_limit = cache_limit;
+            settings.exposing = exposing;
             if strict {
                 settings.strict = true;
                 settings.host_tools = HostTools::default();

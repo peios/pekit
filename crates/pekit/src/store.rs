@@ -287,14 +287,24 @@ pub struct Tree {
 /// The number of the next temporary file this process writes.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+/// The blobs a process linked a file to.
+#[derive(Debug, Default)]
+struct Linked {
+    /// Each, by the device and inode it shares with every link.
+    nodes: HashMap<(u64, u64), FileEntry>,
+    /// Each, by its contents and mode: those whose device and inode are
+    /// known already.
+    entries: HashSet<FileEntry>,
+}
+
 /// A content store (see [The store](#the-store)).
 #[derive(Clone, Debug)]
 pub struct Store {
     /// Its directory.
     root: PathBuf,
-    /// Each blob this process linked a file to, by the device and inode it
-    /// shares with every link (see [Trees seen before](#trees-seen-before)).
-    linked: Arc<Mutex<HashMap<(u64, u64), FileEntry>>>,
+    /// Each blob this process linked a file to (see [Trees seen
+    /// before](#trees-seen-before)).
+    linked: Arc<Mutex<Linked>>,
     /// Its lock, held shared for as long as it is open, which an eviction
     /// takes exclusively (see `crate::evict`).
     held: Arc<File>,
@@ -622,19 +632,41 @@ impl Store {
     /// link to its blob if `link` and one can be made, else a read-only copy
     /// of its own.
     fn materialise_as(&self, entry: &FileEntry, at: &Path, link: bool) -> io::Result<()> {
+        // At once, if its blob and `at`'s directory are there, as they are
+        // for every file of a tree but the first of its directory.
+        if link {
+            let blob = self.blob_path(&entry.digest, entry.executable);
+            if fs::hard_link(&blob, at).is_ok() {
+                self.note_linked(entry, &blob);
+                return Ok(());
+            }
+        }
         let blob = self.blob_of_mode(entry)?;
         if let Some(parent) = at.parent() {
             fs::create_dir_all(parent)?;
         }
         if link && fs::hard_link(&blob, at).is_ok() {
-            if let (Ok(meta), Ok(mut linked)) = (fs::metadata(&blob), self.linked.lock()) {
-                linked.insert((meta.dev(), meta.ino()), *entry);
-            }
+            self.note_linked(entry, &blob);
             return Ok(());
         }
         fs::copy(&blob, at)?;
         let mode = if entry.executable { 0o555 } else { 0o444 };
         fs::set_permissions(at, fs::Permissions::from_mode(mode))
+    }
+
+    /// Notes that a file was linked to `blob`, the blob of `entry`, unless
+    /// its device and inode are known already.
+    fn note_linked(&self, entry: &FileEntry, blob: &Path) {
+        let Ok(mut linked) = self.linked.lock() else {
+            return;
+        };
+        if linked.entries.contains(entry) {
+            return;
+        }
+        if let Ok(meta) = fs::metadata(blob) {
+            linked.nodes.insert((meta.dev(), meta.ino()), *entry);
+            linked.entries.insert(*entry);
+        }
     }
 
     /// Makes the file `entry` at `at`, a path that does not exist, as a copy
@@ -851,7 +883,7 @@ impl Store {
             return None;
         }
         let node = (meta.dev(), meta.ino());
-        let entry = *self.linked.lock().ok()?.get(&node)?;
+        let entry = *self.linked.lock().ok()?.nodes.get(&node)?;
         let blob = fs::metadata(self.blob_path(&entry.digest, entry.executable)).ok()?;
         ((blob.dev(), blob.ino()) == node).then_some(entry)
     }

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gcsl::eval::plain::Plain;
+use pekit::exposure::Exposing;
 use pekit::store::Store;
 
 use building::{Options, build_in, observed_with};
@@ -643,7 +644,15 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
         ),
     ] {
         let dir = example(n, PINNED);
-        let built = build_in(dir.path(), state.path(), target).unwrap();
+        // Every output written, as `pekit run` writes them, so that a
+        // step's library can be looked at.
+        let options = Options {
+            exposing: Exposing::All,
+            ..Options::default()
+        };
+        let built = observed_with(dir.path(), state.path(), target, options)
+            .0
+            .unwrap();
         let program = file_of(&built.value, None);
         assert_eq!(run(dir.path(), program), prints, "example {n}");
         assert!(

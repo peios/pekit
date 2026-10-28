@@ -57,11 +57,14 @@ fn a_step_runs_once_and_is_then_found_in_the_store() {
     let changed = build_in(dir.path(), state.path(), "hello").unwrap();
     assert_eq!((changed.ran, changed.cached), (1, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "THERE\n");
-    // No staging directory is left behind.
+    // No staging directory is left behind, nor one renamed to be removed.
     let left: Vec<_> = fs::read_dir(state.path().join("scratch"))
         .unwrap()
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("step-"))
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with("step-") || name.starts_with("swept-")
+        })
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }

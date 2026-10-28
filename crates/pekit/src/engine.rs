@@ -81,6 +81,7 @@ use crate::record::{
 use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
+use crate::sweep::Sweeper;
 use crate::target::Target;
 
 mod programs;
@@ -609,6 +610,11 @@ fn build_roots(
         };
         outcomes.push(outcome);
     }
+    run.sweeper.finish().map_err(|error| {
+        engine(&format!(
+            "cannot remove a step's staging directory: {error}"
+        ))
+    })?;
     // A stamp cache that can't be kept is a workspace read again next time.
     let _ = keep_workspace_stamps(&run.store, &run.loaded.root, &run.workspace_seen.0);
     let evicted = settings.cache_limit.map(|limit| {
@@ -725,6 +731,11 @@ fn new_run<'a>(
         flaky: Vec::new(),
         reports: Vec::new(),
         mismatches: Vec::new(),
+        sweeper: Sweeper::new(
+            settings
+                .scratch
+                .join(format!("swept-{}", std::process::id())),
+        ),
     })
 }
 
@@ -1122,6 +1133,9 @@ struct Run<'a> {
     /// The outputs yet to be put under the output directory (see
     /// [Exposure](crate::exposure#exposure)).
     exposures: Exposures,
+    /// What removes each step's staging directory once it is done (see
+    /// [Sweeping](crate::sweep#sweeping)).
+    sweeper: Sweeper,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -2406,12 +2420,9 @@ impl Run<'_> {
 
     /// Removes the staging directory of the step `step`, the node `id`, once
     /// it is done with.
-    fn unstage(&self, id: NodeId, step: &StepRun) -> Result<(), BuildError> {
+    fn unstage(&mut self, id: NodeId, step: &StepRun) -> Result<(), BuildError> {
         let stage = self.stage_dir(id, step.attempt);
-        if stage.exists() {
-            remove_tree(&stage).map_err(|error| engine(&error))?;
-        }
-        Ok(())
+        self.sweeper.remove(&stage).map_err(|error| engine(&error))
     }
 
     /// What the store keeps of the input at `path`, a file or, if `dir`, a

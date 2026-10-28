@@ -29,6 +29,7 @@ pub mod release;
 pub mod sandbox;
 pub mod scratch;
 pub mod store;
+pub mod sweep;
 pub mod target;
 pub mod trace;
 pub mod unpack;
