@@ -30,11 +30,12 @@ warning: step `NAME` passed only when it was run again: it is flaky
 ## Timeouts
 
 A step's `#[timeout(limit)]` is a deadline for all its attempts together,
-from the start of its first attempt. The time the pool spends staging an
-attempt's sandbox doesn't count: the deadline starts once the first
-attempt is staged. When the deadline passes, the running program is
-stopped, and the step fails with "the step timed out", at the program it
-was running. A timed-out step isn't retried.
+from the start of its first attempt. The time the pool spends staging each
+attempt's sandbox doesn't count: the deadline moves on by that time. When
+the deadline passes, the running program is stopped, and the step fails
+with "the step timed out", at the program it was running. A step that
+fails once its deadline has passed isn't retried, whatever its `#[retry]`
+allows.
 
 ## What a failure reaches
 

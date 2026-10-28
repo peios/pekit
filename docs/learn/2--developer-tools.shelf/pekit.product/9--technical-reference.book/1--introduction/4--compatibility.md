@@ -7,14 +7,15 @@ description: The platforms pekit runs on, the programs it needs, and what
 pekit runs on Linux. It needs:
 
 - `bwrap`, bubblewrap, on `PATH`, for every step and every program a
-  target's code runs. A host that forbids unprivileged user namespaces, or
-  one bubblewrap inside another, runs bubblewraps side by side: pekit never
-  nests one in another.
+  target's code runs, and unprivileged user namespaces for it to make.
+  pekit never nests one bubblewrap inside another, so a host that forbids
+  that, such as Ubuntu, is supported.
 - `git`, on `PATH`, for `pekit lock`, for putting back pinned libraries,
   for `fetch_git`, and for `pekit release`.
-- A file system for the cache directory that supports hard links, and on
-  which the user can make overlay mounts in a user namespace, for
-  compositions mounted into sandboxes.
+- A file system for the cache directory that supports hard links.
+- A kernel that lets bubblewrap mount an overlay in an unprivileged user
+  namespace, for a `Dir.sandbox` of a composition, which pekit makes with
+  bubblewrap's `--overlay`.
 
 The execution platform is the machine pekit runs on, named as Rust names
 architectures and operating systems: `x86_64-linux`, `aarch64-linux`.
