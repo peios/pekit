@@ -309,6 +309,49 @@ The default is
 .B \-\-rebuild
 Run every step and every program, reusing nothing from the store, and record each.
 .TP
+.BI \-\-remote\-cache " URL"
+Look for each step that is not in the store in the remote cache at
+.IR URL ,
+a server of the Remote Execution API, before running it, in place of
+.BR PEKIT_REMOTE_CACHE .
+.I URL
+is
+.BI grpc:// HOST : PORT
+or
+.BI grpcs:// HOST : PORT ,
+for TLS with the system's certificate authorities;
+.B http://
+and
+.B https://
+are taken as their equals.
+A step found there is put into the store with every file it names, each checked against its digest, and counted as found in the store.
+Steps are looked for only where they are taken from the store, so not with
+.BR \-\-rebuild ,
+nor in the second build of
+.BR \-\-check\-reproducible .
+If a call to the cache fails, the build asks it nothing more, runs its steps itself, and warns once.
+.TP
+.BI \-\-remote\-header " HEADER"
+Send
+.IR HEADER ,
+written
+.IB NAME : " VALUE"\c
+, with every call to the remote cache, besides those of
+.BR PEKIT_REMOTE_HEADERS .
+It can be given more than once.
+.TP
+.BI \-\-remote\-instance " NAME"
+The remote cache's instance name, in place of
+.BR PEKIT_REMOTE_INSTANCE .
+The default is none.
+.TP
+.B \-\-remote\-upload
+Write each step the build records, with every file it names, to the remote cache, as
+.B PEKIT_REMOTE_UPLOAD=1
+does.
+Only the blobs the cache does not have are sent.
+The build waits for its uploads before it ends; a failed upload is warned of and fails no build.
+.TP
 .B \-\-strict
 Build as a release does.
 Steps are given none of the host's tools.
@@ -423,6 +466,40 @@ under
 .BR XDG_STATE_HOME ,
 else
 .IR ~/.local/state/pekit .
+.TP
+.B PEKIT_REMOTE_CACHE
+The remote cache, as
+.B \-\-remote\-cache
+names it, which the option overrides.
+If it is unset or empty, and the option is not given, there is none.
+.B release
+reads it too, and checks what it finds there by running every step again.
+.TP
+.B PEKIT_REMOTE_HEADERS
+Headers sent with every call to the remote cache, one to a line, each written
+.IB NAME : " VALUE"\c
+\&.
+Blank lines are skipped.
+Credentials belong here or in
+.BR \-\-remote\-header ,
+never in the workspace's files.
+.TP
+.B PEKIT_REMOTE_INSTANCE
+The remote cache's instance name, which
+.B \-\-remote\-instance
+overrides.
+.TP
+.B PEKIT_REMOTE_UPLOAD
+.B 1
+or
+.B true
+to write each step the build records to the remote cache, as
+.B \-\-remote\-upload
+does;
+.BR 0 ,
+.BR false ,
+or unset not to.
+Any other value fails every command that builds.
 .TP
 .B PEKIT_NO_SYNC
 If set,

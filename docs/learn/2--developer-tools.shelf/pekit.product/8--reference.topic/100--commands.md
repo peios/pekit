@@ -46,3 +46,5 @@ options for how they build:
 | `--no-dynamic` | Fails a target that waits for a step's result. | [Targets and Steps](~pekit/targets-and-steps#waiting-for-a-step-s-result) |
 | `--trace` | Writes a timeline of the build. | [Profiling a Build](~pekit/profiling-a-build) |
 | `--gcsl-profile` | Writes a profile of the build's GCSL code. | [Profiling a Build](~pekit/profiling-a-build) |
+| `--remote-cache`, `--remote-instance`, `--remote-header` | Looks for steps in a remote cache. | [Sharing a Remote Cache](~pekit/sharing-a-remote-cache) |
+| `--remote-upload` | Writes the steps a build records to the remote cache. | [Sharing a Remote Cache](~pekit/sharing-a-remote-cache) |

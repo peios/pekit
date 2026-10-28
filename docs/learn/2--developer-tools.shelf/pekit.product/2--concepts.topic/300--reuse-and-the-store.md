@@ -115,6 +115,10 @@ Files in the store are kept by their SHA-256 digests, so a file that
 several steps give is stored once. That includes every file pekit fetches:
 a pinned download already in the store is never downloaded again.
 
+A remote cache shares steps between machines in the same way. A step
+missing from the store is looked for there before it runs. See [Sharing a
+Remote Cache](~pekit/sharing-a-remote-cache).
+
 ## Keeping the store to its size
 
 The store has a size limit, 50 GiB unless you set `PEKIT_CACHE_LIMIT`.

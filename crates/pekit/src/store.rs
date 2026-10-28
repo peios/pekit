@@ -521,6 +521,20 @@ impl Store {
         self.blob_path(digest, false).is_file() || self.blob_path(digest, true).is_file()
     }
 
+    /// Where the store holds the contents of `digest`, plain or executable,
+    /// and their size, if it does.
+    #[must_use]
+    pub fn held_blob(&self, digest: &Digest) -> Option<(PathBuf, u64)> {
+        [false, true].into_iter().find_map(|executable| {
+            let path = self.blob_path(digest, executable);
+            let size = fs::metadata(&path)
+                .ok()
+                .filter(fs::Metadata::is_file)?
+                .len();
+            Some((path, size))
+        })
+    }
+
     /// A new temporary file's path in the store's `tmp/`, which no other
     /// writer, of this process or another, uses.
     fn temp_path(&self) -> PathBuf {
@@ -587,6 +601,63 @@ impl Store {
             digest,
             size,
             executable,
+        })
+    }
+
+    /// Puts what `write` writes into the store as a blob, not executable,
+    /// hashing it as it goes: what it keeps of it. A blob arriving in parts,
+    /// as a download does, is written so, never held whole.
+    ///
+    /// # Errors
+    ///
+    /// That `write` fails, or the store cannot be written.
+    pub fn put_written(
+        &self,
+        write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    ) -> io::Result<FileEntry> {
+        /// A file that hashes and counts what is written to it.
+        struct Hashing {
+            /// The file.
+            out: File,
+            /// The hash of what was written.
+            hasher: Sha256,
+            /// How much was written.
+            size: u64,
+        }
+        impl Write for Hashing {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let written = self.out.write(bytes)?;
+                self.hasher.update(&bytes[..written]);
+                self.size += written as u64;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.out.flush()
+            }
+        }
+        let temp = self.temp_path();
+        let mut hashing = Hashing {
+            out: File::create(&temp)?,
+            hasher: Sha256::new(),
+            size: 0,
+        };
+        let written = write(&mut hashing).and_then(|()| {
+            if std::env::var_os("PEKIT_NO_SYNC").is_none() {
+                hashing.out.sync_all()?;
+            }
+            Ok(())
+        });
+        if let Err(error) = written {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        let Hashing { hasher, size, .. } = hashing;
+        let digest = Digest::from_hasher(hasher);
+        self.settle(&temp, &digest, false)?;
+        Ok(FileEntry {
+            digest,
+            size,
+            executable: false,
         })
     }
 
@@ -1254,11 +1325,21 @@ impl Store {
     ///
     /// That it cannot be read, or is no `T`.
     pub fn record<T: for<'a> Deserialize<'a>>(&self, receipt: &Digest) -> io::Result<Option<T>> {
-        match fs::read(self.record_path(receipt)) {
+        self.record_bytes(receipt)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other))
+            .transpose()
+    }
+
+    /// The record kept by `key`, if the store has one, as it is written.
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be read.
+    pub fn record_bytes(&self, key: &Digest) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(self.record_path(key)) {
             Ok(bytes) => {
-                let record = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                self.note_record(receipt);
-                Ok(Some(record))
+                self.note_record(key);
+                Ok(Some(bytes))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -1273,17 +1354,37 @@ impl Store {
     /// That the store cannot be written.
     pub fn put_record<T: Serialize>(&self, receipt: &Digest, record: &T) -> io::Result<()> {
         let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
-        let target = self.record_path(receipt);
+        self.put_record_bytes(receipt, &bytes)
+    }
+
+    /// Writes `bytes` as the record kept by `key`, whole, replacing any.
+    ///
+    /// # Errors
+    ///
+    /// That the store cannot be written.
+    pub fn put_record_bytes(&self, key: &Digest, bytes: &[u8]) -> io::Result<()> {
+        let target = self.record_path(key);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
         let temp = self.temp_path();
         let mut out = File::create(&temp)?;
-        out.write_all(&bytes)?;
+        out.write_all(bytes)?;
         out.sync_all()?;
         drop(out);
         fs::rename(temp, target)?;
-        self.note_record(receipt);
+        self.note_record(key);
         Ok(())
+    }
+
+    /// Whether the blob `digest` begins as a tree's encoding does, read no
+    /// further: a file's contents are not read to find they aren't one.
+    #[must_use]
+    pub fn is_tree_blob(&self, digest: &Digest) -> bool {
+        const BEGINNING: &[u8] = b"{\"entries\":";
+        let mut start = [0u8; BEGINNING.len()];
+        File::open(self.blob_path(digest, false))
+            .and_then(|mut file| file.read_exact(&mut start))
+            .is_ok_and(|()| start == BEGINNING)
     }
 }

@@ -341,6 +341,53 @@ rebuilding (`--check-reproducible`).
   records; uploads; manifests, unpackings and downloads; programs behind a
   flag.
 
+### F5 as built: the client, step records and manifests, uploads
+
+- **The client** (`remote.rs`): `Remote::find` and `Remote::upload` by a
+  record's key, as designed above. Every blob downloaded is checked against
+  its digest, and every tree is made again from its `Tree` and checked
+  against the digest its path names. The record is written last.
+- **The protos are a crate of their own,** `crates/pekit-reapi`, which
+  vendors REAPI v2.12.0 and the googleapis files it imports, with their
+  licences and sources (`proto/README.md`). *Departure:* the design put
+  them in pekit. Generated code doesn't meet the workspace's pedantic lints
+  or missing-docs, and `#[allow]` isn't used, so the generated code is
+  compiled in a crate that doesn't opt into them. Its comments are blanked
+  before generation, so it passes Clippy's defaults.
+- **Steps are looked up on the pool** (`engine::looked_remotely`): the
+  manifest, then the receipts the merged manifest gives, then the store
+  again. A found step counts as found in the store and as found remotely:
+  `N found in the store (M from the remote cache)`.
+- **Manifests merge on reading too.** *Departure:* the design merged them
+  on upload. A remote manifest that replaced the store's would lose the
+  store's sets, so a manifest fetched is merged into the store's, never
+  written over it.
+- **Uploads** follow each step recorded with `Reuse::Store`, as pool work.
+  The cache's manifest is merged first, then the record and the manifest
+  are written, sending only the blobs `FindMissingBlobs` names. The build
+  waits for its uploads before it evicts.
+- **A cache that is down is asked nothing more.** *Decision:* once a call
+  fails, the process builds as if it had no cache, and warns once as the
+  build ends, so a cache that is down costs one failed call, not one per
+  step. Connecting has 10 seconds. A missing or wrong blob fails that
+  lookup only.
+- **Configuration** is `--remote-cache`, `--remote-instance`,
+  `--remote-upload` and `--remote-header`, and `PEKIT_REMOTE_CACHE`,
+  `PEKIT_REMOTE_INSTANCE`, `PEKIT_REMOTE_UPLOAD` and
+  `PEKIT_REMOTE_HEADERS`, one header to a line. `grpcs://` uses TLS with
+  the system's certificate authorities.
+- **Tests** (`tests/remote.rs`, `tests/cli.rs`) run an in-memory REAPI
+  server of the tests' own (`tests/cache/mod.rs`). It checks each blob
+  against its digest and refuses a result whose blobs are missing, as
+  Buildbarn does. *Departure:* the design named a pinned bazel-remote.
+  Running a downloaded binary was refused in this session, so the test
+  against a real server is still to write, opt-in by a path to the binary.
+
+**Still to do:** `pekitconf.remote_cache` as the team's default, which
+needs the prelude's `pekitconf` type to take it. Unpackings and downloads
+are looked up remotely too. Program records stay behind a flag. The opt-in
+test runs against bazel-remote.
+
 ## F6. Remote execution
 
 REAPI's execution service runs a command, and a step is GCSL code. A step
@@ -391,6 +438,8 @@ release was built from.
 - F5: an action blob as a record's action-cache key; trees as REAPI
   `Tree` protos in a result; program records local at first; the URL and
   instance from `pekitconf` with the environment overriding, uploads and
-  credentials from the environment alone.
+  credentials from the environment alone. As built: the protos in a crate
+  of their own; manifests merged on reading as well as uploading; a cache
+  that fails a call asked nothing more by the process.
 - F6: a step runner as REAPI's command.
 - F10: SLSA provenance.

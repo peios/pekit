@@ -73,6 +73,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         cache_limit: None,
         profile_gcsl: false,
         exposing: Exposing::AsNeeded,
+        remote: None,
     }
 }
 

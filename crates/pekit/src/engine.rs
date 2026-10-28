@@ -76,6 +76,7 @@ use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
+use crate::remote::Remote;
 use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
@@ -253,6 +254,12 @@ pub struct Settings {
     /// Which outputs of the build are put under the output directory (see
     /// [Exposure](crate::exposure#exposure)).
     pub exposing: Exposing,
+    /// The remote cache, if there is one (see [The remote
+    /// cache](crate::remote#the-remote-cache)): a step missed in the store
+    /// is looked for in it, and, if it uploads, a step recorded is written
+    /// to it; both only where steps are taken from the store
+    /// ([`Reuse::Store`]).
+    pub remote: Option<Arc<Remote>>,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -281,6 +288,8 @@ pub struct Built {
     pub ran: usize,
     /// How many steps were found in the store.
     pub cached: usize,
+    /// How many of those were found in the remote cache first.
+    pub found_remotely: usize,
     /// How many programs the steps that ran found in the store (see
     /// `design/additive.md`, F1).
     pub programs_found: usize,
@@ -299,11 +308,16 @@ pub struct Outcomes {
     pub ran: usize,
     /// How many steps were found in the store.
     pub cached: usize,
+    /// How many of those were found in the remote cache first.
+    pub found_remotely: usize,
     /// How many programs the steps that ran found in the store (see
     /// `design/additive.md`, F1).
     pub programs_found: usize,
     /// The steps that passed only on a retry, by name.
     pub flaky: Vec<String>,
+    /// Why the remote cache could not be used, if it could not, as it was
+    /// first found: which fails no build.
+    pub remote_failed: Option<String>,
     /// What became of each step that was found in the store or passed.
     pub steps: Vec<StepReport>,
     /// Each step that, with [`Reuse::Compare`], gave another result than
@@ -436,6 +450,7 @@ pub fn build_observed(
         value,
         ran: outcomes.ran,
         cached: outcomes.cached,
+        found_remotely: outcomes.found_remotely,
         programs_found: outcomes.programs_found,
         flaky: outcomes.flaky,
     })
@@ -584,6 +599,7 @@ fn build_roots(
 ) -> Result<Outcomes, BuildError> {
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
+    run.finish_uploads()?;
     if settings.exposing == Exposing::All {
         run.expose_waiting()?;
     }
@@ -619,7 +635,9 @@ fn build_roots(
         targets: outcomes,
         ran: run.ran,
         cached: run.cached,
+        found_remotely: run.found_remotely,
         programs_found: run.programs_found,
+        remote_failed: run.remote_failed.take(),
         flaky: std::mem::take(&mut run.flaky),
         steps: std::mem::take(&mut run.reports),
         mismatches: std::mem::take(&mut run.mismatches),
@@ -726,6 +744,10 @@ fn new_run<'a>(
         reports: Vec::new(),
         mismatches: Vec::new(),
         background: 0,
+        looking: HashMap::new(),
+        found_remotely: 0,
+        remote_failed: None,
+        uploads: 0,
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -1146,8 +1168,34 @@ struct Run<'a> {
     /// [Sweeping](crate::sweep#sweeping)).
     sweeper: Sweeper,
     /// How many of the engine's own jobs for steps are on the pool:
-    /// stagings and keepings.
+    /// stagings, keepings and lookups in the remote cache.
     background: usize,
+    /// The steps being looked for in the remote cache, by node.
+    looking: HashMap<NodeId, Looking>,
+    /// How many steps were found in the remote cache.
+    found_remotely: usize,
+    /// Why the remote cache could not be used, as first found.
+    remote_failed: Option<String>,
+    /// How many uploads to the remote cache are on the pool, which the
+    /// build's end waits for.
+    uploads: usize,
+}
+
+/// A step being looked for in the remote cache (see [The remote
+/// cache](crate::remote#the-remote-cache)): what it is, as
+/// [`Run::start_step`] found it, and whether its manifest has been asked
+/// for, so that its records are asked for next.
+struct Looking {
+    /// The step, as its receipt is made.
+    keyed: Keyed,
+    /// Its base receipt.
+    base: Digest,
+    /// What it is given, to stage.
+    given: Vec<(String, Kept)>,
+    /// The devices bound into its sandbox.
+    devices: Vec<PathBuf>,
+    /// Whether its records, not its manifest, were asked for.
+    records: bool,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -1622,7 +1670,10 @@ impl Run<'_> {
         let mut started = false;
         let needed = self.graph.needed(demands);
         for id in self.graph.ready(&needed) {
-            if self.steps.contains_key(&id) || self.in_flight.contains_key(&id) {
+            if self.steps.contains_key(&id)
+                || self.in_flight.contains_key(&id)
+                || self.looking.contains_key(&id)
+            {
                 continue;
             }
             let Some(node) = self.graph.node(id) else {
@@ -2243,7 +2294,6 @@ impl Run<'_> {
             .iter()
             .filter_map(|&file| self.code_table.get(file as usize).cloned())
             .collect();
-        let name = self.step_name(id);
         let own = self.own_dir(id);
         let own_path = format!("{OUTPUTS}/{own}");
         let keyed = Keyed {
@@ -2262,21 +2312,108 @@ impl Run<'_> {
         } else {
             None
         };
-        let inputs = &keyed.inputs;
         if let Some(record) = found {
-            // Its outputs kept as a step's that ran are, since a target's
-            // own code may read them (see [Exposure](crate::exposure#exposure)).
-            for (path, kept) in record.result.files() {
-                self.outputs.insert(path.to_owned(), kept);
-                self.expose(path, kept);
-            }
-            let value = self.loaded.workspace.from_plain(&record.result.plain());
-            self.graph.resolve(id, Ok(value));
-            self.cached += 1;
-            self.report(id, (true, false));
-            self.emit(EventKind::Cached { step: name });
+            self.found_step(id, &record);
             return Ok(());
         }
+        let looking = Looking {
+            keyed,
+            base,
+            given,
+            devices,
+            records: false,
+        };
+        // Missed here, it is looked for in the remote cache, its manifest
+        // first, on the pool.
+        if self.settings.reuse == Reuse::Store
+            && let Some(remote) = &self.settings.remote
+        {
+            let work = Work::Remote {
+                remote: Arc::clone(remote),
+                keys: vec![manifest_key(&looking.base)],
+                manifest: true,
+                store: self.store.clone(),
+            };
+            self.pool.send(id, work, None);
+            self.background += 1;
+            self.looking.insert(id, looking);
+            return Ok(());
+        }
+        self.run_step(id, looking)
+    }
+
+    /// The step `id` found in the store, as `record` holds it.
+    fn found_step(&mut self, id: NodeId, record: &StepRecord) {
+        // Its outputs kept as a step's that ran are, since a target's own
+        // code may read them (see [Exposure](crate::exposure#exposure)).
+        for (path, kept) in record.result.files() {
+            self.outputs.insert(path.to_owned(), kept);
+            self.expose(path, kept);
+        }
+        let value = self.loaded.workspace.from_plain(&record.result.plain());
+        self.graph.resolve(id, Ok(value));
+        self.cached += 1;
+        self.report(id, (true, false));
+        let step = self.step_name(id);
+        self.emit(EventKind::Cached { step });
+    }
+
+    /// What the remote cache gave the step `id`, `found`, whether it found
+    /// one of the records asked for, or why it could not be asked: its
+    /// records are asked for next, once its manifest has been; then it is
+    /// found in the store, or, missed, it runs.
+    fn looked_remotely(
+        &mut self,
+        id: NodeId,
+        found: Result<bool, String>,
+    ) -> Result<(), BuildError> {
+        let Some(mut looking) = self.looking.remove(&id) else {
+            return Ok(());
+        };
+        if let Err(message) = found {
+            self.remote_failed.get_or_insert(message);
+        }
+        if looking.records {
+            let found = self
+                .looked_up(&looking.keyed, &looking.base)?
+                .filter(|record| self.holds_all(&record.result));
+            if let Some(record) = found {
+                self.found_remotely += 1;
+                self.found_step(id, &record);
+                return Ok(());
+            }
+        } else if let Some(remote) = &self.settings.remote {
+            let receipts = self.receipts_by_manifest(&looking.keyed, &looking.base)?;
+            if !receipts.is_empty() {
+                let work = Work::Remote {
+                    remote: Arc::clone(remote),
+                    keys: receipts,
+                    manifest: false,
+                    store: self.store.clone(),
+                };
+                self.pool.send(id, work, None);
+                self.background += 1;
+                looking.records = true;
+                self.looking.insert(id, looking);
+                return Ok(());
+            }
+        }
+        self.run_step(id, looking)
+    }
+
+    /// Runs the step `id`, `looking` as [`Run::start_step`] found it, in a
+    /// sandbox of its own, its inputs staged.
+    fn run_step(&mut self, id: NodeId, looking: Looking) -> Result<(), BuildError> {
+        let Looking {
+            keyed,
+            base,
+            given,
+            devices,
+            ..
+        } = looking;
+        let name = self.step_name(id);
+        let own = self.own_dir(id);
+        let inputs = &keyed.inputs;
         let (retries, timeout) = (retry_of(&inputs.attributes), timeout_of(&inputs.attributes));
         let secrets = self
             .secret_files(inputs.args.iter().chain(&inputs.captures))
@@ -2741,7 +2878,52 @@ impl Run<'_> {
         self.store
             .put_record(&receipt, &record)
             .map_err(|error| engine(&error))?;
-        self.remember_reads(step)
+        self.remember_reads(step)?;
+        // Recorded, it is written to the remote cache, on the pool, which
+        // the build's end waits for.
+        if self.settings.reuse == Reuse::Store
+            && let Some(remote) = self
+                .settings
+                .remote
+                .as_ref()
+                .filter(|remote| remote.uploads())
+        {
+            let work = Work::Upload {
+                remote: Arc::clone(remote),
+                keys: vec![receipt],
+                manifest: Some(manifest_key(&step.base)),
+                store: self.store.clone(),
+            };
+            self.pool.send(id, work, None);
+            self.uploads += 1;
+        }
+        Ok(())
+    }
+
+    /// An upload to the remote cache ended, `uploaded`: a failed one is
+    /// noted, and fails no build.
+    fn uploaded(&mut self, uploaded: Result<(), String>) {
+        self.uploads -= 1;
+        if let Err(message) = uploaded {
+            self.remote_failed.get_or_insert(message);
+        }
+    }
+
+    /// Waits for every upload to the remote cache still on the pool, once
+    /// the build's targets are done; anything else that ends meanwhile the
+    /// build no longer needs.
+    fn finish_uploads(&mut self) -> Result<(), BuildError> {
+        while self.uploads > 0 {
+            let Some(ran) = self.pool.next() else {
+                return Err(BuildError::Engine(
+                    "the threads effects run on stopped".to_owned(),
+                ));
+            };
+            if let Done::Uploaded(uploaded) = ran.done {
+                self.uploaded(uploaded);
+            }
+        }
+        Ok(())
     }
 
     /// Adds the set of contexts the step `step`'s last run read to the
@@ -2796,12 +2978,7 @@ impl Run<'_> {
         keyed: &Keyed,
         base: &Digest,
     ) -> Result<Option<StepRecord>, BuildError> {
-        let manifest = self
-            .store
-            .record::<Manifest>(&manifest_key(base))
-            .map_err(|error| engine(&error))?;
-        for keys in manifest.map(|manifest| manifest.sets).unwrap_or_default() {
-            let receipt = self.receipt_of(keyed, &keys, None)?;
+        for receipt in self.receipts_by_manifest(keyed, base)? {
             let found = self
                 .store
                 .record::<StepRecord>(&receipt)
@@ -2811,6 +2988,26 @@ impl Run<'_> {
             }
         }
         Ok(None)
+    }
+
+    /// The receipts the step `keyed` is looked up by: one for each set of
+    /// contexts the store's manifest has for its base `base`, made of the
+    /// values its context gives them now, in the manifest's order.
+    fn receipts_by_manifest(
+        &mut self,
+        keyed: &Keyed,
+        base: &Digest,
+    ) -> Result<Vec<Digest>, BuildError> {
+        let manifest = self
+            .store
+            .record::<Manifest>(&manifest_key(base))
+            .map_err(|error| engine(&error))?;
+        manifest
+            .map(|manifest| manifest.sets)
+            .unwrap_or_default()
+            .iter()
+            .map(|keys| self.receipt_of(keyed, keys, None))
+            .collect()
     }
 
     /// The receipt of the step `keyed` by the contexts `keys`, each with the
@@ -2973,6 +3170,18 @@ impl Run<'_> {
                 self.background -= 1;
                 let plain = ran.outcome.unwrap_or(Plain::Empty);
                 self.kept(ran.node, &plain, kept)
+            }
+            Done::Remote(found) => {
+                let event = worked("remote");
+                (self.events)(&event);
+                self.background -= 1;
+                self.looked_remotely(ran.node, found)
+            }
+            Done::Uploaded(uploaded) => {
+                let event = worked("upload");
+                (self.events)(&event);
+                self.uploaded(uploaded);
+                Ok(())
             }
             done => {
                 ran.done = done;

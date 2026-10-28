@@ -370,6 +370,37 @@ pub fn manifest_key(base: &Digest) -> Digest {
     Digest::of(format!("pekit-manifest-1:{}", base.hex()).as_bytes())
 }
 
+/// Merges the remote cache's manifest kept by `key` into `store`'s, each
+/// set of either kept, in the order first recorded, the store's first: so
+/// that neither loses a set the other found (see `design/additive.md`, F5).
+/// A manifest neither has is none.
+///
+/// # Errors
+///
+/// That the cache could not be asked, or the store read or written.
+pub fn merge_remote_manifest(
+    remote: &crate::remote::Remote,
+    store: &Store,
+    key: &Digest,
+) -> Result<(), crate::remote::RemoteError> {
+    let Some(bytes) = remote.fetch(store, key)? else {
+        return Ok(());
+    };
+    let other: Manifest = serde_json::from_slice(&bytes)
+        .map_err(|error| crate::remote::RemoteError::Corrupt(format!("a manifest: {error}")))?;
+    let mut manifest = store.record::<Manifest>(key)?.unwrap_or_default();
+    let before = manifest.sets.len();
+    for set in other.sets {
+        if !manifest.sets.contains(&set) {
+            manifest.sets.push(set);
+        }
+    }
+    if manifest.sets.len() != before || before == 0 {
+        store.put_record(key, &manifest)?;
+    }
+    Ok(())
+}
+
 /// A program a step ran, as the store keeps it by its key (see
 /// `design/additive.md`, F1): what it gave, and the digests of the trees it
 /// could write as it left them, the step's own output directory and its
