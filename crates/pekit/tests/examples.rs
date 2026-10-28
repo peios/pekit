@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gcsl::eval::plain::Plain;
+use pekit::events::EventKind;
 use pekit::exposure::Exposing;
 use pekit::store::Store;
 
@@ -802,13 +803,15 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
 }
 
 /// The workspace configuration of example 10: the host's C toolchain and
-/// QEMU, ppk and peiso's tools at `tools/`, and the pinned Rust.
+/// QEMU, ppk and peiso's tools at `tools/`, and the pinned Rust. ppk is the
+/// one its package takes, `build ppk()`, so that it is compiled once.
 const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      import Toolchain::* from \"github.com/gcslib/python\"\n\
                      import * from \"github.com/gcslib/peiso\"\n\
                      import * from \"github.com/gcslib/qemu\"\n\
                      import * from \"github.com/gcslib/rust\"\n\
                      import * from toolchain\n\
+                     import build ppk from example\n\
                      import fileroot\n\
                      import path\n\
                      fn built(at: String, bins: List<String>, packages: List<String>) -> Dir {\n\
@@ -817,7 +820,7 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      \x20   = cargo_build(dir(src), vendored(file(\"{src}/Cargo.lock\")), bins = bins, packages = packages, beside = [ppk])\n\
                      }\n\
                      def Toolchain::Ppk workspace_ppk() {\n\
-                     \x20   let tools = built(\"ppk\", [\"ppk\"], [])\n\
+                     \x20   let tools = build ppk()\n\
                      \x20   host_platform = ^host_platform\n\
                      \x20   platform = {}\n\
                      \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
@@ -884,8 +887,21 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
     copy_tree(&packages, &dir.path().join("example/repository"));
     // The kernel and busybox from the repository, ppk built from its source
     // and the packages built here, each packed, and the ISO.
-    let built = build_in(dir.path(), state.path(), "iso").unwrap();
+    let (built, events) = observed_with(dir.path(), state.path(), "iso", Options::default());
+    let built = built.unwrap();
     assert!(built.ran > 9, "{}", built.ran);
+    // Each Rust build once: ppk, libpeios, prelude, peiso and peiosutils.
+    // The ppk toolchain packs with the ppk its package takes.
+    let compiled: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Started { step, attempt: 0 } if step.starts_with("cargo_build/") => {
+                Some(step.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compiled.len(), 5, "{compiled:?}");
     let ppk = build_in(dir.path(), state.path(), "ppk").unwrap();
     assert_eq!(ppk.ran, 0, "the ISO's ppk is the one built alone");
     assert!(built_file(dir.path(), file_of(&built.value, None)).is_file());
