@@ -548,6 +548,15 @@ beyond it, it is listed here for Jack to confirm:
   leaves the `lazy` unrun, and waits to look it up again. The earlier task
   then runs the call itself. A real cycle gives the self-dependency error
   that a run in order gives.
+- **The earliest waiting task begins an abandoned call again** (PEI-1604).
+  The first cut woke only the wounding task, by its number, and then ran
+  whichever ready task came first in the task list. Often that was
+  another later task, which began the call again and was wounded in turn.
+  Two later tasks could pass the call back and forth without end, each run
+  meeting new nodes, until memory ran out. An abandon now wakes every task
+  that waits for a sibling's call or `lazy`. Of those, the earliest in
+  program order runs first, once no other task is ready. A call abandoned
+  far more often than this allows fails with an internal error.
 
 **Cost in plain mode: none**, since nothing marks outside graph mode. In
 graph mode, marking costs about 25 ns per marked piece. On authd's
