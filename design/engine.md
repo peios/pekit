@@ -143,9 +143,23 @@ toolchain and crates, and a fresh link for every fetched file. Now an
 output is written there only once something that is not hermetic may read
 it from the disk. A target's `dir.files()` and `file.read()` of an output
 are answered from the store until a target's own effect runs a program or
-writes. `pekit run` writes every output first (see `exposure.rs`). A file its result names that is not under its working
-directory, or that does not exist, is the step's failure. `Dir.sandbox` in
-a step is GCSL's own copy for now; overlay mounts come later.
+writes. `pekit run` writes every output first (see `exposure.rs`).
+
+A file a step's result names that is not under its working directory, or
+that does not exist, is the step's failure. `Dir.sandbox` in a step is
+GCSL's own copy for now; overlay mounts come later.
+
+*Changed 2026-10-28 (PEI-1598, for Jack to confirm).* The engine staged
+each step's sandbox, and kept its result's files in the store, on the
+thread that evaluates. Both place or hash whole trees: in authd's rebuild,
+33 s of keeping and 18 s of staging, during which no other step could
+start. Both are now jobs on the pool (`Work::Stage`, `Work::Keep`), as a
+program's finding and placing of trees already was: a step's unit runs
+once its sandbox is staged, and it is recorded once its files are kept.
+The time staging takes is not the step's: its `#[timeout]` and its
+recorded duration start once it is staged. A finished step's staging
+directory is renamed and removed by a thread of its own, which the build
+waits for before it ends (see `sweep.rs`).
 
 **Retry and timeout.** A step's `#[retry]` and `#[timeout]` are the
 engine's: a retry reruns the step unit in a fresh sandbox, an

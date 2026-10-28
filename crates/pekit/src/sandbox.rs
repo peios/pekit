@@ -546,6 +546,42 @@ impl StepSandbox {
         &self.own
     }
 
+    /// Its staging directory, on the host.
+    #[must_use]
+    pub fn stage_dir(&self) -> &Path {
+        &self.stage
+    }
+
+    /// Stages each of `given`, a file or directory from `store` by its
+    /// path ([`StepSandbox::stage`]), each directory before what is in it,
+    /// which it stages: so a file of a staged directory is as the
+    /// directory's tree has it, a symbolic link a link, not the file it
+    /// leads to.
+    ///
+    /// # Errors
+    ///
+    /// The first that cannot be staged, and why.
+    pub fn stage_given(&self, store: &Store, given: &[(String, Kept)]) -> Result<(), String> {
+        let mut ordered: Vec<&(String, Kept)> = given.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut dirs: Vec<&str> = Vec::new();
+        for (path, kept) in ordered {
+            let within = |dir: &&str| {
+                path.strip_prefix(*dir)
+                    .is_some_and(|rest| rest.starts_with('/') || *dir == "/")
+            };
+            if dirs.iter().any(within) {
+                continue;
+            }
+            self.stage(store, path, *kept)
+                .map_err(|error| format!("cannot stage `{path}`: {error}"))?;
+            if matches!(kept, Kept::Dir(_)) {
+                dirs.push(path);
+            }
+        }
+        Ok(())
+    }
+
     /// Stages `kept`, a file or a directory from `store`, at `path`, a path
     /// under `/w` or `/pekit-out`.
     ///

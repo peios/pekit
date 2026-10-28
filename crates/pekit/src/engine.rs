@@ -68,16 +68,14 @@ use crate::evict::{Evicted, evict};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
 use crate::fetch::IN_A_STEP;
 use crate::git_fetch;
-use crate::pool::{Pool, Ran, Work};
+use crate::pool::{Done, Pool, Ran, Work};
 use crate::layers::remove_tree;
 use crate::keychain::{self, Keychain};
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
-use crate::record::{
-    Kept, Manifest, StepRecord, StoreError, Stored, differences, keep_files, manifest_key, stored,
-};
+use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
 use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
 use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
@@ -179,12 +177,6 @@ enum Inside {
     /// The path a symbolic link on the way leads to, the rest of the path
     /// after it.
     Link(String),
-}
-
-/// Whether the path `path` is under the directory `dir`.
-fn within_dir(path: &str, dir: &str) -> bool {
-    path.strip_prefix(dir)
-        .is_some_and(|rest| rest.starts_with('/') || dir == "/")
 }
 
 /// The components of the path `path`, last first, so that the next is
@@ -731,6 +723,7 @@ fn new_run<'a>(
         flaky: Vec::new(),
         reports: Vec::new(),
         mismatches: Vec::new(),
+        background: 0,
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -990,8 +983,6 @@ type SecretFile = (String, PathBuf);
 
 /// What a step's sandbox is made with, for each attempt.
 struct Staging<'a> {
-    /// Its inputs, by logical path, to stage.
-    given: &'a [(String, Kept)],
     /// Its secret files, to bind.
     secrets: &'a [SecretFile],
     /// Its devices, to bind.
@@ -1000,10 +991,26 @@ struct Staging<'a> {
     scratch: Option<&'a Path>,
 }
 
+/// Where a step the engine is running is: its unit runs only in between
+/// the engine's own work for it, which is done on the pool.
+#[derive(Clone, Copy, Debug)]
+enum Phase {
+    /// Its sandbox is being staged, since then.
+    Staging(Instant),
+    /// Its unit runs.
+    Running,
+    /// The files of its result are being kept in the store.
+    Keeping,
+}
+
 /// A step the engine is running (see [Building](#building)).
 struct StepRun {
     /// Its sandbox.
     sandbox: Arc<StepSandbox>,
+    /// Where it is.
+    phase: Phase,
+    /// Its result, once it has one, while its files are kept.
+    result: Option<Value>,
     /// What it is given, by logical path, which each attempt is staged with.
     given: Vec<(String, Kept)>,
     /// The devices bound into its sandbox, by its `#[device]`s.
@@ -1136,6 +1143,9 @@ struct Run<'a> {
     /// What removes each step's staging directory once it is done (see
     /// [Sweeping](crate::sweep#sweeping)).
     sweeper: Sweeper,
+    /// How many of the engine's own jobs for steps are on the pool:
+    /// stagings and keepings.
+    background: usize,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -1248,17 +1258,18 @@ impl Run<'_> {
             }
             let mut progressed = self.start_needed(&demands)?;
             progressed |= self.advance_steps()?;
-            if !self.in_flight.is_empty() {
+            if !self.in_flight.is_empty() || self.background > 0 {
                 let Some(ran) = self.pool.next() else {
                     return Err(BuildError::Engine(
                         "the threads effects run on stopped".to_owned(),
                     ));
                 };
-                self.finished_effect(ran);
-                // Every other effect that has finished too, so that a unit
-                // waiting for several runs again once for all of them.
+                self.finished(ran)?;
+                // Every other job that has finished too, so that a unit
+                // waiting for several effects runs again once for all of
+                // them.
                 while let Some(ran) = self.pool.ready() {
-                    self.finished_effect(ran);
+                    self.finished(ran)?;
                 }
                 progressed = true;
             }
@@ -2274,19 +2285,21 @@ impl Run<'_> {
             &own,
             0,
             &Staging {
-                given: &given,
                 secrets: &secrets,
                 devices: &devices,
                 scratch: scratch.as_ref().map(Scratch::dir),
             },
             &keyed,
         )?;
+        self.stage(id, &sandbox, &given);
         let started = Instant::now();
         let programs = Programs::starting((&self.settings.platform, &own), &given);
         self.steps.insert(
             id,
             StepRun {
                 sandbox,
+                phase: Phase::Staging(started),
+                result: None,
                 programs,
                 given,
                 secrets,
@@ -2355,8 +2368,9 @@ impl Run<'_> {
     }
 
     /// A new sandbox for the attempt `attempt` of the step `id`, whose own
-    /// output directory is `own`, `<target>/<step>` under `/pekit-out`,
-    /// staged as `staging` says; nothing left behind if it cannot be made.
+    /// output directory is `own`, `<target>/<step>` under `/pekit-out`, to
+    /// be staged as `staging` says ([`Run::stage`]); nothing left behind if
+    /// it cannot be made.
     fn fresh_sandbox(
         &self,
         id: NodeId,
@@ -2369,9 +2383,12 @@ impl Run<'_> {
         if stage.exists() {
             remove_tree(&stage).map_err(|error| engine(&error))?;
         }
-        let staged = (|| {
-            let sandbox = StepSandbox::new(&stage, own)
-                .map_err(|error| engine(&error))?
+        let made = StepSandbox::new(&stage, own).map_err(|error| engine(&error));
+        if made.is_err() {
+            let _ = remove_tree(&stage);
+        }
+        Ok(Arc::new(
+            made?
                 .with_host(&self.settings.host_tools)
                 .with_secrets(staging.secrets.to_vec())
                 .with_devices(staging.devices.to_vec())
@@ -2383,30 +2400,38 @@ impl Run<'_> {
                         .map(|context| (context.key.clone(), context.pending.clone()))
                         .collect(),
                     self.store.clone(),
-                );
-            // Each directory before what is in it, which it stages: so a
-            // file of a staged directory is as the directory's tree has it, a
-            // symbolic link a link, not the file it leads to.
-            let mut ordered: Vec<&(String, Kept)> = staging.given.iter().collect();
-            ordered.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut dirs: Vec<&str> = Vec::new();
-            for (path, kept) in ordered {
-                if dirs.iter().any(|dir| within_dir(path, dir)) {
-                    continue;
-                }
-                sandbox
-                    .stage(&self.store, path, *kept)
-                    .map_err(|error| engine(&format!("cannot stage `{path}`: {error}")))?;
-                if matches!(kept, Kept::Dir(_)) {
-                    dirs.push(path);
-                }
+                ),
+        ))
+    }
+
+    /// Stages what the step `id` is given, `given`, in its sandbox
+    /// `sandbox`, on the pool: it runs once that is done
+    /// ([`Run::staged`]).
+    fn stage(&mut self, id: NodeId, sandbox: &Arc<StepSandbox>, given: &[(String, Kept)]) {
+        let work = Work::Stage {
+            sandbox: Arc::clone(sandbox),
+            given: given.to_vec(),
+            store: self.store.clone(),
+        };
+        self.pool.send(id, work, None);
+        self.background += 1;
+    }
+
+    /// The step `id`'s sandbox is staged, or could not be, `staged`: it
+    /// runs from now, the time staging took none of its own.
+    fn staged(&mut self, id: NodeId, staged: Result<(), String>) -> Result<(), BuildError> {
+        staged.map_err(BuildError::Engine)?;
+        if let Some(step) = self.steps.get_mut(&id)
+            && let Phase::Staging(since) = step.phase
+        {
+            let waited = since.elapsed();
+            if step.attempt == 0 {
+                step.started += waited;
             }
-            Ok(Arc::new(sandbox))
-        })();
-        if staged.is_err() {
-            let _ = remove_tree(&stage);
+            step.deadline = step.deadline.map(|deadline| deadline + waited);
+            step.phase = Phase::Running;
         }
-        staged
+        Ok(())
     }
 
     /// Where the attempt `attempt` of the step `id` is staged.
@@ -2506,7 +2531,11 @@ impl Run<'_> {
         let runnable: Vec<NodeId> = self
             .steps
             .iter()
-            .filter(|(_, step)| step.waiting.is_empty() && step.waiting_unit.is_none())
+            .filter(|(_, step)| {
+                matches!(step.phase, Phase::Running)
+                    && step.waiting.is_empty()
+                    && step.waiting_unit.is_none()
+            })
             .map(|(&id, _)| id)
             .collect();
         let advanced = !runnable.is_empty();
@@ -2567,24 +2596,18 @@ impl Run<'_> {
         }
     }
 
-    /// Records the step `id`, which gave `value`, and gives it to the graph.
+    /// The step `id` gave `value`: its result's files are kept in the store,
+    /// on the pool, and it is recorded once they are ([`Run::kept`]),
+    /// unless it names a file that is not its own.
     fn succeeded(&mut self, id: NodeId, value: &Value) -> Result<(), BuildError> {
-        let Some(step) = self.steps.remove(&id) else {
-            return Ok(());
-        };
-        let outcome = self.record(id, &step, value);
-        self.unstage(id, &step)?;
-        outcome
-    }
-
-    /// Records the step `step`, the node `id`, which gave `value`, and gives
-    /// it to the graph, its outputs kept.
-    fn record(&mut self, id: NodeId, step: &StepRun, value: &Value) -> Result<(), BuildError> {
         let plain = self
             .loaded
             .workspace
             .to_plain(value)
             .map_err(BuildError::Engine)?;
+        let Some(step) = self.steps.get_mut(&id) else {
+            return Ok(());
+        };
         if let Some(path) = foreign_file(&plain, step) {
             let message = format!(
                 "the step's result names `{path}`, which is neither in its output directory \
@@ -2594,16 +2617,56 @@ impl Run<'_> {
             );
             self.graph
                 .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
-            let step = self.step_name(id);
+            let name = self.step_name(id);
             self.emit(EventKind::Failed {
-                step,
+                step: name,
                 retrying: false,
             });
+            if let Some(step) = self.steps.remove(&id) {
+                self.unstage(id, &step)?;
+            }
             return Ok(());
         }
-        let host = |path: &str| step.sandbox.host_path(path).unwrap_or_default();
+        step.phase = Phase::Keeping;
+        step.result = Some(value.clone());
+        let work = Work::Keep {
+            plain,
+            sandbox: Arc::clone(&step.sandbox),
+            store: self.store.clone(),
+        };
+        self.pool.send(id, work, None);
+        self.background += 1;
+        Ok(())
+    }
+
+    /// The files of the result `plain` of the step `id` are kept, or could
+    /// not be, `kept`: it is recorded, and its staging directory removed.
+    fn kept(
+        &mut self,
+        id: NodeId,
+        plain: &Plain,
+        kept: Result<HashMap<String, Kept>, StoreError>,
+    ) -> Result<(), BuildError> {
+        let Some(mut step) = self.steps.remove(&id) else {
+            return Ok(());
+        };
+        let value = step.result.take().unwrap_or(Value::Empty);
+        let outcome = self.record(id, &step, (&value, plain), kept);
+        self.unstage(id, &step)?;
+        outcome
+    }
+
+    /// Records the step `step`, the node `id`, which gave `value`, `plain`
+    /// as plain data, its files kept, `kept`, and gives it to the graph.
+    fn record(
+        &mut self,
+        id: NodeId,
+        step: &StepRun,
+        (value, plain): (&Value, &Plain),
+        kept: Result<HashMap<String, Kept>, StoreError>,
+    ) -> Result<(), BuildError> {
         // Its files are kept whatever it holds: later steps are given them.
-        let kept = match keep_files(&plain, &self.store, &host) {
+        let kept = match kept {
             Ok(kept) => kept,
             Err(StoreError::Io { path, error }) => {
                 let message =
@@ -2623,7 +2686,7 @@ impl Run<'_> {
             self.outputs.insert(path.clone(), *entry);
             self.expose(path, *entry);
         }
-        match stored(&plain, &kept) {
+        match stored(plain, &kept) {
             Ok(result) => self.keep_record(id, step, result)?,
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
@@ -2852,19 +2915,21 @@ impl Run<'_> {
             &own,
             attempt,
             &Staging {
-                given: &step.given,
                 secrets: &step.secrets,
                 devices: &step.devices,
                 scratch: step.scratch.as_ref().map(Scratch::dir),
             },
             &step.keyed,
         )?;
+        self.stage(id, &sandbox, &step.given);
         self.graph.forget_unit(STEP_UNITS + id.number());
         let programs = Programs::starting((&self.settings.platform, &own), &step.given);
         self.steps.insert(
             id,
             StepRun {
                 sandbox,
+                phase: Phase::Staging(Instant::now()),
+                result: None,
                 programs,
                 attempt,
                 retries: step.retries - 1,
@@ -2881,6 +2946,40 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// The job `ran` finished: the engine's own work for a step, or an
+    /// effect.
+    fn finished(&mut self, mut ran: Ran) -> Result<(), BuildError> {
+        let worked = |work: &str| Event {
+            at: ran.ended.saturating_duration_since(self.began),
+            kind: EventKind::Worked {
+                step: self.step_name(ran.node),
+                work: work.to_owned(),
+                worker: ran.worker,
+                began: ran.began.saturating_duration_since(self.began),
+            },
+        };
+        match std::mem::replace(&mut ran.done, Done::Effect) {
+            Done::Staged(staged) => {
+                let event = worked("stage");
+                (self.events)(&event);
+                self.background -= 1;
+                self.staged(ran.node, staged)
+            }
+            Done::Kept(kept) => {
+                let event = worked("keep");
+                (self.events)(&event);
+                self.background -= 1;
+                let plain = ran.outcome.unwrap_or(Plain::Empty);
+                self.kept(ran.node, &plain, kept)
+            }
+            done => {
+                ran.done = done;
+                self.finished_effect(ran);
+                Ok(())
+            }
+        }
+    }
+
     /// The effect `ran` finished: gives it to the graph, the step that waits
     /// on it able to run again.
     fn finished_effect(&mut self, ran: Ran) {
@@ -2890,13 +2989,14 @@ impl Run<'_> {
         if let Some(mut running) = self.in_flight.remove(&node) {
             fold = running.fold.take();
             let at = ran.ended.saturating_duration_since(self.began);
-            let kind = match (ran.program, running.step) {
-                (Some(program), Some(step)) if program.found => EventKind::EffectFound {
+            let found = matches!(&ran.done, Done::Program(program) if program.found);
+            let kind = match running.step {
+                Some(step) if found => EventKind::EffectFound {
                     node: node.number(),
                     step,
                     effect: running.effect,
                 },
-                (_, step) => EventKind::EffectRan {
+                step => EventKind::EffectRan {
                     node: node.number(),
                     step,
                     effect: running.effect,
@@ -2928,7 +3028,7 @@ impl Run<'_> {
             if let Some((builtin, args)) = &fold {
                 self.program_folded(step, (*builtin, args), &ran.kept);
             }
-            if let Some(program) = ran.program {
+            if let Done::Program(program) = ran.done {
                 self.program_ran(step, program, &outcome);
             }
         }

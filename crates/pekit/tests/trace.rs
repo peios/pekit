@@ -144,3 +144,39 @@ fn a_trace_has_a_span_per_run_of_a_target_s_or_a_step_s_code() {
         ]
     );
 }
+
+#[test]
+fn a_trace_has_a_span_per_staging_and_keeping_on_its_thread() {
+    let mut trace = Trace::new();
+    for (ms, work, worker) in [(4, "stage", 0), (9, "keep", 2)] {
+        trace.add(&at(
+            ms,
+            EventKind::Worked {
+                step: "cc".to_owned(),
+                work: work.to_owned(),
+                worker,
+                began: Duration::from_millis(ms - 3),
+            },
+        ));
+    }
+    let json = trace.to_json();
+    let events = json["traceEvents"].as_array().unwrap();
+    // Each a span on its thread's row, labelled with its step.
+    let spans: Vec<(&str, u64, u64, u64)> = events
+        .iter()
+        .filter(|event| event["cat"] == "engine")
+        .map(|event| {
+            assert_eq!(event["args"]["step"], "cc");
+            (
+                event["name"].as_str().unwrap(),
+                event["tid"].as_u64().unwrap(),
+                event["ts"].as_u64().unwrap(),
+                event["dur"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        spans,
+        [("stage", 2, 1_000, 3_000), ("keep", 4, 6_000, 3_000)]
+    );
+}

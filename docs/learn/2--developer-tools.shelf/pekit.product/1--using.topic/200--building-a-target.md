@@ -48,10 +48,12 @@ pekit build hello --trace build-trace.json
 ```
 
 Each attempt of a step is a span on the *steps* row, and each program a
-step runs is a span on the row of the worker that ran it. A step found in
-the store is a mark. Each run of a target's or a step's code is a span on
-the *evaluation* row. The trace names programs but never shows their
-arguments, so it holds no secrets.
+step runs is a span on the row of the worker that ran it. So is pekit's
+own work for a step: `stage` places its inputs in its sandbox before it
+runs, and `keep` stores the files of its result once it has one. A step
+found in the store is a mark. Each run of a target's or a step's code is
+a span on the *evaluation* row. The trace names programs but never shows
+their arguments, so it holds no secrets.
 
 When a build spends its time evaluating code rather than running
 programs, which you'll notice when even a build where nothing changed is

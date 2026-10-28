@@ -8,7 +8,8 @@
 //! in the store a mark there, each run of a target's or a step's code a span
 //! on the *evaluation* row, named by the target or the step, and each
 //! program run a span on the row of the pool's thread that ran it, named by
-//! what it ran and labelled with its step. Times are in microseconds since
+//! what it ran and labelled with its step, as is each staging of a step's
+//! sandbox, `stage`, and keeping of its result's files, `keep`. Times are in microseconds since
 //! the build began.
 
 use serde_json::{Value, json};
@@ -97,6 +98,21 @@ impl Trace {
                     "ts": began, "dur": ts.saturating_sub(began),
                     "pid": PID, "tid": worker + FIRST_WORKER_ROW,
                     "args": { "step": step.as_deref().unwrap_or("(the target)"), "ok": ok },
+                }));
+            }
+            EventKind::Worked {
+                step,
+                work,
+                worker,
+                began,
+            } => {
+                self.name_workers(worker + 1);
+                let began = micros(*began);
+                self.events.push(json!({
+                    "name": work, "cat": "engine", "ph": "X",
+                    "ts": began, "dur": ts.saturating_sub(began),
+                    "pid": PID, "tid": worker + FIRST_WORKER_ROW,
+                    "args": { "step": step },
                 }));
             }
             EventKind::Evaluated { unit, step, began } => {

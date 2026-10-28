@@ -8,13 +8,18 @@
 //! effect of a unit to run under its effect context, until its deadline, or
 //! a `fetch` to answer from the store or the network ([Fetching](crate::fetch#fetching)),
 //! or a target's read of an output to answer from the store
-//! ([Exposure](crate::exposure#exposure)).
+//! ([Exposure](crate::exposure#exposure)), or the engine's own work for a
+//! step: staging its sandbox before it runs, and keeping the files of its
+//! result in the store once it has given one. That work places and hashes
+//! whole trees, and so is done here, beside the programs, never on the
+//! thread that evaluates.
 //! Each reports what it came to, a [`Ran`], with the thread that ran it and
 //! when, for the build's events, and the files it kept in the store. A
 //! step's program that may be found in the store is found or run there too,
 //! with all the hashing and placing of trees that takes
 //! ([`crate::programs`]).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -31,7 +36,8 @@ use crate::fetch::{fetch, fetched_path};
 use crate::git_fetch::{fetch_git, git_path};
 use crate::programs::{ProgramRan, ProgramWork, perform_program};
 use crate::sandbox::StepSandbox;
-use crate::record::Kept;
+use crate::layers::remove_tree;
+use crate::record::{Kept, StoreError, keep_files};
 use crate::store::{FileEntry, Store};
 use crate::unpack::{unpack, unpack_key, unpacked_path};
 
@@ -85,6 +91,27 @@ pub enum Work {
         /// Where its call is.
         span: Span,
     },
+    /// Stages what a step is given, each by its logical path, in its
+    /// sandbox, from `store`; its staging directory removed if it cannot
+    /// be.
+    Stage {
+        /// The sandbox.
+        sandbox: Arc<StepSandbox>,
+        /// What it is given.
+        given: Vec<(String, Kept)>,
+        /// The store.
+        store: Store,
+    },
+    /// Keeps in `store` each file and directory `plain`, a step's result,
+    /// names, from the step's sandbox.
+    Keep {
+        /// The result.
+        plain: Plain,
+        /// The step's sandbox.
+        sandbox: Arc<StepSandbox>,
+        /// The store.
+        store: Store,
+    },
     /// Answers a target's read of an output from the store (see
     /// [Exposure](crate::exposure#exposure)).
     Read {
@@ -114,8 +141,21 @@ pub struct Ran {
     /// The files it kept in the store, each by its path as GCSL code names
     /// it.
     pub kept: Vec<(String, Kept)>,
-    /// What became of it, if it was a program sent to be found or run.
-    pub program: Option<ProgramRan>,
+    /// What else it came to.
+    pub done: Done,
+}
+
+/// What a job came to beside its outcome.
+pub enum Done {
+    /// Nothing more: it was an effect, or answered one.
+    Effect,
+    /// What became of a program sent to be found or run.
+    Program(ProgramRan),
+    /// A step's sandbox staged ([`Work::Stage`]), or why it could not be.
+    Staged(Result<(), String>),
+    /// The files of a step's result kept ([`Work::Keep`]), by logical
+    /// path, or why they could not be.
+    Kept(Result<HashMap<String, Kept>, StoreError>),
 }
 
 /// One job: a node's work, until its deadline.
@@ -129,21 +169,16 @@ pub struct Pool {
     done: Receiver<Ran>,
 }
 
-/// What a job came to: its outcome, what it kept, and what became of it if
-/// it was a program sent to be found or run.
-type Performed = (
-    Result<Plain, Diagnostic>,
-    Vec<(String, Kept)>,
-    Option<ProgramRan>,
-);
+/// What a job came to: its outcome, what it kept, and what else.
+type Performed = (Result<Plain, Diagnostic>, Vec<(String, Kept)>, Done);
 
 /// Does `work`, until `deadline`: what it came to.
 fn perform(work: Work, deadline: Option<Instant>) -> Performed {
     match work {
-        Work::Effect(job, effects) => (job.run(&*effects, deadline), Vec::new(), None),
+        Work::Effect(job, effects) => (job.run(&*effects, deadline), Vec::new(), Done::Effect),
         Work::Program(job, sandbox, work) => {
             let (outcome, ran) = perform_program(&job, &sandbox, &work, deadline);
-            (outcome, Vec::new(), Some(ran))
+            (outcome, Vec::new(), Done::Program(ran))
         }
         Work::Fetch {
             url,
@@ -157,14 +192,14 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
                     path: path.clone(),
                     identity: None,
                 };
-                (Ok(file), vec![(path, Kept::File(entry))], None)
+                (Ok(file), vec![(path, Kept::File(entry))], Done::Effect)
             }
             Err((message, note)) => {
                 let mut error = Diagnostic::error(message, span);
                 if let Some(note) = note {
                     error = error.with_note(note);
                 }
-                (Err(error), Vec::new(), None)
+                (Err(error), Vec::new(), Done::Effect)
             }
         },
         Work::FetchGit {
@@ -180,9 +215,13 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
                     path: path.clone(),
                     identity: None,
                 };
-                (Ok(dir), vec![(path, Kept::Dir(tree))], None)
+                (Ok(dir), vec![(path, Kept::Dir(tree))], Done::Effect)
             }
-            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new(), None),
+            Err(message) => (
+                Err(Diagnostic::error(message, span)),
+                Vec::new(),
+                Done::Effect,
+            ),
         },
         Work::Unpack {
             archive,
@@ -198,9 +237,13 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
                     path: path.clone(),
                     identity: None,
                 };
-                (Ok(dir), vec![(path, Kept::Dir(tree))], None)
+                (Ok(dir), vec![(path, Kept::Dir(tree))], Done::Effect)
             }
-            Err(message) => (Err(Diagnostic::error(message, span)), Vec::new(), None),
+            Err(message) => (
+                Err(Diagnostic::error(message, span)),
+                Vec::new(),
+                Done::Effect,
+            ),
         },
         Work::Read {
             read,
@@ -215,9 +258,37 @@ fn perform(work: Work, deadline: Option<Instant>) -> Performed {
                     None => error,
                 }
             });
-            (outcome, Vec::new(), None)
+            (outcome, Vec::new(), Done::Effect)
         }
+        Work::Stage {
+            sandbox,
+            given,
+            store,
+        } => stage(&sandbox, &given, &store),
+        Work::Keep {
+            plain,
+            sandbox,
+            store,
+        } => keep(plain, &sandbox, &store),
     }
+}
+
+/// Stages `given` in the step's sandbox `sandbox` from `store`
+/// ([`Work::Stage`]), its staging directory removed if it cannot be.
+fn stage(sandbox: &StepSandbox, given: &[(String, Kept)], store: &Store) -> Performed {
+    let staged = sandbox.stage_given(store, given);
+    if staged.is_err() {
+        let _ = remove_tree(sandbox.stage_dir());
+    }
+    (Ok(Plain::Empty), Vec::new(), Done::Staged(staged))
+}
+
+/// Keeps in `store` the files of `plain`, the result of the step whose
+/// sandbox is `sandbox` ([`Work::Keep`]): its outcome `plain` again.
+fn keep(plain: Plain, sandbox: &StepSandbox, store: &Store) -> Performed {
+    let host = |path: &str| sandbox.host_path(path).unwrap_or_default();
+    let kept = keep_files(&plain, store, &host);
+    (Ok(plain), Vec::new(), Done::Kept(kept))
 }
 
 impl Pool {
@@ -237,7 +308,7 @@ impl Pool {
                         return;
                     };
                     let began = Instant::now();
-                    let (outcome, kept, program) = perform(work, deadline);
+                    let (outcome, kept, done) = perform(work, deadline);
                     let ran = Ran {
                         node,
                         worker,
@@ -245,7 +316,7 @@ impl Pool {
                         ended: Instant::now(),
                         outcome,
                         kept,
-                        program,
+                        done,
                     };
                     if report.send(ran).is_err() {
                         return;

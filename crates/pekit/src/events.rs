@@ -4,7 +4,8 @@
 //!
 //! A build emits an [`Event`] at each change in a step's life and each
 //! program it runs (see `design/engine.md`, E8): a step met, found in the
-//! store, started, finished or failed, and an effect queued and run; and at
+//! store, started, finished or failed, an effect queued and run, and the
+//! engine's own work for a step done on the pool; and at
 //! each run of a target's or a step's code, which GCSL's graph mode stops
 //! each time it waits for a result, and runs again, from where it stopped,
 //! once the result is given. The
@@ -98,6 +99,19 @@ pub enum EventKind {
         began: Duration,
         /// Whether it succeeded.
         ok: bool,
+    },
+    /// The engine's own work for a step ran on the pool: staging its
+    /// sandbox, `stage`, or keeping its result's files in the store,
+    /// `keep`.
+    Worked {
+        /// The step's name.
+        step: String,
+        /// The work, `stage` or `keep`.
+        work: String,
+        /// The pool's thread that did it, from 0.
+        worker: usize,
+        /// When it began, since the build began.
+        began: Duration,
     },
     /// A target's or a step's code ran once, until it ended or stopped for
     /// a result it needs.

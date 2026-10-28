@@ -188,6 +188,7 @@ fn kinds(events: &[Event]) -> Vec<String> {
                 let whose = if *step { "step" } else { "target" };
                 format!("evaluated {whose} {unit}")
             }
+            EventKind::Worked { step, work, .. } => format!("{work} {step}"),
             other => format!("{other:?}"),
         })
         .collect()
@@ -244,18 +245,24 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
             "Discovered { step: \"shout\" }",
             "Discovered { step: \"copy\" }",
             "Started { step: \"shout\", attempt: 0 }",
-            // Each step's code runs until it stops for its program, and
-            // again, past it, once the program has run.
+            // Its sandbox staged before its code runs; its code runs until
+            // it stops for its program, and again, past it, once the
+            // program has run; and its result's files are kept before it
+            // finishes.
+            "stage shout",
             "evaluated step shout",
             "queued exec sh of Some(\"shout\")",
             "ran exec sh of Some(\"shout\"), ok true",
             "evaluated step shout",
+            "keep shout",
             "Finished { step: \"shout\" }",
             "Started { step: \"copy\", attempt: 0 }",
+            "stage copy",
             "evaluated step copy",
             "queued exec cp of Some(\"copy\")",
             "ran exec cp of Some(\"copy\"), ok true",
             "evaluated step copy",
+            "keep copy",
             "Finished { step: \"copy\" }",
         ]
     );
@@ -340,6 +347,24 @@ fn a_step_s_result_names_only_its_own_files_or_those_it_was_given() {
     let dir = workspace(text, &[("name.txt", "n\n")]);
     let built = build_in(dir.path(), state.path(), "hello").unwrap();
     assert_eq!(built.ran, 1);
+    // One of its own it never made is its failure, and leaves nothing
+    // staged behind.
+    let text = "#[hermetic] fn unmade() -> File { working_dir().file(\"never.txt\") }\n\
+                def build hello() { out = unmade() }\n";
+    let dir = workspace(text, &[]);
+    let error = build_in(dir.path(), state.path(), "hello").unwrap_err();
+    assert!(
+        error.contains("names `/pekit-out/.steps/unmade/")
+            && error.contains("which it did not make"),
+        "{error}"
+    );
+    let left: Vec<_> = fs::read_dir(state.path().join("scratch"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with("step-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]
