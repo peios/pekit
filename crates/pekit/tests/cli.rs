@@ -603,29 +603,46 @@ fn a_strict_build_runs_no_target_effect_but_reads_and_borrows_no_host_tool() {
     assert!(!err.contains("not hermetic"), "{err}");
 }
 
-#[test]
-fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
-    let dir = tempfile::tempdir().unwrap();
+/// A workspace whose step `made` makes a directory with a file, a
+/// directory in it and a symbolic link, and whose target `app/NAME` is
+/// `body`.
+fn made_workspace(dir: &Path, name: &str, body: &str) {
     write(
-        dir.path(),
+        dir,
         &[
             ("workspace.gcsl", ""),
             (
                 "app/build.gcsl",
-                "#[hermetic] fn made() -> Dir {\n\
-                 \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; echo inside > out/f\"])\n\
-                 \x20   working_dir().dir(\"out\")\n\
-                 }\n\
-                 def build reads() { = made().file(\"f\").read() }\n",
+                &format!(
+                    "#[hermetic] fn made() -> Dir {{\n\
+                     \x20   let r = exec([\"sh\", \"-c\", \"mkdir -p out/sub; echo inside > \
+                     out/f; echo deep > out/sub/g; ln -s f out/l\"])\n\
+                     \x20   working_dir().dir(\"out\")\n\
+                     }}\n\
+                     def build {name}() {{ {body} }}\n"
+                ),
             ),
         ],
+    );
+}
+
+#[test]
+fn a_target_reads_a_step_found_in_the_store_without_its_outputs_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    made_workspace(
+        dir.path(),
+        "reads",
+        "assert made().file(\"l\").read() == \"inside\\n\"\n\
+         let sub = made().dir(\"sub\").files()\n\
+         assert len(sub) == 1\n\
+         assert sub[0].path == made().file(\"sub/g\").path\n",
     );
     let cache = tempfile::tempdir().unwrap();
     let app = dir.path().join("app");
     let first = pekit(&app, cache.path(), &["build", "reads"]);
     assert!(first.status.success(), "{:?}", printed(&first));
     // With `pekit-out/` gone, the step is found in the store, and what the
-    // target reads of it is put back.
+    // target reads of it is read from there: nothing is put back.
     assert!(pekit(&app, cache.path(), &["clean"]).status.success());
     let again = pekit(&app, cache.path(), &["build", "reads"]);
     let (out, err) = printed(&again);
@@ -634,16 +651,135 @@ fn a_step_found_in_the_store_has_its_outputs_placed_for_the_target_to_read() {
         out.starts_with("built app/reads: 0 steps run, 1 found"),
         "{out}"
     );
+    assert!(!dir.path().join("pekit-out/.steps").exists());
+}
+
+#[test]
+fn a_program_a_target_runs_reads_a_step_found_in_the_store_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    made_workspace(
+        dir.path(),
+        "cats",
+        "let l = made().file(\"l\").path\n\
+         let r = exec([\"cat\", l])\n\
+         assert r.stdout == \"inside\\n\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let first = pekit(&app, cache.path(), &["build", "cats"]);
+    assert!(first.status.success(), "{:?}", printed(&first));
+    assert!(pekit(&app, cache.path(), &["clean"]).status.success());
+    let again = pekit(&app, cache.path(), &["build", "cats"]);
+    let (out, err) = printed(&again);
+    assert!(again.status.success(), "{err}");
+    assert!(
+        out.starts_with("built app/cats: 0 steps run, 1 found"),
+        "{out}"
+    );
     // Under its step's directory, named by what the step is.
     let made: Vec<_> = fs::read_dir(dir.path().join("pekit-out/.steps/made"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(made.len(), 1, "{made:?}");
-    assert_eq!(
-        fs::read_to_string(made[0].join("out/f")).unwrap(),
-        "inside\n"
+    // What is put there in place of what was is put back, before the
+    // program reads it.
+    let placed = made[0].join("out/f");
+    fs::remove_file(&placed).unwrap();
+    fs::write(&placed, "stale\n").unwrap();
+    let third = pekit(&app, cache.path(), &["build", "cats"]);
+    assert!(third.status.success(), "{:?}", printed(&third));
+    assert_eq!(fs::read_to_string(&placed).unwrap(), "inside\n");
+}
+
+#[test]
+fn a_target_lists_an_output_from_the_store_as_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first listing is the store's; once a program has run, the
+    // second is the disk's.
+    made_workspace(
+        dir.path(),
+        "lists",
+        "let before = made().files()\n\
+         let r = exec([\"true\"])\n\
+         let after = dir(made().path).files()\n\
+         assert before == after\n\
+         assert len(before) == 3\n\
+         assert before[0].path.ends_with(\"/out/f\")\n\
+         assert before[1].path.ends_with(\"/out/l\")\n\
+         assert before[2].path.ends_with(\"/out/sub/g\")\n",
     );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let built = pekit(&app, cache.path(), &["build", "lists"]);
+    assert!(built.status.success(), "{:?}", printed(&built));
+}
+
+/// A workspace whose step `listing` lists the directory it is given, and
+/// whose target `app/NAME` is `body`.
+fn listing_workspace(dir: &Path, name: &str, body: &str) {
+    write(
+        dir,
+        &[
+            ("workspace.gcsl", ""),
+            ("src/a.txt", "a\n"),
+            (
+                "app/build.gcsl",
+                &format!(
+                    "#[hermetic] fn listing(d: Dir) -> File {{\n\
+                     \x20   let r = exec([\"sh\", \"-c\", \"cd {{d.path}}; find . | sort > {{working_dir().path}}/out\"])\n\
+                     \x20   working_dir().file(\"out\")\n\
+                     }}\n\
+                     def build {name}() {{ {body} }}\n"
+                ),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_step_is_given_nothing_of_the_build_s_outputs_by_its_workspace_path() {
+    let dir = tempfile::tempdir().unwrap();
+    listing_workspace(dir.path(), "listed", "= listing(dir(\"../src\"))");
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let first = pekit(&app, cache.path(), &["build", "listed"]);
+    assert!(first.status.success(), "{:?}", printed(&first));
+    // `pekit-out/` is there now, but is no part of the workspace.
+    fs::write(
+        app.join("build.gcsl"),
+        fs::read_to_string(app.join("build.gcsl"))
+            .unwrap()
+            .replace("dir(\"../src\")", "dir(\"../pekit-out/app\")"),
+    )
+    .unwrap();
+    let inside = pekit(&app, cache.path(), &["build", "listed"]);
+    let (_, err) = printed(&inside);
+    assert!(!inside.status.success());
+    assert!(
+        err.contains("is in the build's output directory, which is no part of the workspace"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_target_lists_the_workspace_without_the_build_s_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    listing_workspace(
+        dir.path(),
+        "counted",
+        "let made = listing(dir(\"../src\"))\n\
+         assert len(dir(\"..\").files()) == 3\n\
+         = made",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    // The workspace's three files, the second time with `pekit-out/` there.
+    for _ in 0..2 {
+        let built = pekit(&app, cache.path(), &["build", "counted"]);
+        assert!(built.status.success(), "{:?}", printed(&built));
+    }
+    assert!(dir.path().join("pekit-out").is_dir());
 }
 
 #[test]

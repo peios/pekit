@@ -20,7 +20,11 @@
 //!   evicted with contents (see `design/engine.md`, E4);
 //! - `tmp/` holds what is being written: a blob or a record is written
 //!   there in full and renamed into place, so that a reader, or another
-//!   process, never sees one in part.
+//!   process, never sees one in part;
+//! - `complete/` marks each tree found to have every content it names, at
+//!   any depth, by its digest, so that a record's tree is walked for that
+//!   once, not in every build that finds the record ([`Store::holds_tree`]).
+//!   An eviction removes every mark before it removes a blob.
 //!
 //! A file is put into the store by hashing it as it is copied ([`Store::put_file`]),
 //! and taken out by a hard link to its blob, or a copy where a link cannot
@@ -305,6 +309,14 @@ pub struct Store {
     complete: Arc<Mutex<HashSet<Digest>>>,
 }
 
+/// How a tree was found complete (see [`Store::holds_tree`]).
+enum Found {
+    /// This process found it so, or its mark says so.
+    Known,
+    /// A walk of it just found it so.
+    Walked,
+}
+
 /// What a store was used for (see [`Store::used`]).
 #[derive(Debug, Default)]
 pub struct Used {
@@ -312,6 +324,8 @@ pub struct Used {
     pub records: HashSet<Digest>,
     /// Each scratch directory held, by its name.
     pub scratch: HashSet<String>,
+    /// The bytes of the blobs it wrote.
+    pub added: u64,
 }
 
 impl Store {
@@ -374,28 +388,74 @@ impl Store {
     }
 
     /// Whether the store holds every content of the tree `digest`, at any
-    /// depth.
+    /// depth: marked so in `complete/` once it is found to.
     #[must_use]
     pub fn holds_tree(&self, digest: &Digest) -> bool {
+        match self.complete_by(digest) {
+            Some(Found::Walked) => {
+                let _ = self.mark_complete(digest);
+                true
+            }
+            Some(Found::Known) => true,
+            None => false,
+        }
+    }
+
+    /// Where the mark that the tree `digest` is complete is.
+    fn complete_path(&self, digest: &Digest) -> PathBuf {
+        self.root.join("complete").join(digest.hex())
+    }
+
+    /// Marks the tree `digest` complete.
+    fn mark_complete(&self, digest: &Digest) -> io::Result<()> {
+        fs::create_dir_all(self.root.join("complete"))?;
+        File::create(self.complete_path(digest)).map(drop)
+    }
+
+    /// Removes every mark that a tree is complete, as an eviction does
+    /// before it removes a blob.
+    ///
+    /// # Errors
+    ///
+    /// That they cannot be removed.
+    pub fn forget_complete(&self) -> io::Result<()> {
+        if let Ok(mut complete) = self.complete.lock() {
+            complete.clear();
+        }
+        match fs::remove_dir_all(self.root.join("complete")) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// How the store was found to hold every content of the tree `digest`,
+    /// if it does: by what this process found, or by its mark, or by a walk
+    /// of the tree.
+    fn complete_by(&self, digest: &Digest) -> Option<Found> {
         if self
             .complete
             .lock()
             .is_ok_and(|complete| complete.contains(digest))
+            || self.complete_path(digest).exists()
         {
-            return true;
+            if let Ok(mut complete) = self.complete.lock() {
+                complete.insert(*digest);
+            }
+            return Some(Found::Known);
         }
-        let Ok(tree) = self.read_tree(digest) else {
-            return false;
-        };
+        let tree = self.read_tree(digest).ok()?;
         let holds = tree.entries.iter().all(|entry| match entry {
             TreeEntry::File { file, .. } => self.has(&file.digest),
-            TreeEntry::Dir { tree, .. } => self.holds_tree(tree),
+            TreeEntry::Dir { tree, .. } => self.complete_by(tree).is_some(),
             TreeEntry::Link { .. } => true,
         });
-        if holds && let Ok(mut complete) = self.complete.lock() {
+        if !holds {
+            return None;
+        }
+        if let Ok(mut complete) = self.complete.lock() {
             complete.insert(*digest);
         }
-        holds
+        Some(Found::Walked)
     }
 
     /// The store's directory.
@@ -522,7 +582,12 @@ impl Store {
         }
         let mode = if executable { 0o555 } else { 0o444 };
         fs::set_permissions(temp, fs::Permissions::from_mode(mode))?;
-        fs::rename(temp, &target)
+        let size = fs::metadata(temp)?.len();
+        fs::rename(temp, &target)?;
+        if let Ok(mut used) = self.used.lock() {
+            used.added += size;
+        }
+        Ok(())
     }
 
     /// The contents of the blob of `digest`.
@@ -852,6 +917,19 @@ impl Store {
             trees.insert(*digest, tree.clone());
         }
         Ok(tree)
+    }
+
+    /// Whether the file at `at` is a link to the blob of `entry`, as
+    /// [`Store::materialise_file`] makes it where it can.
+    #[must_use]
+    pub fn is_linked(&self, entry: &FileEntry, at: &Path) -> bool {
+        let (Ok(meta), Ok(blob)) = (
+            fs::symlink_metadata(at),
+            fs::metadata(self.blob_path(&entry.digest, entry.executable)),
+        ) else {
+            return false;
+        };
+        meta.is_file() && (meta.dev(), meta.ino()) == (blob.dev(), blob.ino())
     }
 
     /// Whether the directory at `at` is the tree `digest` as

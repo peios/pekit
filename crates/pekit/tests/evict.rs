@@ -5,6 +5,7 @@ mod building;
 
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use building::{Options, build_in, observed_with};
 use pekit::evict::{DEFAULT_LIMIT, limit_of};
@@ -157,4 +158,88 @@ fn a_store_within_its_limit_reads_nothing_more() {
     assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
     assert!(store.join("eviction.json").exists());
     assert_eq!(fs::read_dir(store.join("usage")).unwrap().count(), 0);
+}
+
+/// The bytes of blobs the ledger of the store in `state` says it has.
+fn ledgered(state: &Path) -> u64 {
+    let text = fs::read_to_string(state.join("store/size")).unwrap();
+    text.split(' ').next().unwrap().parse().unwrap()
+}
+
+/// Writes the ledger of the store in `state`: `bytes` measured `ago`
+/// seconds ago.
+fn ledger(state: &Path, bytes: u64, ago: u64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::create_dir_all(state.join("store")).unwrap();
+    fs::write(state.join("store/size"), format!("{bytes} {}\n", now - ago)).unwrap();
+}
+
+#[test]
+fn a_store_is_walked_only_when_its_ledger_may_be_over_its_limit() {
+    let dir = workspace();
+    let state = tempfile::tempdir().unwrap();
+    ledger(state.path(), 0, 0);
+    // What a build wrote is added to the ledger.
+    assert_eq!(built(dir.path(), state.path(), Some(DEFAULT_LIMIT)), (2, 0));
+    assert!(
+        ledgered(state.path()) >= 2 << 20,
+        "{}",
+        ledgered(state.path())
+    );
+    // A ledger within the limit is trusted: nothing is walked or evicted.
+    ledger(state.path(), 0, 0);
+    assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
+    assert_eq!(built(dir.path(), state.path(), None), (0, 2));
+    // One a day old is not: the store is walked, and evicted.
+    ledger(state.path(), 0, 2 * 24 * 60 * 60);
+    assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
+    assert!(
+        ledgered(state.path()) < 3 << 19,
+        "{}",
+        ledgered(state.path())
+    );
+    assert_eq!(built(dir.path(), state.path(), None), (1, 1));
+    // One over the limit is walked too.
+    ledger(state.path(), 4 << 20, 0);
+    assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
+    assert_eq!(built(dir.path(), state.path(), None), (1, 1));
+}
+
+#[test]
+fn a_tree_known_complete_is_walked_again_once_an_eviction_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "workspace.gcsl",
+                "#[hermetic] def quick() -> Dir {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; head -c 1048576 /dev/zero | tr '\\\\0' q > out/q\"])\n\
+                 \x20   = working_dir().dir(\"out\")\n\
+                 }\n\
+                 #[hermetic] def slow() -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"sleep 1; head -c 1048576 /dev/zero | tr '\\\\0' s > out\"])\n\
+                 \x20   = working_dir().file(\"out\")\n\
+                 }\n",
+            ),
+            (
+                "app/build.gcsl",
+                "def build both() { = [quick(), slow()] }\n",
+            ),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    assert_eq!(built(dir.path(), state.path(), None), (2, 0));
+    // Found, its tree is marked complete.
+    assert_eq!(built(dir.path(), state.path(), None), (0, 2));
+    let marks = state.path().join("store/complete");
+    assert_eq!(fs::read_dir(&marks).unwrap().count(), 1);
+    // An eviction takes its contents, and every mark: it is made again.
+    assert_eq!(built(dir.path(), state.path(), Some(3 << 19)), (0, 2));
+    assert!(!marks.exists());
+    assert_eq!(built(dir.path(), state.path(), None), (1, 1));
+    assert_eq!(built(dir.path(), state.path(), None), (0, 2));
 }

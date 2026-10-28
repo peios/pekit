@@ -47,6 +47,7 @@ use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
 use crate::evict::limit_of;
+use crate::exposure::Exposing;
 use crate::engine::{
     target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
     package_all_observed, program_command, query_all, run_script_observed,
@@ -568,6 +569,11 @@ fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitC
     };
     let Some(settings) = settings_for(&args.shared, &loaded, terminal) else {
         return ExitCode::FAILURE;
+    };
+    // What it runs may read any output.
+    let settings = Settings {
+        exposing: Exposing::All,
+        ..settings
     };
     let doing = if script {
         Doing::Script(&args.args)
@@ -1410,6 +1416,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         strict,
         cache_limit,
         profile_gcsl: shared.gcsl_profile.is_some(),
+        exposing: Exposing::AsNeeded,
     })
 }
 

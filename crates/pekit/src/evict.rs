@@ -21,6 +21,13 @@
 //! - **What was used** is journalled in `usage/`, one file per build; the
 //!   eviction reads every journal and keeps each record's priority, with
 //!   `L`, in `eviction.json`, and which records it evicted.
+//! - **The store's size** is its blobs' and its scratch directories'. Its
+//!   blobs' is kept in `size` ([`Ledger`]): what an eviction last measured,
+//!   walking every blob, a day ago at most, and the bytes of the blobs each
+//!   build wrote since, added as it ends. The blobs are walked only when
+//!   that, which can only be too large, is above the limit, or is older, or
+//!   is not there; a build that is ended before it adds what it wrote adds
+//!   nothing, which the next walk sets right.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
 //!   so it evicts nothing while another process has the store.
@@ -182,6 +189,7 @@ struct BlobSeen {
 /// That the store cannot be read or written.
 pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicted>> {
     journal(store.root(), used)?;
+    Ledger::add(store.root(), used.added)?;
     match store.held().try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
@@ -199,6 +207,78 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     evicted
+}
+
+/// The size of a store's blobs as its file `size` keeps it (see
+/// [Eviction](#eviction)): `BYTES WALKED`, the bytes, and when an eviction
+/// last measured them, in seconds since the Unix epoch.
+struct Ledger;
+
+impl Ledger {
+    /// How long a measurement is trusted, in seconds: a day.
+    const TRUSTED: u64 = 24 * 60 * 60;
+
+    /// The size of the blobs of the store at `root` by its ledger, if it
+    /// has one it trusts.
+    fn read(root: &Path) -> Option<u64> {
+        let text = fs::read_to_string(root.join("size")).ok()?;
+        let (bytes, walked) = text.trim().split_once(' ')?;
+        let (bytes, walked): (u64, u64) = (bytes.parse().ok()?, walked.parse().ok()?);
+        (now_seconds().saturating_sub(walked) <= Self::TRUSTED).then_some(bytes)
+    }
+
+    /// Notes in the ledger of the store at `root` that its blobs are
+    /// `bytes`, measured now.
+    fn write(root: &Path, bytes: u64) -> io::Result<()> {
+        let _held = Self::held(root)?;
+        Self::put(root, bytes, now_seconds())
+    }
+
+    /// Adds `bytes` to the ledger of the store at `root`, if it has one.
+    fn add(root: &Path, bytes: u64) -> io::Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let _held = Self::held(root)?;
+        let Ok(text) = fs::read_to_string(root.join("size")) else {
+            return Ok(());
+        };
+        let parsed = text
+            .trim()
+            .split_once(' ')
+            .and_then(|(was, walked)| Some((was.parse::<u64>().ok()?, walked.parse().ok()?)));
+        match parsed {
+            Some((was, walked)) => Self::put(root, was.saturating_add(bytes), walked),
+            None => Ok(()),
+        }
+    }
+
+    /// The ledger's own lock, held exclusively, which every writer takes.
+    fn held(root: &Path) -> io::Result<File> {
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("size.lock"))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    /// Writes the ledger, `bytes` measured at `walked`, in place at once.
+    fn put(root: &Path, bytes: u64, walked: u64) -> io::Result<()> {
+        let temp = root
+            .join("tmp")
+            .join(format!("size-{}", std::process::id()));
+        fs::write(&temp, format!("{bytes} {walked}\n"))?;
+        fs::rename(&temp, root.join("size"))
+    }
+}
+
+/// The seconds since the Unix epoch.
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Appends `used` to a journal of its own in the store at `root`.
@@ -232,15 +312,25 @@ fn journal(root: &Path, used: &Used) -> io::Result<()> {
 /// [`evict`], its lock held exclusively.
 fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     let root = store.root();
-    let blobs = blobs_of(root)?;
     let scratch = scratch_of(root)?;
-    let total: u64 = blobs.values().map(|blob| blob.size).sum::<u64>()
-        + scratch.values().map(|(_, size)| size).sum::<u64>();
+    let scratch_size = |scratch: &HashMap<String, (PathBuf, u64)>| -> u64 {
+        scratch.values().map(|(_, size)| size).sum()
+    };
+    // Within its limit by what the ledger says, nothing more is read.
+    if Ledger::read(root).is_some_and(|blobs| blobs + scratch_size(&scratch) <= limit) {
+        return Ok(None);
+    }
+    let blobs = blobs_of(root)?;
+    let measured: u64 = blobs.values().map(|blob| blob.size).sum();
+    let total = measured + scratch_size(&scratch);
     // Within its limit, nothing more is read: the journals wait for an
     // eviction that does something.
     if total <= limit {
+        Ledger::write(root, measured)?;
         return Ok(None);
     }
+    // No tree is known to be complete once a blob may be gone.
+    store.forget_complete()?;
     let state_path = root.join("eviction.json");
     let mut state: Priorities = fs::read(&state_path)
         .ok()
@@ -294,6 +384,7 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     for journal in journals {
         let _ = fs::remove_file(journal);
     }
+    Ledger::write(root, after.saturating_sub(scratch_size(&scratch_of(root)?)))?;
     Ok(Some(Evicted {
         before: total,
         after,
