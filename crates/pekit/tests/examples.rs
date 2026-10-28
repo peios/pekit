@@ -804,7 +804,7 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
 /// The workspace configuration of example 10: the host's C toolchain and
 /// QEMU, ppk and peiso's tools at `tools/`, and the pinned Rust.
 const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
-                     import * from \"github.com/gcslib/python\"\n\
+                     import Toolchain::* from \"github.com/gcslib/python\"\n\
                      import * from \"github.com/gcslib/peiso\"\n\
                      import * from \"github.com/gcslib/qemu\"\n\
                      import * from \"github.com/gcslib/rust\"\n\

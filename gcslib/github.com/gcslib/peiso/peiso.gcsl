@@ -97,7 +97,7 @@ fn assemble(
         "--mkuki",
         tool.mkuki.path,
     ])
-    = file(output)
+    = working_dir().file(output)
 }
 
 # peiso's TOML spec of an ISO of `kernel` and `packages`, its repository the

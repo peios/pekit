@@ -100,9 +100,9 @@ def build prelude() {
         packages = ["prelude", "seed-sd"],
         beside = [{at = "sdk"; place = sdk}],
         env = [
-            {name = "PEIOS_LIB_DIR"; value = "/work/sdk/lib"},
-            {name = "PEIOS_INCLUDE"; value = "/work/sdk/include"},
-            {name = "PKM_UAPI"; value = "/work/sdk/include"},
+            {key = "PEIOS_LIB_DIR"; value = "/work/sdk/lib"},
+            {key = "PEIOS_INCLUDE"; value = "/work/sdk/include"},
+            {key = "PKM_UAPI"; value = "/work/sdk/include"},
         ],
         libclang = [clang.libclang_18()],
     )
