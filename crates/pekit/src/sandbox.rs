@@ -305,6 +305,11 @@ impl Effects for HostView {
         Ok(PathBuf::from(path))
     }
 
+    /// The output directory, which is no part of the workspace.
+    fn hides(&self, host: &Path) -> bool {
+        host == self.outputs
+    }
+
     fn working_dir(&self) -> Result<PathBuf, String> {
         Ok(Path::new(WORKSPACE).join(&self.here))
     }

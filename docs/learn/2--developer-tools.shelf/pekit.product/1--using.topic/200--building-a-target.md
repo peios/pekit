@@ -325,6 +325,11 @@ them under `cc` and `cc.2`. This is the path `pekit build` prints.
 The copies are your own: you can change or delete them, and the next
 build puts them back.
 
+`pekit-out/` is no part of the workspace. A target that lists a
+workspace directory, such as `dir(".").files()`, never sees it, and a
+step can't be given a file in it by its workspace path. Name an output by
+its path under `/pekit-out` instead.
+
 A target can also read what a step made and decide what to do next, such
 as compiling each file a generator wrote. Pekit answers those reads from
 its store. A step's intermediate files appear under `pekit-out/.steps/`

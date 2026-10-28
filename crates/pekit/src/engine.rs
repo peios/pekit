@@ -2461,6 +2461,14 @@ impl Run<'_> {
         };
         // Read only if it changed since a build last put it in the store.
         let host = self.loaded.libraries.host(&self.loaded.root, rest);
+        // The build's outputs are no part of the workspace.
+        let outputs = self.settings.outputs.as_path();
+        if host.starts_with(outputs) {
+            return Err(format!(
+                "`{path}` is in the build's output directory, which is no part of the \
+                 workspace: name an output at its path under `{OUTPUTS}`"
+            ));
+        }
         let (seen, now) = &mut self.workspace_seen;
         let unreadable = |error: io::Error| format!("cannot read `{path}`: {error}");
         let kept = if dir {

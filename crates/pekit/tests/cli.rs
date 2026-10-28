@@ -715,6 +715,73 @@ fn a_target_lists_an_output_from_the_store_as_from_disk() {
     assert!(built.status.success(), "{:?}", printed(&built));
 }
 
+/// A workspace whose step `listing` lists the directory it is given, and
+/// whose target `app/NAME` is `body`.
+fn listing_workspace(dir: &Path, name: &str, body: &str) {
+    write(
+        dir,
+        &[
+            ("workspace.gcsl", ""),
+            ("src/a.txt", "a\n"),
+            (
+                "app/build.gcsl",
+                &format!(
+                    "#[hermetic] fn listing(d: Dir) -> File {{\n\
+                     \x20   let r = exec([\"sh\", \"-c\", \"cd {{d.path}}; find . | sort > {{working_dir().path}}/out\"])\n\
+                     \x20   working_dir().file(\"out\")\n\
+                     }}\n\
+                     def build {name}() {{ {body} }}\n"
+                ),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_step_is_given_nothing_of_the_build_s_outputs_by_its_workspace_path() {
+    let dir = tempfile::tempdir().unwrap();
+    listing_workspace(dir.path(), "listed", "= listing(dir(\"../src\"))");
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let first = pekit(&app, cache.path(), &["build", "listed"]);
+    assert!(first.status.success(), "{:?}", printed(&first));
+    // `pekit-out/` is there now, but is no part of the workspace.
+    fs::write(
+        app.join("build.gcsl"),
+        fs::read_to_string(app.join("build.gcsl"))
+            .unwrap()
+            .replace("dir(\"../src\")", "dir(\"../pekit-out/app\")"),
+    )
+    .unwrap();
+    let inside = pekit(&app, cache.path(), &["build", "listed"]);
+    let (_, err) = printed(&inside);
+    assert!(!inside.status.success());
+    assert!(
+        err.contains("is in the build's output directory, which is no part of the workspace"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_target_lists_the_workspace_without_the_build_s_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    listing_workspace(
+        dir.path(),
+        "counted",
+        "let made = listing(dir(\"../src\"))\n\
+         assert len(dir(\"..\").files()) == 3\n\
+         = made",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    // The workspace's three files, the second time with `pekit-out/` there.
+    for _ in 0..2 {
+        let built = pekit(&app, cache.path(), &["build", "counted"]);
+        assert!(built.status.success(), "{:?}", printed(&built));
+    }
+    assert!(dir.path().join("pekit-out").is_dir());
+}
+
 #[test]
 fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
     if !Path::new("/dev/kvm").exists() {
