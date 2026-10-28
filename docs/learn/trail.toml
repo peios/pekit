@@ -17,7 +17,7 @@ proper_nouns = [
   "NSS", "SID", "SIDs", "API", "ABI", "SDK", "SYSTEM", "GXWI",
   "regman", "evman", "peinit", "authd", "eventd", "evctl", "KMES",
   "KACS", "LCS", "PSPU", "PSPK", "PGSS", "PCDS", "SQL", "SQLite",
-  "WAL", "MessagePack", "GUID", "GUIDs", "Loom", "JSON", "UTF-8",
+  "WAL", "MessagePack", "GUID", "GUIDs", "Loom", "JSON", "UTF-8", "Clippy",
 ]
 
 [lint.spelling]

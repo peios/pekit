@@ -18,7 +18,7 @@ Import it as `github.com/gcslib/rust`.
 
 ## Before you start
 
-- The rust, gcc, and buildenv libraries. See [Libraries](~pekit/libraries).
+- The rust, gcc, buildenv, and python libraries. See [Libraries](~pekit/libraries).
 - A Cargo workspace with a `Cargo.lock`.
 
 ## Register the toolchain
@@ -94,6 +94,14 @@ crate's feature gets it, and a program from a member that doesn't never
 does, even when you build both at once. Cargo unifies features across
 everything one `cargo build` names; pekit plans each member on its own.
 
+Cargo's plans leave out some of what it takes from the manifests: the
+`[lints]` table, which targets have `harness = false`, and the `--check-cfg`
+flags it gives every crate. The library reads each member's manifest for
+them with the python library's pinned Python, and compiles the member's
+crates with them, as Cargo does. Link-time optimization follows Cargo too:
+the programs a profile's `lto` names are optimized whole, and the libraries
+they link carry what that needs.
+
 ## Crates that read outside their directory
 
 Each step's sandbox holds the toolchain, the crate's own directory, and
@@ -138,8 +146,34 @@ def test server_tests(tests: List<rust.RustTest> = rust.tests(crates(), "server"
 }
 ```
 
-Give `run_test` what a test reads in `given`, and its variables in `env`. A
-test whose program didn't change is found in the store.
+Give `run_test` what a test reads in `given`, its variables in `env`, and
+its arguments in `args`, such as a filter and `--test-threads=1`. A test
+whose program didn't change is found in the store.
+
+A test target with `harness = false` in its manifest is compiled as a
+program of its own, as Cargo compiles it.
+
+## Documentation tests and Clippy
+
+`rust.doctests(ws, package)` tests a member's documentation, as `cargo test
+--doc` does: rustdoc compiles and runs each crate's examples as a step. It
+takes `features`, `given`, and `env` as `run_test` does, and gives no tests
+for a member with no library.
+
+`rust.clippy(ws, package)` checks a member with Clippy, as `cargo clippy
+--all-targets` does: its library, programs, build script, tests, benchmarks,
+and examples, each crate a step. `flags` come after the member's lints, so
+`flags = ["-Dwarnings"]` denies every warning. A check fails when a lint it
+denies fires.
+
+Both are steps that the rust library makes, so make them in a test's
+parameter defaults, where a test plans and builds what it needs:
+
+```gcsl
+def test clippy(checked: List<List<{}>> = rust.clippy(crates(), "server", flags = ["-Dwarnings"])) {}
+
+def test doctests(ran: List<List<{}>> = rust.doctests(crates(), "server")) {}
+```
 
 ## Build with Cargo, whole
 
