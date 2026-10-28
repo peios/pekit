@@ -8,9 +8,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-# GCSL's branch for PEI-1595, until it is merged into GCSL's main.
-gcsl = { path = "../../../gcsl/crates/gcsl" }
-gcsl-disk = { path = "../../../gcsl/crates/gcsl-disk" }
+# GCSL at a pinned commit. To build against a local checkout instead, give
+# Cargo a patch, such as in `.cargo/config.toml`:
+#   [patch."https://github.com/peios/gcsl"]
+#   gcsl = { path = "../gcsl/crates/gcsl" }
+#   gcsl-disk = { path = "../gcsl/crates/gcsl-disk" }
+gcsl = { git = "https://github.com/peios/gcsl", rev = "1c846d5cc060b32a6a5172f56079337f5150be69" }
+gcsl-disk = { git = "https://github.com/peios/gcsl", rev = "1c846d5cc060b32a6a5172f56079337f5150be69" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
