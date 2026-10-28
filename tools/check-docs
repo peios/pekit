@@ -12,8 +12,11 @@ trap 'rm -rf -- "$output"' EXIT HUP INT TERM
 # A link to another product, such as GCSL's, resolves only in the combined
 # Learn site, so this build allows dangling links and then fails on any but
 # those. Build the combined site to check them.
-"$trail" build docs/learn --strict --allow-dangling-links --no-cache \
-    --out "$output/site" 2>"$output/log"
+if ! "$trail" build docs/learn --strict --allow-dangling-links --no-cache \
+    --out "$output/site" 2>"$output/log"; then
+    cat "$output/log" >&2
+    exit 1
+fi
 dangling=$(grep -v "names unknown product" "$output/log" || true)
 if [ -n "$dangling" ]; then
     printf '%s\n' "$dangling" >&2

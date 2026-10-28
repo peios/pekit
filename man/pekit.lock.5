@@ -1,0 +1,173 @@
+.TH PEKIT.LOCK 5 2026-10-28 "Peios pekit 0.1.0"
+.SH NAME
+pekit.lock \- the libraries a pekit workspace pins, and where they come from
+.SH SYNOPSIS
+.I WORKSPACE/pekit.lock
+.SH DESCRIPTION
+.I pekit.lock
+is a JSON file at the root of a
+.BR pekit (1)
+workspace.
+It pins each library the workspace imports, and each library those import, at a commit of the git repository it comes from, so that every checkout of the workspace builds with the same libraries.
+.B pekit lock
+writes it.
+Every other command reads it as it is written.
+.PP
+The file is one object with two arrays,
+.B sources
+and
+.BR libraries .
+Either can be left out, and is then empty.
+.B pekit lock
+writes both, the libraries sorted by path, with two spaces of indentation.
+.SS sources
+Each source says where the libraries under a prefix of import paths come from.
+A library comes from the first source whose
+.B prefix
+is its path, or a part of its path that ends before a
+.BR / .
+A source has these fields:
+.TP
+.B prefix
+A prefix of import paths, such as
+.BR github.com/gcslib .
+.TP
+.B git
+The git repository, a URL or a path, as
+.BR git (1)
+reads it.
+.TP
+.B dir
+The directory in the repository that holds the libraries under the prefix: the library
+.IB PREFIX / REST
+is the directory
+.IB DIR / REST
+of the repository.
+Empty or left out for the repository's root.
+.TP
+.B rev
+The revision the source follows: a branch, a tag, or a commit.
+.B HEAD
+if left out.
+.PP
+A library that no source covers takes a source by the convention of Go's modules:
+its path's first three parts,
+.IB HOST / OWNER / REPO\fR,
+are the prefix, the repository is
+.BI https:// HOST / OWNER / REPO\fR,
+the directory is the repository's root, and the revision is
+.BR HEAD .
+.B pekit lock
+adds the source to the file, where it can be edited.
+.SS libraries
+Each pinned library has these fields, all of which
+.B pekit lock
+writes:
+.TP
+.B path
+The library's import path, such as
+.BR github.com/gcslib/gcc .
+.TP
+.B git
+The repository it was pinned from.
+.TP
+.B dir
+Its directory in the repository, empty for the repository's root.
+.TP
+.B commit
+The commit it is pinned at, its whole name of 40 hexadecimal digits.
+.TP
+.B tree
+The SHA-256 digest of the library's directory as it was exported, as pekit's store names a tree, in 64 hexadecimal digits.
+A library in
+.I .gcsl/libraries/
+whose tree has another digest differs from its pin.
+.SH BEHAVIOR
+.B pekit lock
+finds every library the workspace imports, and pins each that the file does not pin, at the commit its source's revision names.
+With
+.BR \-\-update ,
+it pins every library again.
+It exports each library it pins, with
+.BR "git archive" ,
+into
+.IR .gcsl/libraries/PATH/ ,
+and drops each pinned library that nothing imports, with its directory.
+.PP
+.BR build ,
+.BR test ,
+.BR run ,
+.BR query ,
+.BR package ,
+and
+.B publish
+put back each pinned library missing from
+.IR .gcsl/libraries/ ,
+from the commit it is pinned at, and warn of each one there that differs from its pin.
+A build with
+.B \-\-strict
+fails if the workspace has no
+.IR pekit.lock ,
+if a library it imports is not pinned, if a pinned library differs from its pin, or if
+.B GCSL_LIBRARY_PATH
+is set.
+.PP
+Repositories are kept as bare clones in the cache directory's
+.IR git/ ,
+and fetched only to resolve a revision or to get a commit they do not have.
+A workspace whose libraries are pinned and fetched builds without the network.
+.SH FILES
+.TP
+.I WORKSPACE/pekit.lock
+This file.
+Commit it.
+.TP
+.I WORKSPACE/.gcsl/libraries/
+The pinned libraries, exported.
+Do not commit it.
+.TP
+.I CACHE/git/
+Bare clones of the libraries' repositories.
+.SH EXAMPLES
+This lock pins the gcc library from its own repository, and takes the ppk library from a directory of another repository's
+.B main
+branch:
+.PP
+.in +4n
+.EX
+{
+  "sources": [
+    {
+      "prefix": "github.com/gcslib/gcc",
+      "git": "https://github.com/gcslib/gcc",
+      "dir": "",
+      "rev": "HEAD"
+    },
+    {
+      "prefix": "github.com/gcslib/ppk",
+      "git": "/srv/git/pekit",
+      "dir": "gcslib/github.com/gcslib/ppk",
+      "rev": "main"
+    }
+  ],
+  "libraries": [
+    {
+      "path": "github.com/gcslib/gcc",
+      "git": "https://github.com/gcslib/gcc",
+      "dir": "",
+      "commit": "72dae8c75eabc34c63615380a9197e1021a39952",
+      "tree": "9134e446ef194af0f256bff0b3c5f6cb134fe40012d40510861ebf3a43588019"
+    }
+  ]
+}
+.EE
+.in
+.PP
+The lock does not pin the ppk library, so
+.B pekit lock
+pins it from the second source.
+.SH SEE ALSO
+.BR git (1),
+.BR pekit (1)
+.PP
+https://learn.peios.org/pekit

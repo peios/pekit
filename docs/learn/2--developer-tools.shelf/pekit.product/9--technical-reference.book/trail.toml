@@ -1,0 +1,3 @@
+title = "Pekit Technical Reference Manual"
+short = "Pekit TRM"
+description = "How pekit loads a workspace, evaluates targets into steps, keys, sandboxes, and records them, keeps its store, and fails."

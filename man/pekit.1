@@ -1,0 +1,576 @@
+.TH PEKIT 1 2026-10-28 "Peios pekit 0.1.0"
+.SH NAME
+pekit \- build, test, run, and package GCSL build files as cached, sandboxed steps
+.SH SYNOPSIS
+.B pekit build
+.RI [ OPTIONS ]
+.IR TARGET ...
+.br
+.B pekit test
+.RI [ OPTIONS ]
+.RI [ TEST ...]
+.br
+.B pekit run
+.RI [ OPTIONS ]
+.I NAME
+.RI [ ARG ...]
+.br
+.B pekit query deps
+.RB [ \-\-kind
+.IR KIND ]
+.RI [ OPTIONS ]
+.IR TARGET ...
+.br
+.B pekit query rdeps
+.RB [ \-\-kind
+.IR KIND ]
+.RI [ OPTIONS ]
+.I FILE
+.RI [ TARGET ...]
+.br
+.B pekit package
+.RI [ OPTIONS ]
+.RI [ PACKAGE ...]
+.br
+.B pekit publish
+.RI [ OPTIONS ]
+.B \-\-to
+.I STORE
+.IR PACKAGE ...
+.br
+.B pekit release
+.RB [ \-j
+.IR JOBS ]
+.RB [ \-\-trace
+.IR FILE ]
+.B \-\-to
+.I STORE
+.I PACKAGE
+.br
+.B pekit lock
+.RB [ \-\-update ]
+.br
+.B pekit clean
+.RB [ \-\-cache ]
+.br
+.B pekit
+.RB [ \-h | \-\-help | \-V | \-\-version ]
+.SH DESCRIPTION
+.B pekit
+is a build system whose build files are GCSL.
+It evaluates the definitions named on its command line in the workspace that holds the current directory, runs each call of a function marked
+.B #[hermetic]
+as a step in a sandbox of its own, and keeps every step's result in a store shared by every workspace on the machine.
+A step whose code, arguments, input contents, platform, and the contexts it read are the same as a step's it recorded is found in the store and not run.
+.PP
+The workspace is the directory tree under the nearest
+.I workspace.gcsl
+at or above the current directory.
+.BR build ,
+.BR test ,
+.BR run ,
+.BR query ,
+.BR package ,
+and
+.B publish
+first put back each library
+.I pekit.lock
+pins that is missing from
+.IR .gcsl/libraries/ ,
+and warn of each one there that differs from its pin.
+.PP
+A target is a definition of the command's definition type: a
+.B build
+for
+.BR build ,
+a
+.B test
+for
+.BR test ,
+a
+.B package
+for
+.BR package ,
+.BR publish ,
+and
+.BR release ,
+and a
+.B script
+or
+.B build
+for
+.BR run .
+A target is named by its name,
+.BR hello ,
+by its directory relative to the workspace's root and its name,
+.BR app/hello ,
+or, for one in the root directory,
+.BR /hello .
+A name alone means the one definition of that name, else the one in the current directory; if neither decides, the command fails and lists each candidate.
+A glob, a name with
+.B *
+in a part, selects every definition it matches, relative to the current directory: its last part is the name and the parts before it are directories.
+In a part,
+.B *
+matches any run of characters;
+.B **
+matches any number of directories, none included, and as the last part every name in them.
+.B .
+is every definition of the current directory.
+A glob starting with
+.B /
+is relative to the workspace's root.
+A definition selected more than once is built once.
+.PP
+Several targets are one build: a step two of them reach runs once.
+A target that fails does not stop the others.
+.SH COMMANDS
+.TP
+.B build
+Build each
+.IR TARGET .
+For each, print the files it gave, as paths relative to the current directory under
+.IR pekit-out/ ,
+and the number of steps run and found in the store; or its error.
+.TP
+.B test
+Run each
+.IR TEST ,
+or every
+.B test
+definition in the current directory and below it if none is given.
+Print each test's result,
+.BR passed ,
+.B passed (cached)
+when its step was found in the store,
+.B flaky
+when it passed only on a retry, or
+.B FAILED
+followed by its failure's message; then the number that passed and failed.
+.TP
+.B run
+Run the
+.B script
+.IR NAME ,
+or build the
+.B build
+.I NAME
+and run the one executable file it gives.
+The words
+.I ARG
+are a script's
+.BR ^script_session.args ,
+or the program's arguments.
+Options of
+.B pekit
+come before
+.IR NAME ;
+everything after it is
+.IR ARG .
+A program runs in the current directory, with the terminal, and
+.B pekit
+exits with its status.
+Every output of the build is written to
+.I pekit-out/
+before a script's or the program's first command runs.
+.B \-\-check\-reproducible
+is refused.
+.TP
+.B query deps
+Evaluate each
+.I TARGET
+without running a step, and print each step it reaches, with the workspace files the target's code and each step read, and the steps each step is given.
+A target that waits for a step's result stops there, and the place it waits is printed.
+.TP
+.B query rdeps
+Evaluate each
+.IR TARGET ,
+or every target of its kind in the current directory and below it if none is given, without running a step, and print each that reads
+.IR FILE ,
+a path relative to the current directory, one to a line.
+A GCSL file is read by every target whose code is in its directory or below it.
+A target that waits for a step's result is printed too, with a note on standard error.
+.TP
+.B package
+Pack each
+.IR PACKAGE ,
+or every
+.B package
+definition in the current directory and below it if none is given, with each packager the workspace lists in
+.BR pekitconf.packagers ,
+and print where each was packed.
+.TP
+.B publish
+Pack each
+.I PACKAGE
+as
+.B package
+does, then publish it with each packager into
+.IR STORE ,
+in program order, outside any step.
+.B \-\-check\-reproducible
+is refused.
+.TP
+.B release
+Release
+.IR PACKAGE :
+check that the workspace is in a git repository and matches its
+.BR HEAD ,
+every file committed but
+.I pekit-out/
+and
+.IR .gcsl/ ;
+export the workspace's tree at
+.B HEAD
+into a directory of its own; build the package there as
+.B \-\-strict \-\-check\-reproducible \-\-profile release
+would; publish it into
+.IR STORE ;
+and tag
+.B HEAD
+.IR NAME @ VERSION
+with a lightweight tag.
+A tag of that name on another commit fails the release before anything is published.
+A tag of that name on
+.B HEAD
+publishes again and adds no tag.
+.TP
+.B lock
+Pin each library the workspace imports, and each library those import, that
+.I pekit.lock
+does not pin, at the commit its source's revision names, and export it into
+.IR .gcsl/libraries/ .
+Drop each pinned library that nothing imports, with its directory.
+Print a line for each library pinned or dropped.
+.TP
+.B clean
+Remove
+.IR pekit-out/ .
+.SH OPTIONS
+.B build ,
+.BR test ,
+.BR run ,
+.BR query ,
+.BR package ,
+and
+.B publish
+take these options.
+.B release
+takes
+.B \-\-jobs
+and
+.B \-\-trace
+only.
+.TP
+.B \-\-check\-reproducible
+Build, then run every step again, reusing nothing from the store, and fail if a step given the same inputs both times gave other outputs.
+Each such step is named, with each of its files that differed.
+The second run records nothing.
+.TP
+.BI \-\-gcsl\-profile " FILE"
+Write a profile of the build's GCSL evaluation to
+.IR FILE :
+how many times the targets' and the steps' code ran and for how long, and for each function and built-in, its own time, its total time, its calls, and how many found a memoized result.
+.TP
+.BR \-j ", " \-\-jobs " \fIJOBS\fR"
+Run at most
+.I JOBS
+programs at once.
+The default is the number of processors.
+.TP
+.B \-\-no\-dynamic
+Fail a target at the point it waits for a step's result.
+.TP
+.BI \-\-platform " PLATFORM"
+Build for
+.IR PLATFORM ,
+written
+.IR ARCH \- OS ,
+such as
+.BR aarch64\-linux ,
+or
+.IR ARCH ,
+which keeps the operating system of the machine
+.B pekit
+runs on.
+It sets the
+.B platform
+context for every target, where the workspace declares it.
+Steps still run on the machine
+.B pekit
+runs on.
+.TP
+.BI \-\-profile " PROFILE"
+Use the keychain's secrets of
+.IR PROFILE .
+The default is
+.BR dev .
+.TP
+.B \-\-rebuild
+Run every step and every program, reusing nothing from the store, and record each.
+.TP
+.B \-\-strict
+Build as a release does.
+Steps are given none of the host's tools.
+A target's own code may fetch, unpack, ask the keychain, and read paths under the workspace and the build's outputs; any other effect fails where the target makes it.
+The build fails unless every library it imports is pinned in
+.IR pekit.lock ,
+none differs from its pin, and
+.B GCSL_LIBRARY_PATH
+is unset.
+Steps marked
+.B #[scratch]
+are given an empty directory.
+Steps are keyed apart from a build that is not strict, and not by the host's packages.
+.TP
+.BI \-\-trace " FILE"
+Write a trace of the build to
+.IR FILE ,
+in the Trace Event Format: a span for each attempt of each step, each program, each staging and keeping of a step's files, and each run of a target's or a step's code.
+The trace names programs but not their arguments.
+.TP
+.BI \-\-kind " KIND"
+For
+.B query
+only: the definition type of the targets.
+The default is
+.BR build .
+.TP
+.BI \-\-to " STORE"
+For
+.B publish
+and
+.B release
+only: the store to publish into, a path or a URL, as each packager reads it.
+.TP
+.B \-\-update
+For
+.B lock
+only: pin every library again at its source's revision, not only those not pinned yet.
+.TP
+.B \-\-cache
+For
+.B clean
+only: also remove the store, its scratch directories, and the directories steps are staged in, so that every step runs again.
+The state directory is never removed.
+.TP
+.BR \-h ", " \-\-help
+Print help, for
+.B pekit
+or for the command it follows.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH EXIT STATUS
+.TP
+.B 0
+Every target was built, every test passed, the script or command succeeded, or help was printed.
+For
+.B run
+of a program, the program's own status.
+.TP
+.B 1
+A target failed to build, a test failed, the workspace failed to load or check, or the command failed.
+.TP
+.B 2
+The command line was not understood.
+.SH ENVIRONMENT
+.TP
+.B PEKIT_CACHE_DIR
+The cache directory, which holds the store, the git repositories of libraries, and the directories steps are staged in.
+If it is unset or empty, the cache directory is
+.I pekit
+under
+.BR XDG_CACHE_HOME ,
+else
+.IR ~/.cache/pekit .
+.TP
+.B PEKIT_CACHE_LIMIT
+The size the store is kept within, a number of bytes followed by nothing,
+.BR B ,
+.B K
+or
+.BR KiB ,
+.B M
+or
+.BR MiB ,
+.B G
+or
+.BR GiB ,
+.B T
+or
+.BR TiB
+in powers of 1024, or
+.BR KB ,
+.BR MB ,
+.BR GB ,
+or
+.B TB
+in powers of 1000.
+.B 0
+is no limit.
+The default is 50 GiB.
+When a build ends with the store larger, and no other
+.B pekit
+process has the store open, the store is evicted to nine tenths of the limit, cheapest to make again for its size first.
+A value that is no size fails every command that builds.
+.TP
+.B PEKIT_STATE_DIR
+The state directory, which holds the machine's key that secrets' identities are hashed with.
+If it is unset or empty, the state directory is
+.I pekit
+under
+.BR XDG_STATE_HOME ,
+else
+.IR ~/.local/state/pekit .
+.TP
+.B PEKIT_NO_SYNC
+If set,
+.B pekit
+does not flush a file it puts into the store to the disk before it renames the file into place.
+A crash can then leave a file in the store whose contents do not match its name.
+.TP
+.BR XDG_CACHE_HOME ", " XDG_STATE_HOME ", " HOME
+Where the cache and state directories are, as
+.B PEKIT_CACHE_DIR
+and
+.B PEKIT_STATE_DIR
+describe.
+.TP
+.B GCSL_LIBRARY_PATH
+Directories, separated by colons, searched for a library before
+.IR .gcsl/libraries/ .
+A strict build fails if it is set.
+.TP
+.BI GCSL_SECRET_FILE_ NAME
+The file of the secret
+.I NAME
+for a profile the keychain has no entry for, the name in capitals with
+.B _
+for each character that is not a letter or a digit.
+.TP
+.BI GCSL_SECRET_ NAME
+The value of the secret string
+.I NAME
+for a profile the keychain has no entry for, named as for
+.BR GCSL_SECRET_FILE_ .
+.TP
+.B PATH
+Where
+.BR bwrap ,
+which runs every step and every program of a target, and
+.BR git ,
+which fetches libraries and commits, are found.
+Steps are not given it: a step's program whose
+.B exec
+sets no
+.B PATH
+runs with
+.BR /usr/bin:/bin:/usr/sbin:/sbin .
+.SH FILES
+.TP
+.I workspace.gcsl
+The workspace's root file.
+Its
+.B pekitconf
+record sets the
+.BR toolchains ,
+.BR keychain ,
+and
+.B packagers
+contexts for every target, where the workspace imports the module that declares each.
+.TP
+.I pekit.lock
+The libraries the workspace pins, and where they come from; see
+.BR pekit.lock (5).
+.TP
+.I .gcsl/libraries/
+The pinned libraries, exported from their repositories.
+.TP
+.I pekit-out/
+At the workspace's root: each step's outputs under
+.IR .steps/FUNCTION/IDENTITY/ ,
+each fetched file under
+.IR .fetch/ ,
+each unpacked archive under
+.IR .unpack/ ,
+each git commit's files under
+.IR .git/ ,
+and each target's results linked under the target's name and the step that made them.
+.TP
+.I CACHE/store/
+The store: files by their SHA-256 digests in
+.IR cas/ ,
+step and program records in
+.IR records/ ,
+materialized trees in
+.IR trees/ ,
+the scratch directories of steps marked
+.B #[scratch]
+in
+.IR scratch/ ,
+bare clones of repositories
+.B fetch_git
+fetched in
+.IR git/ ,
+and what eviction keeps in
+.IR usage/ ,
+.IR size ,
+and
+.IR eviction.json .
+Every process holds
+.I lock
+shared while it has the store open.
+.TP
+.I CACHE/git/
+Bare clones of the repositories libraries are pinned from.
+.TP
+.I CACHE/scratch/
+The directories steps are staged in, removed as each step ends.
+.TP
+.I STATE/keychain-key
+The machine's key, readable only by its owner, made the first time it is needed.
+.SH NOTES
+Do not change the files in the store, or files under
+.I pekit-out/.steps/
+that are links to them: a file there is the store's own file, and a changed one reaches every later step given it.
+The files a target gives are copies, which can be changed.
+.SH EXAMPLES
+.TP
+.B pekit build hello
+Build the definition
+.B build hello
+and print where its files are.
+.TP
+.B pekit build \-\-platform aarch64 \(aqapp/**\(aq
+Build every
+.B build
+definition in
+.I app
+and below it for aarch64 Linux.
+.TP
+.B pekit test $(pekit query rdeps \-\-kind test app/main.c)
+Run the tests that read
+.IR app/main.c ,
+and every test if the list is empty.
+.TP
+.B pekit run deploy \-\-dry\-run
+Run the script
+.B deploy
+with the argument
+.BR \-\-dry\-run .
+.TP
+.B pekit release dev.example.greet \-\-to /srv/artifacts
+Release the package
+.B dev.example.greet
+into
+.IR /srv/artifacts ,
+and tag the commit.
+.SH SEE ALSO
+.BR bwrap (1),
+.BR gcsl (1),
+.BR git (1),
+.BR gcsl (5),
+.BR pekit.lock (5)
+.PP
+https://learn.peios.org/pekit
