@@ -951,7 +951,16 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
 /// A git repository of two crates, `greeting` taking `words` by its path:
 /// the directory it is in, its URL and its commit's name.
 fn greeting_repository() -> (tempfile::TempDir, String, String) {
-    // A repository of two crates, `greeting` taking `words` by its path.
+    repository_of_greeting("pub const HELLO: &str = \"hello from git\";\n", &[])
+}
+
+/// A git repository of two crates, `greeting` taking `words`, whose
+/// `src/lib.rs` is `words`, by its path, and `files` besides, each a path
+/// and its text: the directory it is in, its URL and its commit's name.
+fn repository_of_greeting(
+    words: &str,
+    files: &[(&str, &str)],
+) -> (tempfile::TempDir, String, String) {
     let origin = tempfile::tempdir().unwrap();
     let crate_of = |name: &str, deps: &str, code: &str| {
         let at = origin.path().join(name);
@@ -963,7 +972,12 @@ fn greeting_repository() -> (tempfile::TempDir, String, String) {
         .unwrap();
         fs::write(at.join("src/lib.rs"), code).unwrap();
     };
-    crate_of("words", "", "pub const HELLO: &str = \"hello from git\";\n");
+    crate_of("words", "", words);
+    for (path, text) in files {
+        let at = origin.path().join(path);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(at, text).unwrap();
+    }
     crate_of(
         "greeting",
         "words = { path = \"../words\" }\n",
@@ -1003,6 +1017,16 @@ fn greeting_repository() -> (tempfile::TempDir, String, String) {
 /// from `url` at `commit`, with its lock as Cargo writes it, built by the
 /// rust library's `app`.
 fn greeting_app(dir: &Path, (url, commit): (&str, &str)) {
+    greeting_app_built(
+        dir,
+        (url, commit),
+        "def build app() { = rust.cargo_build(dir(\"app\"), rust.vendored(file(\"app/Cargo.lock\")), bins = [\"app\"]) }\n",
+    );
+}
+
+/// [`greeting_app`], with `build` the definitions of `example/build.gcsl`,
+/// which imports the rust library.
+fn greeting_app_built(dir: &Path, (url, commit): (&str, &str), build: &str) {
     // A program taking `greeting` by the commit, and its lock, as Cargo
     // writes it.
     let app = dir.join("example/app");
@@ -1035,8 +1059,7 @@ fn greeting_app(dir: &Path, (url, commit): (&str, &str)) {
     .unwrap();
     fs::write(
         dir.join("example/build.gcsl"),
-        "import \"github.com/gcslib/rust\"\n\
-         def build app() { = rust.cargo_build(dir(\"app\"), rust.vendored(file(\"app/Cargo.lock\")), bins = [\"app\"]) }\n",
+        format!("import \"github.com/gcslib/rust\"\n{build}"),
     )
     .unwrap();
     libraries(&dir.join(".gcsl/libraries"));
@@ -1074,6 +1097,54 @@ fn the_rust_library_builds_with_crates_from_a_git_repository() {
     observed_with(dir.path(), state.path(), "app", strict)
         .0
         .unwrap();
+}
+
+#[test]
+fn a_git_crate_is_given_what_it_reads_beside_its_directory() {
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) = seeded(&names).filter(|_| rust.len() > 4) else {
+        eprintln!("skipped: Rust or the crates are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    // `words` reads a file of its repository outside its own directory,
+    // which vendoring leaves behind.
+    let (_origin, url, commit) = repository_of_greeting(
+        "pub const HELLO: &str = include_str!(\"../../shared/hello.txt\");\n",
+        &[("shared/hello.txt", "hello from beside")],
+    );
+    let built = |beside: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        greeting_app_built(
+            dir.path(),
+            (&url, &commit),
+            &format!(
+                "def build app() {{\n\
+                 \x20   let ws = rust.workspace(dir(\"app\"), rust.vendored(file(\"app/Cargo.lock\")), crates = [{{package = \"words\"; beside = [{beside}]}}])\n\
+                 \x20   = rust.bin(ws, \"app\")\n\
+                 }}\n"
+            ),
+        );
+        let result = build_in(dir.path(), state.path(), "app");
+        (dir, result)
+    };
+    let (_, without) = built("");
+    let error = without.unwrap_err();
+    assert!(error.contains("shared/hello.txt"), "{error}");
+    let (dir, with) = built(&format!(
+        "{{at = \"../shared/hello.txt\"; place = fetch_git(\"{url}\", \"{commit}\").file(\"shared/hello.txt\")}}"
+    ));
+    let built = with.unwrap();
+    let Plain::File { path, .. } = &built.value else {
+        panic!("not a file: {:?}", built.value);
+    };
+    let program = built_file(dir.path(), path);
+    let ran = Command::new(&program).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "hello from beside\n");
 }
 
 #[test]
