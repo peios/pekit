@@ -53,7 +53,8 @@ part is the name, and the parts before it are directories.
 In a part, `*` matches any run of characters, as in `net.*`. `**` matches
 any number of directories, including none, and as the last part it matches
 every name in them. A glob that starts with `/` is relative to the
-workspace's root.
+workspace's root. A glob never selects a library's definitions, so
+`pekit test` doesn't run the tests of the libraries you import.
 
 Quote a glob, so that your shell doesn't expand it first:
 

@@ -43,6 +43,11 @@ So `app/*` is every definition of `app`, `pkgs/*/*` every definition of a
 directory directly below `pkgs`, and `**` every definition at or below the
 current directory.
 
+A glob matches the workspace's directories alone. A library's definitions
+are in no directory of the workspace, so no glob selects them, whatever
+their names. A library's tests therefore never run in `pekit test` of a
+workspace that imports it.
+
 `pekit test`, `pekit package`, and `pekit query rdeps` select `**` when
 given no names.
 

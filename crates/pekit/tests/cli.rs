@@ -408,6 +408,36 @@ fn a_failing_test_shows_its_program_s_output() {
 }
 
 #[test]
+fn a_library_s_test_of_a_name_of_the_workspace_s_neither_clashes_nor_runs() {
+    // The workspace and a library it imports, for what the library builds,
+    // each define `test check`: the library's directory is a root of its
+    // own, so the two are no duplicate, and `pekit test` runs the
+    // workspace's alone.
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "tests.gcsl",
+                "import \"github.com/x/tools\"\n\
+                 def test check(made: String = tools.made()) {}\n",
+            ),
+            (
+                ".gcsl/libraries/github.com/x/tools/tools.gcsl",
+                "def made() -> String { \"made\" }\n\
+                 def test check() { let r = exec([\"sh\", \"-c\", \"exit 1\"]) }\n",
+            ),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let ran = pekit(dir.path(), cache.path(), &["test"]);
+    let (out, err) = printed(&ran);
+    assert!(ran.status.success(), "{out}{err}");
+    assert_eq!(out, "passed           /check\n1 passed, 0 failed\n");
+}
+
+#[test]
 fn clean_removes_the_outputs_and_with_cache_the_store() {
     let dir = workspace();
     let cache = tempfile::tempdir().unwrap();
