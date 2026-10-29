@@ -851,10 +851,10 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      import build ppk from example\n\
                      import fileroot\n\
                      import path\n\
-                     fn built(at: String, bins: List<String>, packages: List<String>) -> Dir {\n\
+                     fn built(at: String, bins: List<String>, packages: List<String>, crates: List<CrateSettings> = []) -> Dir {\n\
                      \x20   let src = path.join(fileroot.this, \"example/{at}\")\n\
                      \x20   let ppk = {at = \"ppk\"; place = dir(path.join(fileroot.this, \"example/ppk\"))}\n\
-                     \x20   = cargo_build(dir(src), vendored(file(\"{src}/Cargo.lock\")), bins = bins, packages = packages, beside = [ppk])\n\
+                     \x20   = cargo_build(dir(src), vendored(file(\"{src}/Cargo.lock\")), bins = bins, packages = packages, beside = [ppk], crates = crates)\n\
                      }\n\
                      def Toolchain::Ppk workspace_ppk() {\n\
                      \x20   let tools = build ppk()\n\
@@ -863,7 +863,9 @@ const IMAGE: &str = "import * from \"github.com/gcslib/ppk\"\n\
                      \x20   provides = {root = tools; runtime = dir(\"/\"); ppk = tools.file(\"ppk\")}\n\
                      }\n\
                      def Toolchain::Peiso workspace_peiso() {\n\
-                     \x20   let peiso = built(\"peiso\", [\"peiso\"], [])\n\
+                     \x20   let uapi = \"example/ppk/vendor/kernel/security/pkm/kacs/peios_uapi.rs\"\n\
+                     \x20   let peiso = built(\"peiso\", [\"peiso\"], [], crates = [{package = \"peios-uapi\"; \
+                     beside = [{at = \"../../../security/pkm/kacs/peios_uapi.rs\"; place = file(path.join(fileroot.this, uapi))}]}])\n\
                      \x20   let utils = built(\"peiosutils\", [\"mkirf\", \"mkuki\"], [\"pu_mkirf\", \"pu_mkuki\"])\n\
                      \x20   host_platform = ^host_platform\n\
                      \x20   platform = {}\n\
