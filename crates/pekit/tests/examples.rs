@@ -212,6 +212,42 @@ fn configure_make_gives_each_word_as_one_argument() {
 }
 
 #[test]
+fn configure_make_gives_every_file_of_a_source_one_time() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = example(4, HOST);
+    // A build system that records how many times its source's files have,
+    // to the nanosecond, but the one it writes: a copy gives each its own.
+    let src = dir.path().join("example/times");
+    for n in 0..64 {
+        fs::create_dir_all(src.join(format!("d{}", n % 4))).unwrap();
+        fs::write(src.join(format!("d{}/f{n}", n % 4)), format!("{n}\n")).unwrap();
+    }
+    let configure = src.join("configure");
+    fs::write(
+        &configure,
+        "#!/bin/sh\n\
+         find . -type f ! -name times.txt -printf '%T@\\n' | sort -u | wc -l > times.txt\n\
+         prefix=${1#--prefix=}\n\
+         printf 'all:\\n\\ninstall:\\n\\tmkdir -p %s && cp times.txt %s/\\n' \"$prefix\" \"$prefix\" > Makefile\n",
+    )
+    .unwrap();
+    fs::set_permissions(&configure, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        dir.path().join("example/times.gcsl"),
+        "import \"github.com/gcslib/buildenv\"\n\
+         def build times() { = buildenv.configure_make(dir(\"times\")) }\n",
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "times").unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let times = fs::read_to_string(built_file(dir.path(), &format!("{path}/times.txt"))).unwrap();
+    assert_eq!(times.trim(), "1");
+}
+
+#[test]
 fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
     let Some(state) = seeded(&["zlib-1.3.1.tar.gz"]) else {
         eprintln!("skipped: zlib's source is not on this machine");
