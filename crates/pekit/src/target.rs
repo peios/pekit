@@ -204,7 +204,9 @@ pub fn resolve(
 /// The definitions of the def-type `def_type` in `workspace` that `names`
 /// select, each a name or a glob, named from the directory
 /// `here`, relative to its root (see [Targets](#targets)): sorted by
-/// qualified name, each once. A glob that selects nothing selects nothing.
+/// qualified name, each once. A glob that selects nothing selects nothing,
+/// and none selects a library's definitions, which are in no directory of
+/// the workspace.
 ///
 /// # Errors
 ///
@@ -242,7 +244,11 @@ pub fn select(
                         .split('/')
                         .filter(|part| !part.is_empty())
                         .collect();
-                    matches_glob(&pattern, &dir) && matches_segment(wanted, &definition.path)
+                    // A library's directory is none of the workspace's, so
+                    // no glob of the workspace's matches its definitions.
+                    dir.first() != Some(&gcsl::workspace::LIBRARIES)
+                        && matches_glob(&pattern, &dir)
+                        && matches_segment(wanted, &definition.path)
                 })
                 .map(|definition| Target {
                     def_type: def_type.to_owned(),
