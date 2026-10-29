@@ -178,7 +178,7 @@ shows how. See [Registering Toolchains](~pekit/registering-toolchains).
 ## Report errors at the call
 
 When a program a step runs fails, pekit reports the error at the `exec`
-in the step's code, with the program's standard error:
+in the step's code, with the program's standard output and standard error:
 
 ```text
 error: `/bin/sh` exited with status 4
@@ -187,6 +187,7 @@ error: `/bin/sh` exited with status 4
 17 |     let ran = exec(["/bin/sh", "-c", "echo to stdout; echo to stderr >&2; exit 4"])
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
+   = note: its standard output: to stdout
    = note: its standard error: to stderr
 ```
 

@@ -796,7 +796,8 @@ fn example_7_tests_are_cached_steps_rerun_as_a_change_reaches_them() {
     edit("test/expected_output.txt", "Hello", "Hi");
     tests_print(
         "FAILED           example/greeting\n    \
-         `/pekit-out/.steps/link/*/greeting_test` exited with status 1\npassed           \
+         `/pekit-out/.steps/link/*/greeting_test` exited with status 1\n    \
+         its standard error: greeting() returned \"Hi\", expected \"Hello\"\npassed           \
          example/output\n1 passed, 1 failed\n",
         false,
     );

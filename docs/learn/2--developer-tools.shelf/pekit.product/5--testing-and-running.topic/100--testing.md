@@ -81,6 +81,15 @@ Each test is reported with one of four results:
 | `flaky` | The test failed, then passed when run again. |
 | `FAILED` | The test failed, after any retries. The message follows. |
 
+A test whose program fails shows the program's exit status, then what it
+wrote to standard output and standard error, in full:
+
+```text
+FAILED           example/greeting
+    `/pekit-out/.steps/link/…/greeting_test` exited with status 1
+    its standard error: greeting() returned "Hi", expected "Hello"
+```
+
 A test whose program fails to build fails too, with the build's error.
 
 ## Run some tests
