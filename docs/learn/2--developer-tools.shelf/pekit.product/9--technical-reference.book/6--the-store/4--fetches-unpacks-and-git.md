@@ -69,9 +69,20 @@ the other made.
 
 Git runs with no configuration but the repository's own: the user's and
 the system's are left out, so that nothing of the machine, such as a
-line-ending conversion or a filter, changes the files a commit gives. The
-path is `/pekit-out/.git/<key>/<name>`, where the key is a digest of the URL
-and the commit.
+line-ending conversion or a filter, changes the files a commit gives.
+`GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT` are removed from its
+environment for the same reason. The path is
+`/pekit-out/.git/<key>/<name>`, where the key is a digest of the URL and
+the commit.
+
+Credentials are the exception. Git's one credential helper runs
+`git credential fill` with the user's configuration environment restored:
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_PARAMETERS` and
+`GIT_CONFIG_COUNT`, each as the user had it, or unset. Credentials therefore
+come from wherever the user's git gets them. The helper answers `get` only;
+`store` and `erase` do nothing, so a fetch never changes the user's
+credential store. `GIT_TERMINAL_PROMPT` is `0` throughout, so nothing
+prompts. Credentials are part of neither the key nor any step.
 
 ## In a step
 

@@ -24,9 +24,23 @@
 //! left out, so that nothing of the machine, a line-ending conversion or a
 //! filter, changes the files a commit gives: only the repository's own
 //! attributes do, as they do for anyone who checks the commit out.
+//!
+//! # Credentials
+//!
+//! But for credentials: git's one credential helper asks the user's git,
+//! with the user's configuration and environment, so that a private
+//! repository is fetched with whatever credentials the user's git would
+//! use, a `gh auth git-credential` say ([`credential_helper`]). It asks only
+//! to `get` them; storing and erasing them is left undone, so a fetch
+//! never changes what the user's git keeps, and nothing prompts. What a
+//! pinned commit gives is the same whoever fetches it, so credentials name
+//! nothing a record is keyed by, and no step sees them.
 
 use std::collections::HashMap;
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -199,16 +213,81 @@ fn checked_out(store: &Store, repo: &Path, (commit, dir): (&str, &Path)) -> Resu
     store.put_tree(dir).map_err(|error| error.to_string())
 }
 
-/// `git` on the bare repository `repo`, with no configuration but its own.
+/// The environment that gives git configuration besides a repository's
+/// own: what a fetch's git runs without, and the user's git with.
+/// `GIT_CONFIG_PARAMETERS` is how git passes its `-c` settings to what it
+/// runs, a credential helper among them; `GIT_CONFIG_COUNT` says how many
+/// `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` to read.
+const CONFIGURATION: [&str; 4] = [
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+];
+
+/// `git` on the bare repository `repo`, with no configuration but its own
+/// and a credential helper that asks the user's git.
 fn command(repo: &Path) -> Command {
+    let helper = credential_helper(|name| env::var_os(name));
+    let mut command = isolated(&helper);
+    command.arg("--git-dir").arg(repo);
+    command
+}
+
+/// `git` with no configuration but a repository's own, prompting for
+/// nothing, and with `helper` its one credential helper.
+fn isolated(helper: &OsStr) -> Command {
+    let mut setting = OsString::from("credential.helper=");
+    setting.push(helper);
     let mut command = Command::new("git");
     command
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("--git-dir")
-        .arg(repo);
+        // An empty helper clears any before it, so this one is alone.
+        .args(["-c", "credential.helper="])
+        .arg("-c")
+        .arg(setting);
     command
+}
+
+/// A credential helper that answers `get` with what `git credential fill`
+/// gives under the user's configuration, `user` giving the user's value of
+/// each of [`CONFIGURATION`], unset if `None`, and does nothing else (see
+/// [Credentials](#credentials)). Given a fetch's `GIT_CONFIG_PARAMETERS`
+/// in place of the user's, the user's git would be given this helper, and
+/// ask itself.
+fn credential_helper(user: impl Fn(&str) -> Option<OsString>) -> OsString {
+    let settings = CONFIGURATION.map(|name| (name, user(name)));
+    let mut helper = b"!f() { test \"$1\" = get || exit 0; exec env".to_vec();
+    // `env` takes its `-u`s before its assignments.
+    for (name, _) in settings.iter().filter(|(_, value)| value.is_none()) {
+        helper.extend_from_slice(format!(" -u {name}").as_bytes());
+    }
+    for (name, value) in settings {
+        if let Some(value) = value {
+            helper.extend_from_slice(format!(" {name}=").as_bytes());
+            helper.extend_from_slice(&quoted(&value));
+        }
+    }
+    helper.extend_from_slice(b" git credential fill; }; f");
+    OsString::from_vec(helper)
+}
+
+/// `value` quoted for `sh`, as one word.
+fn quoted(value: &OsStr) -> Vec<u8> {
+    let mut quoted = vec![b'\''];
+    for &byte in value.as_bytes() {
+        if byte == b'\'' {
+            quoted.extend_from_slice(b"'\\''");
+        } else {
+            quoted.push(byte);
+        }
+    }
+    quoted.push(b'\'');
+    quoted
 }
 
 /// What `git` with `args` prints, run on the bare repository `repo`.
@@ -221,4 +300,145 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&ran.stderr).trim().to_owned());
     }
     Ok(String::from_utf8_lossy(&ran.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::{Output, Stdio};
+
+    use super::*;
+
+    /// A user's git configuration, in a directory whose name needs quoting,
+    /// whose credential helper gives `u` and `p` and notes a `store` in
+    /// `stored` beside that directory: the configuration's path and the
+    /// directory holding both.
+    fn user() -> (PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("it's $HOME");
+        fs::create_dir(&home).unwrap();
+        // The helper's path is run by a shell, as the user's would be; the
+        // configuration's is what the helper here has to quote.
+        let helper = dir.path().join("helper");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 get) printf 'username=u\\npassword=p\\n' ;;\n\
+                 store) touch '{}' ;;\n\
+                 esac\n",
+                dir.path().join("stored").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = home.join("config");
+        fs::write(
+            &config,
+            format!("[credential]\n\thelper = {}\n", helper.display()),
+        )
+        .unwrap();
+        (config, dir)
+    }
+
+    /// What `git credential <action>` gives, run as a fetch runs git, with
+    /// `helper` and `input` its input.
+    fn credential(helper: &OsStr, action: &str, input: &str) -> Output {
+        let mut child = isolated(helper)
+            .args(["credential", action])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn a_fetch_takes_its_credentials_from_the_user_s_git() {
+        let (config, _dir) = user();
+        let helper = credential_helper(|name| match name {
+            "GIT_CONFIG_GLOBAL" => Some(config.clone().into_os_string()),
+            "GIT_CONFIG_NOSYSTEM" => Some("1".into()),
+            _ => None,
+        });
+        let filled = credential(&helper, "fill", "protocol=https\nhost=example.invalid\n\n");
+        let out = String::from_utf8_lossy(&filled.stdout);
+        assert!(
+            filled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&filled.stderr)
+        );
+        assert!(
+            out.contains("username=u\n") && out.contains("password=p\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_never_stores_credentials_in_the_user_s_git() {
+        let (config, _dir) = user();
+        let helper = credential_helper(|name| {
+            (name == "GIT_CONFIG_GLOBAL").then(|| config.clone().into_os_string())
+        });
+        let approved = credential(
+            &helper,
+            "approve",
+            "protocol=https\nhost=example.invalid\nusername=u\npassword=p\n\n",
+        );
+        assert!(
+            approved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&approved.stderr)
+        );
+        assert!(!config.parent().unwrap().with_file_name("stored").exists());
+    }
+
+    #[test]
+    fn a_fetch_without_credentials_fails_without_prompting() {
+        let helper = credential_helper(|name| match name {
+            "GIT_CONFIG_GLOBAL" => Some("/dev/null".into()),
+            "GIT_CONFIG_NOSYSTEM" => Some("1".into()),
+            _ => None,
+        });
+        let filled = credential(&helper, "fill", "protocol=https\nhost=example.invalid\n\n");
+        assert!(!filled.status.success());
+        assert!(
+            String::from_utf8_lossy(&filled.stderr).contains("terminal prompts disabled"),
+            "{}",
+            String::from_utf8_lossy(&filled.stderr)
+        );
+    }
+
+    #[test]
+    fn the_user_s_git_is_given_the_user_s_settings_from_the_environment() {
+        let (_, dir) = user();
+        // The user's own `-c` settings, which name the helper.
+        let parameters = format!(
+            "'credential.helper'='{}'",
+            dir.path().join("helper").display()
+        );
+        let helper = credential_helper(|name| match name {
+            "GIT_CONFIG_GLOBAL" => Some("/dev/null".into()),
+            "GIT_CONFIG_NOSYSTEM" => Some("1".into()),
+            "GIT_CONFIG_PARAMETERS" => Some(parameters.clone().into()),
+            _ => None,
+        });
+        let filled = credential(&helper, "fill", "protocol=https\nhost=example.invalid\n\n");
+        let out = String::from_utf8_lossy(&filled.stdout);
+        assert!(
+            filled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&filled.stderr)
+        );
+        assert!(out.contains("password=p\n"), "{out}");
+    }
 }

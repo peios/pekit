@@ -96,6 +96,27 @@ pekit runs git without your or the system's git configuration, so a
 setting such as a line-ending conversion can't change the files a commit
 gives.
 
+## Fetch a private repository
+
+pekit fetches a private repository with the credentials your own git uses
+for its URL. Set up git so that `git clone` of the repository works, and
+`fetch_git` works too. For a GitHub repository, for example:
+
+```sh
+gh auth setup-git
+```
+
+pekit asks your git for credentials only; no other setting of yours
+reaches its git. It never stores or erases credentials, and it never
+prompts. Without credentials, the fetch fails:
+
+```text
+error: `fetch_git` could not fetch `…` of `https://github.com/…`: fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+A commit gives the same files whoever fetches it, so credentials don't
+change what pekit builds or what it keeps. A step never sees them.
+
 ## Pass fetched files to a step
 
 A step has no network, so it can't fetch. A fetch in a step's code fails:
