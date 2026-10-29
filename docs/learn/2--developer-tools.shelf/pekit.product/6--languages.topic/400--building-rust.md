@@ -153,7 +153,7 @@ whose program didn't change is found in the store.
 A test target with `harness = false` in its manifest is compiled as a
 program of its own, as Cargo compiles it.
 
-## Documentation tests and Clippy
+## Documentation, its tests, and Clippy
 
 `rust.doctests(ws, package)` tests a member's documentation, as `cargo test
 --doc` does: rustdoc compiles and runs each crate's examples as a step. It
@@ -166,13 +166,20 @@ and examples, each crate a step. `flags` come after the member's lints, so
 `flags = ["-Dwarnings"]` denies every warning. A check fails when a lint it
 denies fires.
 
-Both are steps that the rust library makes, so make them in a test's
+`rust.docs(ws, package)` makes a member's library documentation, as `cargo
+doc --no-deps` does, as a step, and gives the directory rustdoc wrote.
+`flags` come after the member's lints, as they do for Clippy, so `flags =
+["-Dwarnings"]` fails it when rustdoc warns, such as about a broken link.
+
+All three are steps that the rust library makes, so make them in a test's
 parameter defaults, where a test plans and builds what it needs:
 
 ```gcsl
 def test clippy(checked: List<List<{}>> = rust.clippy(crates(), "server", flags = ["-Dwarnings"])) {}
 
 def test doctests(ran: List<List<{}>> = rust.doctests(crates(), "server")) {}
+
+def test docs(made: Dir = rust.docs(crates(), "server", flags = ["-Dwarnings"])) {}
 ```
 
 ## Build with Cargo, whole
