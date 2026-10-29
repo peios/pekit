@@ -373,6 +373,41 @@ fn tests_report_each_and_one_that_is_no_step_runs_every_time() {
 }
 
 #[test]
+fn a_failing_test_shows_its_program_s_output() {
+    // Its body's program, and its default's, each shown with its standard
+    // output and its standard error, a line of its own for each line.
+    let dir = workspace();
+    write(
+        dir.path(),
+        &[(
+            "app/tests.gcsl",
+            "def test body() { let r = exec([\"sh\", \"-c\", \"echo one; echo two; echo bad >&2; exit 3\"]) }\n\
+             #[hermetic] fn made() -> File {\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"echo said; exit 4\"])\n\
+             \x20   working_dir().file(\"x\")\n\
+             }\n\
+             def test default(f: File = made()) {}\n",
+        )],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let ran = pekit(dir.path(), cache.path(), &["test"]);
+    let (out, _) = printed(&ran);
+    assert_eq!(ran.status.code(), Some(1));
+    assert_eq!(
+        out,
+        "FAILED           app/body\n    \
+         `sh` exited with status 3\n    \
+         its standard output: one\n    \
+         two\n    \
+         its standard error: bad\n\
+         FAILED           app/default\n    \
+         `sh` exited with status 4\n    \
+         its standard output: said\n\
+         0 passed, 2 failed\n"
+    );
+}
+
+#[test]
 fn clean_removes_the_outputs_and_with_cache_the_store() {
     let dir = workspace();
     let cache = tempfile::tempdir().unwrap();

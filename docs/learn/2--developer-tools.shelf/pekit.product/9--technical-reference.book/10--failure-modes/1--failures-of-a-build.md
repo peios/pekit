@@ -39,7 +39,7 @@ happen.
 
 | Failure | What it looks like | Cause and recovery |
 |---|---|---|
-| A program fails | "`PROGRAM` exited with status N", at the `exec`, with its standard error. | The step's own failure. Its retries run first, if it has any. |
+| A program fails | "`PROGRAM` exited with status N", at the `exec`, with its standard output and standard error. | The step's own failure. Its retries run first, if it has any. |
 | A timeout | "the step timed out", at the program it was running. | The step's attempts together ran past its `#[timeout]`. |
 | A path outside the step | "it is outside the step". | The step uses a file it wasn't given. Pass it as an argument. |
 | A write to an input | An error that the path is an input of the step, or a finished composition. | Work on a copy, or in a `Dir.sandbox`. |
