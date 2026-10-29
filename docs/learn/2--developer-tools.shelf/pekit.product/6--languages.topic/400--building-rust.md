@@ -69,8 +69,10 @@ first build takes longer.
    ```
 
 `rust.bin(ws, package, name)` gives a member's program, by default the one
-named after the member. `rust.library(ws, package)` gives its shared or
-static library.
+named after the member. `rust.library(ws, package)` gives its shared
+library, and `rust.static_library(ws, package)` its static library. Give
+each `features` to turn on the member's own features, as `cargo build
+--features` does.
 
 ## Check the result
 
