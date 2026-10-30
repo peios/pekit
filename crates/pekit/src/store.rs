@@ -55,7 +55,23 @@
 //! blob, and is not read. A file read is hashed before it is copied, and
 //! not copied if its blob is there. A directory said to be fixed, such as a
 //! sealed composition, is walked once until it is said to have changed.
+//!
+//! # Putting a tree at once
+//!
+//! A blob is flushed to the disk before it is renamed into place, so that a
+//! blob under its digest's name is whole even after the machine loses
+//! power, and is trusted as it is found. Flushed one by one, as a tree is
+//! walked, each waits for a commit of the file system's journal of its own,
+//! which a tree of many small files, a kernel's build, spends hours on. So
+//! a tree is put at once ([`Store::put_tree_mounted`],
+//! [`Store::put_tree_seen_at`]): each blob it holds that the store lacks,
+//! and each of its trees' encodings, is written whole into `tmp/` as the
+//! tree is walked, then all are flushed together, by several threads, so
+//! that one commit serves many, and only then renamed into place, in the
+//! order they were written, a tree's entries before it. A put that fails
+//! removes what it wrote.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -309,6 +325,64 @@ pub struct Tree {
 
 /// The number of the next temporary file this process writes.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+/// How many threads flush the blobs of a tree put at once.
+const FLUSHERS: usize = 16;
+
+thread_local! {
+    /// The blobs this thread has written whole into `tmp/` and not yet
+    /// flushed or put in place, while it puts a tree at once (see [Putting
+    /// a tree at once](#putting-a-tree-at-once)).
+    static AT_ONCE: RefCell<Option<Vec<Unsettled>>> = const { RefCell::new(None) };
+}
+
+/// A blob written whole into `tmp/`, not yet flushed or in place.
+struct Unsettled {
+    /// Where it is written.
+    temp: PathBuf,
+    /// Its digest.
+    digest: Digest,
+    /// Whether it is executable.
+    executable: bool,
+    /// Whether it is flushed even under `PEKIT_NO_SYNC`.
+    always: bool,
+}
+
+/// This thread's put of a tree at once, while it lasts: what it wrote is
+/// removed unless it is put in place, so that a put that fails, or panics,
+/// leaves neither the thread putting at once nor its files behind.
+struct AtOnce;
+
+impl AtOnce {
+    /// Begins a put at once on this thread: `None` if one is under way,
+    /// which this put is part of.
+    fn begin() -> Option<Self> {
+        AT_ONCE.with(|at_once| {
+            let mut at_once = at_once.borrow_mut();
+            if at_once.is_some() {
+                return None;
+            }
+            *at_once = Some(Vec::new());
+            Some(Self)
+        })
+    }
+
+    /// What the put wrote, its end.
+    fn take(self) -> Vec<Unsettled> {
+        let written = AT_ONCE.with(|at_once| at_once.borrow_mut().take().unwrap_or_default());
+        std::mem::forget(self);
+        written
+    }
+}
+
+impl Drop for AtOnce {
+    fn drop(&mut self) {
+        let written = AT_ONCE.with(|at_once| at_once.borrow_mut().take().unwrap_or_default());
+        for each in written {
+            let _ = fs::remove_file(each.temp);
+        }
+    }
+}
 
 /// The blobs, and the copies of blobs, a process linked a file to.
 #[derive(Debug, Default)]
@@ -591,12 +665,9 @@ impl Store {
                 out.write_all(chunk)?;
                 size += read as u64;
             }
-            if std::env::var_os("PEKIT_NO_SYNC").is_none() {
-                out.sync_all()?;
-            }
         }
         let digest = Digest::from_hasher(hasher);
-        self.settle(&temp, &digest, executable)?;
+        self.finish(temp, digest, executable, false)?;
         Ok(FileEntry {
             digest,
             size,
@@ -641,19 +712,13 @@ impl Store {
             hasher: Sha256::new(),
             size: 0,
         };
-        let written = write(&mut hashing).and_then(|()| {
-            if std::env::var_os("PEKIT_NO_SYNC").is_none() {
-                hashing.out.sync_all()?;
-            }
-            Ok(())
-        });
-        if let Err(error) = written {
+        if let Err(error) = write(&mut hashing) {
             let _ = fs::remove_file(&temp);
             return Err(error);
         }
         let Hashing { hasher, size, .. } = hashing;
         let digest = Digest::from_hasher(hasher);
-        self.settle(&temp, &digest, false)?;
+        self.finish(temp, digest, false, false)?;
         Ok(FileEntry {
             digest,
             size,
@@ -684,12 +749,96 @@ impl Store {
             return Ok(digest);
         }
         let temp = self.temp_path();
-        let mut out = File::create(&temp)?;
-        out.write_all(bytes)?;
-        out.sync_all()?;
-        drop(out);
-        self.settle(&temp, &digest, false)?;
+        File::create(&temp)?.write_all(bytes)?;
+        self.finish(temp, digest, false, true)?;
         Ok(digest)
+    }
+
+    /// Puts `temp`, written whole with the contents of `digest`, in place
+    /// as its blob, executable if `executable`, flushed first unless
+    /// `PEKIT_NO_SYNC` is set and it is not to be flushed `always`; or, while
+    /// this thread puts a tree at once, keeps it to be (see [Putting a tree
+    /// at once](#putting-a-tree-at-once)).
+    fn finish(
+        &self,
+        temp: PathBuf,
+        digest: Digest,
+        executable: bool,
+        always: bool,
+    ) -> io::Result<()> {
+        let unsettled = Unsettled {
+            temp,
+            digest,
+            executable,
+            always,
+        };
+        let kept = AT_ONCE.with(|at_once| match at_once.borrow_mut().as_mut() {
+            Some(written) => {
+                written.push(unsettled);
+                None
+            }
+            None => Some(unsettled),
+        });
+        match kept {
+            Some(unsettled) => self.settle_all(vec![unsettled]),
+            None => Ok(()),
+        }
+    }
+
+    /// Flushes each of `written` that is to be, by several threads, and
+    /// then puts each in place, in their order; or, if any can't be
+    /// flushed, removes them all.
+    fn settle_all(&self, written: Vec<Unsettled>) -> io::Result<()> {
+        let syncing = std::env::var_os("PEKIT_NO_SYNC").is_none();
+        let flushed: Vec<&Unsettled> = written
+            .iter()
+            .filter(|each| syncing || each.always)
+            .collect();
+        let share = flushed.len().div_ceil(FLUSHERS).max(1);
+        let outcome = std::thread::scope(|scope| {
+            let flushers: Vec<_> = flushed
+                .chunks(share)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .try_for_each(|each| File::open(&each.temp)?.sync_all())
+                    })
+                })
+                .collect();
+            flushers.into_iter().try_for_each(|flusher| {
+                flusher
+                    .join()
+                    .unwrap_or_else(|_| Err(io::Error::other("a flush panicked")))
+            })
+        });
+        if let Err(error) = outcome {
+            for each in written {
+                let _ = fs::remove_file(each.temp);
+            }
+            return Err(error);
+        }
+        let mut left = written.into_iter();
+        while let Some(each) = left.next() {
+            if let Err(error) = self.settle(&each.temp, &each.digest, each.executable) {
+                for rest in left {
+                    let _ = fs::remove_file(rest.temp);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// `put`, writing what it puts into the store at once (see [Putting a
+    /// tree at once](#putting-a-tree-at-once)): as part of the put under way
+    /// on this thread if there is one.
+    fn at_once<T>(&self, put: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let Some(at_once) = AtOnce::begin() else {
+            return put();
+        };
+        let value = put()?;
+        self.settle_all(at_once.take())?;
+        Ok(value)
     }
 
     /// Moves `temp`, a finished copy of the contents of `digest`, into place
@@ -899,6 +1048,15 @@ impl Store {
         path: &Path,
         mounted: &HashMap<PathBuf, Digest, S>,
     ) -> io::Result<Digest> {
+        self.at_once(|| self.tree_mounted(path, mounted))
+    }
+
+    /// [`Store::put_tree_mounted`], as part of a put at once.
+    fn tree_mounted<S: std::hash::BuildHasher>(
+        &self,
+        path: &Path,
+        mounted: &HashMap<PathBuf, Digest, S>,
+    ) -> io::Result<Digest> {
         if let Some(digest) = mounted.get(path).copied().or_else(|| self.tree_in(path)) {
             return Ok(digest);
         }
@@ -916,7 +1074,7 @@ impl Store {
             } else if kind.is_dir() {
                 TreeEntry::Dir {
                     name,
-                    tree: self.put_tree_mounted(&at, mounted)?,
+                    tree: self.tree_mounted(&at, mounted)?,
                 }
             } else {
                 TreeEntry::File {
@@ -964,7 +1122,7 @@ impl Store {
         if refuse(path, &meta) {
             return Ok(None);
         }
-        self.tree_seen(path, &mut walk)
+        self.at_once(|| self.tree_seen(path, &mut walk))
     }
 
     /// [`Store::put_tree_seen`] of `path`, as `walk` has it.

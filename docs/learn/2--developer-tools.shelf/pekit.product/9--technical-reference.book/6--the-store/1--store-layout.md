@@ -33,7 +33,18 @@ drops its own.
 
 A file put into the store is hashed as it is copied into `tmp/`, flushed to
 the disk unless `PEKIT_NO_SYNC` is set, and renamed to its digest's name
-(`Store::put_file`). A blob is read-only.
+(`Store::put_file`). A blob is read-only. A blob under its digest's name is
+therefore whole even after a power loss, and is trusted as it's found.
+
+A tree is put at once (`Store::put_tree_mounted`,
+`Store::put_tree_seen_at`). Each new blob it holds, and each of its trees'
+encodings, is written whole into `tmp/` as the tree is walked. Then 16
+threads flush them all together, so that one commit of the file system's
+journal serves many files. Only then is each renamed into place, in the
+order it was written, so a tree's entries come before the tree. Flushing
+files one by one cost a journal commit each: storing 20,000 small files
+took 43 seconds, and takes 7 at once. A put that fails removes everything
+it wrote.
 
 ## The lock
 

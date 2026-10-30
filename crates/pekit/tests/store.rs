@@ -69,6 +69,60 @@ fn a_directory_is_a_tree_whose_digest_is_its_whole_content_s() {
     );
 }
 
+/// The files in the store's `tmp/`, by name.
+fn temporary(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir.join("store/tmp"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_tree_is_put_at_once_and_a_failed_put_leaves_nothing() {
+    let (store, dir) = store();
+    // A tree of many files, two alike, and directories within directories.
+    let tree = dir.path().join("tree");
+    for n in 0..300 {
+        let at = tree.join(format!("d{}/e{}", n % 7, n % 3));
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join(format!("f{n}")), format!("{n}\n")).unwrap();
+    }
+    fs::write(tree.join("one"), "alike").unwrap();
+    fs::write(tree.join("two"), "alike").unwrap();
+    let digest = store.put_tree(&tree).unwrap();
+    // Every blob it names is in place, and nothing is left in `tmp/`.
+    assert!(store.holds_tree(&digest));
+    assert_eq!(temporary(dir.path()), Vec::<String>::new());
+    let back = dir.path().join("back");
+    store.materialise_tree(&digest, &back).unwrap();
+    assert_eq!(
+        fs::read_to_string(back.join("d3/e1/f220")).unwrap(),
+        "220\n"
+    );
+    // A put that can't read a file fails, and puts in place nothing it
+    // wrote, the blob of a file read before it among them.
+    let failing = dir.path().join("failing");
+    fs::create_dir_all(&failing).unwrap();
+    fs::write(failing.join("a"), "read first").unwrap();
+    fs::write(failing.join("b"), "unreadable").unwrap();
+    fs::set_permissions(failing.join("b"), fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(failing.join("b")).is_ok() {
+        eprintln!("skipped the failing put: this user reads any file");
+        return;
+    }
+    assert!(store.put_tree(&failing).is_err());
+    assert!(!store.has(&Digest::of(b"read first")));
+    assert_eq!(temporary(dir.path()), Vec::<String>::new());
+    // The thread puts as it did before.
+    fs::set_permissions(failing.join("b"), fs::Permissions::from_mode(0o644)).unwrap();
+    let file = store.put_file(&failing.join("a")).unwrap();
+    assert!(store.has(&file.digest));
+}
+
 #[test]
 fn a_tree_s_identical_files_are_materialised_as_files_of_their_own() {
     use std::os::unix::fs::MetadataExt;
