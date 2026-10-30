@@ -13,8 +13,8 @@ license.workspace = true
 #   [patch."https://github.com/peios/gcsl"]
 #   gcsl = { path = "../gcsl/crates/gcsl" }
 #   gcsl-disk = { path = "../gcsl/crates/gcsl-disk" }
-gcsl = { git = "https://github.com/peios/gcsl", rev = "ec8f383b2d3184501d4e3e4c3f6baf11760175eb" }
-gcsl-disk = { git = "https://github.com/peios/gcsl", rev = "ec8f383b2d3184501d4e3e4c3f6baf11760175eb" }
+gcsl = { git = "https://github.com/peios/gcsl", rev = "db8f959dc3b6a5a1ce67178333222fabc038294a" }
+gcsl-disk = { git = "https://github.com/peios/gcsl", rev = "db8f959dc3b6a5a1ce67178333222fabc038294a" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

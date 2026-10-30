@@ -437,7 +437,7 @@ dependencies = [
 [[package]]
 name = "gcsl"
 version = "0.1.0"
-source = "git+https://github.com/peios/gcsl?rev=ec8f383b2d3184501d4e3e4c3f6baf11760175eb#ec8f383b2d3184501d4e3e4c3f6baf11760175eb"
+source = "git+https://github.com/peios/gcsl?rev=db8f959dc3b6a5a1ce67178333222fabc038294a#db8f959dc3b6a5a1ce67178333222fabc038294a"
 dependencies = [
  "annotate-snippets",
  "nix",
@@ -446,7 +446,7 @@ dependencies = [
 [[package]]
 name = "gcsl-disk"
 version = "0.1.0"
-source = "git+https://github.com/peios/gcsl?rev=ec8f383b2d3184501d4e3e4c3f6baf11760175eb#ec8f383b2d3184501d4e3e4c3f6baf11760175eb"
+source = "git+https://github.com/peios/gcsl?rev=db8f959dc3b6a5a1ce67178333222fabc038294a#db8f959dc3b6a5a1ce67178333222fabc038294a"
 dependencies = [
  "gcsl",
 ]
