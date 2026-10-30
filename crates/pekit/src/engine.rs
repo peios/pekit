@@ -2358,8 +2358,16 @@ impl Run<'_> {
             self.outputs.insert(path.to_owned(), kept);
             self.expose(path, kept);
         }
-        let value = self.loaded.workspace.from_plain(&record.result.plain());
-        self.graph.resolve(id, Ok(value));
+        // The store holds its long strings: `holds_all` found them, and no
+        // eviction runs while the build has the store.
+        let value = match record.result.plain(&self.store) {
+            Ok(plain) => Ok(self.loaded.workspace.from_plain(&plain)),
+            Err(error) => Err(Diagnostic::error(
+                format!("the step's record names a string the store can't give: {error}"),
+                Span::new(0, 0),
+            )),
+        };
+        self.graph.resolve(id, value);
         self.cached += 1;
         self.report(id, (true, false));
         let step = self.step_name(id);
@@ -2471,12 +2479,13 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// Whether the store holds every file and directory `stored` names.
+    /// Whether the store holds every file and directory `stored` names, and
+    /// every long string it holds as a blob.
     fn holds_all(&self, stored: &Stored) -> bool {
         stored.files().into_iter().all(|(_, kept)| match kept {
             Kept::File(entry) => self.store.has(&entry.digest),
             Kept::Dir(tree) => self.store.holds_tree(&tree),
-        })
+        }) && stored.texts().iter().all(|text| self.store.has(text))
     }
 
     /// The scratch directory of the step `id`, named `name`, whose own
@@ -2833,7 +2842,7 @@ impl Run<'_> {
             self.outputs.insert(path.clone(), *entry);
             self.expose(path, *entry);
         }
-        match stored(plain, &kept) {
+        match stored(plain, &kept, &self.store) {
             Ok(result) => self.keep_record(id, step, result)?,
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}

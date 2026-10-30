@@ -13,6 +13,11 @@
 //! step. A result that holds a secret is no record's: a secret is never
 //! stored ([`StoreError::Secret`]), so such a step runs every time, though
 //! its files are kept as any step's are.
+//!
+//! A string longer than [`INLINE_TEXT`] bytes, a program's whole output
+//! say, is kept as a blob of its own, which the record names by its digest
+//! and length ([`Stored::Text`]), not written into the record: a record is
+//! read whole, by every eviction too, and JSON writes some bytes as six.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -24,6 +29,10 @@ use gcsl::value::Quantity;
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Digest, FileEntry, Store, Tree, TreeEntry};
+
+/// The longest string a record holds itself, in bytes: a longer one is kept
+/// as a blob (see [Records](#records)).
+pub const INLINE_TEXT: usize = 64 << 10;
 
 /// A step's record (see [Records](#records)).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -49,6 +58,9 @@ pub enum Stored {
     Bool(bool),
     /// A `String`.
     Str(String),
+    /// A `String` longer than [`INLINE_TEXT`] bytes, kept as a blob: its
+    /// digest and its length in bytes.
+    Text(Digest, u64),
     /// A `Duration`, its nanoseconds.
     Duration(i64),
     /// A `Size`, its bytes.
@@ -78,9 +90,10 @@ pub enum StoreError {
     Unkept(String),
     /// It holds a function, which is no data.
     NotData,
-    /// A file or directory it names could not be put into the store.
+    /// A file or directory it names, or a long string of it, could not be
+    /// put into the store.
     Io {
-        /// The path, as GCSL code names it.
+        /// The path, as GCSL code names it, or empty for a string.
         path: String,
         /// Why.
         error: io::Error,
@@ -129,10 +142,12 @@ pub fn keep_files<S: BuildHasher>(
 ///
 /// # Errors
 ///
-/// That it holds a secret, or names a file or directory `kept` lacks.
+/// That it holds a secret, names a file or directory `kept` lacks, or a long
+/// string of it can't be put into `store`.
 pub fn stored<S: BuildHasher>(
     plain: &Plain,
     kept: &HashMap<String, Kept, S>,
+    store: &Store,
 ) -> Result<Stored, StoreError> {
     let of = |path: &str| {
         kept.get(path)
@@ -143,6 +158,15 @@ pub fn stored<S: BuildHasher>(
         Plain::Int(n) => Stored::Int(*n),
         Plain::Float(x) => Stored::Float(*x),
         Plain::Bool(b) => Stored::Bool(*b),
+        Plain::Str(s) if s.len() > INLINE_TEXT => {
+            let digest = store
+                .put_bytes(s.as_bytes())
+                .map_err(|error| StoreError::Io {
+                    path: String::new(),
+                    error,
+                })?;
+            Stored::Text(digest, s.len() as u64)
+        }
         Plain::Str(s) => Stored::Str(s.clone()),
         Plain::Quantity(Quantity::Duration, amount) => Stored::Duration(*amount),
         Plain::Quantity(Quantity::Size, amount) => Stored::Size(*amount),
@@ -150,13 +174,13 @@ pub fn stored<S: BuildHasher>(
         Plain::Record(fields) => Stored::Record(
             fields
                 .iter()
-                .map(|(name, value)| Ok((name.clone(), stored(value, kept)?)))
+                .map(|(name, value)| Ok((name.clone(), stored(value, kept, store)?)))
                 .collect::<Result<_, StoreError>>()?,
         ),
         Plain::List(items) => Stored::List(
             items
                 .iter()
-                .map(|item| stored(item, kept))
+                .map(|item| stored(item, kept, store))
                 .collect::<Result<_, _>>()?,
         ),
         Plain::Variant {
@@ -169,7 +193,7 @@ pub fn stored<S: BuildHasher>(
             enum_of.clone(),
             shown.clone(),
             match payload {
-                Some(payload) => Some(Box::new(stored(payload, kept)?)),
+                Some(payload) => Some(Box::new(stored(payload, kept, store)?)),
                 None => None,
             },
         ),
@@ -190,29 +214,44 @@ pub fn stored<S: BuildHasher>(
 }
 
 impl Stored {
-    /// The plain data this is, paths as they were: what the step gave.
-    #[must_use]
-    pub fn plain(&self) -> Plain {
-        match self {
+    /// The plain data this is, paths as they were: what the step gave, its
+    /// long strings read from `store`.
+    ///
+    /// # Errors
+    ///
+    /// That `store` lacks a long string's blob, or it is no UTF-8.
+    pub fn plain(&self, store: &Store) -> io::Result<Plain> {
+        Ok(match self {
             Stored::Int(n) => Plain::Int(*n),
             Stored::Float(x) => Plain::Float(*x),
             Stored::Bool(b) => Plain::Bool(*b),
             Stored::Str(s) => Plain::Str(s.clone()),
+            Stored::Text(digest, _) => {
+                Plain::Str(String::from_utf8(store.read_blob(digest)?).map_err(io::Error::other)?)
+            }
             Stored::Duration(amount) => Plain::Quantity(Quantity::Duration, *amount),
             Stored::Size(amount) => Plain::Quantity(Quantity::Size, *amount),
             Stored::Empty => Plain::Empty,
             Stored::Record(fields) => Plain::Record(
                 fields
                     .iter()
-                    .map(|(name, value)| (name.clone(), value.plain()))
-                    .collect(),
+                    .map(|(name, value)| Ok((name.clone(), value.plain(store)?)))
+                    .collect::<io::Result<_>>()?,
             ),
-            Stored::List(items) => Plain::List(items.iter().map(Stored::plain).collect()),
+            Stored::List(items) => Plain::List(
+                items
+                    .iter()
+                    .map(|item| item.plain(store))
+                    .collect::<io::Result<_>>()?,
+            ),
             Stored::Variant(key, of, shown, payload) => Plain::Variant {
                 key: key.clone(),
                 of: of.clone(),
                 shown: shown.clone(),
-                payload: payload.as_ref().map(|payload| Box::new(payload.plain())),
+                payload: match payload {
+                    Some(payload) => Some(Box::new(payload.plain(store)?)),
+                    None => None,
+                },
             },
             Stored::File(path, identity, _) => Plain::File {
                 path: path.clone(),
@@ -227,7 +266,26 @@ impl Stored {
                 cwd: cwd.clone(),
                 env: env.clone(),
             },
+        })
+    }
+
+    /// The digest of every long string this holds as a blob, at any depth:
+    /// what the store must hold, as it must its files, for the result to be
+    /// given back.
+    #[must_use]
+    pub fn texts(&self) -> Vec<Digest> {
+        let mut found = Vec::new();
+        let mut pending = vec![self];
+        while let Some(stored) = pending.pop() {
+            match stored {
+                Stored::Text(digest, _) => found.push(*digest),
+                Stored::Record(fields) => pending.extend(fields.iter().map(|(_, value)| value)),
+                Stored::List(items) => pending.extend(items),
+                Stored::Variant(_, _, _, Some(payload)) => pending.push(payload),
+                _ => {}
+            }
         }
+        found
     }
 
     /// Every file and directory this names, at any depth, with what the

@@ -37,7 +37,12 @@ receipt's digest. It holds:
   floats, booleans, strings, durations, sizes, records with their fields in
   order, lists, enum variants, sandboxes, and every file and directory by
   its path and what the store keeps of it: a file's digest, size, and
-  whether it is executable, and a directory's tree.
+  whether it is executable, and a directory's tree. A string longer than
+  64 KiB (`INLINE_TEXT`), such as a program's whole output, is kept as a
+  blob, and the record names it by digest and length (`Stored::Text`).
+  This matters because a record is read whole, by every eviction too, and
+  JSON writes some bytes as six. A record whose string blob was evicted
+  isn't live.
 - **`duration_ms`,** how long the step ran, from the end of its staging to
   the end of its last attempt. Eviction weighs a record's contents by it.
 
