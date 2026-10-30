@@ -16,7 +16,16 @@ An eviction removes a record's contents together: every blob and tree a
 record names, whether a step's, a program's, an unpacking's, or a
 download's. The record stays, but isn't *live*: a later build that
 finds it runs what made it again. A blob is removed once no live record
-names it.
+names it at any depth.
+
+An eviction never lists a record's contents whole. Each blob counts what
+names it: each live record that names it directly, and each tree a live
+record reaches that holds it as an entry. Evicting a record lets go of what
+it names. A blob that nothing names any more is removed, and a removed tree
+lets go of its entries in turn. Trees share their subtrees, so an
+eviction's memory grows with the store's blobs and its trees' entries, not
+with how much each record names. A store of 128,000 records and 37 GiB
+evicts in about 200 MiB.
 
 Before it removes any blob, an eviction removes every materialized tree and
 every completeness mark, since both depend on blobs being there. In order,
@@ -35,7 +44,8 @@ The order is GreedyDual-Size. Each record's priority is `L + cost / size`,
 set when the record was last used, where:
 
 - `cost` is the time it took to make, in milliseconds.
-- `size` is the size of its contents, in bytes.
+- `size` is the size of its contents, in bytes. A file that two of its
+  directories hold counts for each.
 - `L` is the priority of the last record evicted.
 
 So what is cheapest to make again for the space it takes goes first, and

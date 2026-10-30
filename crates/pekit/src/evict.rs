@@ -11,8 +11,14 @@
 //!   tree its record names, a step's, a program's, an unpacking's or a
 //!   download's. A record stays when its contents go, and is no hit, so
 //!   what made it is done again. A blob is removed once no *live* record,
-//!   one whose contents are all there, names it; a blob no record names
-//!   goes first, as costing nothing to make again.
+//!   one whose contents are all there, names it at any depth; a blob no
+//!   record names goes first, as costing nothing to make again. Each blob
+//!   counts what names it, live records directly and live trees as an
+//!   entry, so that a record's contents are never listed whole: evicting a
+//!   record lets go of what it names, a blob let go of by everything is
+//!   removed, and a tree removed lets go of its entries in turn. A store's
+//!   trees share their subtrees, so what an eviction holds grows with the
+//!   store's blobs and trees' entries, not with what its records name.
 //! - **The order** is each record's priority, `L + cost / size`, set when it
 //!   was last used, its cost the time it took to make in milliseconds, its
 //!   size its contents' in bytes, and `L` the priority of the last evicted.
@@ -43,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::layers::remove_tree;
-use crate::store::{Digest, Store, Tree, TreeEntry, Used};
+use crate::store::{Digest, Store, TreeEntry, Used};
 
 /// The limit a store has when `PEKIT_CACHE_LIMIT` says none: 50 GiB.
 pub const DEFAULT_LIMIT: u64 = 50 << 30;
@@ -153,8 +159,12 @@ impl Ord for Candidate {
 
 /// What an eviction saw of a store.
 struct StoreSeen<'a> {
-    /// Every blob, by its digest's hex digits.
-    blobs: &'a HashMap<String, BlobSeen>,
+    /// The store.
+    store: &'a Store,
+    /// Every blob.
+    blobs: &'a Blobs,
+    /// The entries of every tree a record names at any depth, by its number.
+    trees: &'a HashMap<u32, Box<[u32]>>,
     /// Every scratch directory, by its name, with where it is and its size.
     scratch: &'a HashMap<String, (PathBuf, u64)>,
     /// Every record, by its key's hex digits.
@@ -166,18 +176,98 @@ struct StoreSeen<'a> {
 struct RecordSeen {
     /// The time it took to make, in milliseconds.
     cost: u64,
-    /// The blobs it names, at any depth, by their digests' hex digits.
-    blobs: Vec<String>,
+    /// The blobs it names itself, each once, by their numbers in [`Blobs`]:
+    /// a tree's entries are its tree's.
+    roots: Box<[u32]>,
+    /// The size of what it names at any depth, in bytes, a file two of its
+    /// trees hold counted for each.
+    size: u64,
 }
 
-/// A blob as an eviction sees it: its files, plain and executable, and their
-/// size.
+/// Every blob of a store, each by a number of its own, which is what an
+/// eviction names it by: four bytes, where its digest's hex digits are 64,
+/// so that what a store's records name at any depth, which can be millions
+/// of blobs over and over, costs little to remember.
 #[derive(Debug, Default)]
+struct Blobs {
+    /// Each blob, by its number.
+    seen: Vec<BlobSeen>,
+    /// Each blob's number, by its digest.
+    numbers: HashMap<Digest, u32>,
+    /// The other files of `cas/`, each with its size: a blob's numbered
+    /// copies, `DIGEST.r1` and on, which no record names, so evicted first.
+    others: Vec<(PathBuf, u64)>,
+}
+
+/// A blob as an eviction sees it: which of its files, plain and executable,
+/// are there, and their size.
+#[derive(Debug)]
 struct BlobSeen {
-    /// Its files.
-    files: Vec<PathBuf>,
+    /// Its digest.
+    digest: Digest,
+    /// Whether its plain file is there.
+    plain: bool,
+    /// Whether its executable file is there.
+    executable: bool,
     /// Their size, in bytes.
     size: u64,
+}
+
+impl Blobs {
+    /// The number of the blob `digest`, if the store has it.
+    fn number(&self, digest: &Digest) -> Option<u32> {
+        self.numbers.get(digest).copied()
+    }
+
+    /// The blob numbered `number`.
+    fn get(&self, number: u32) -> &BlobSeen {
+        &self.seen[index(number)]
+    }
+
+    /// Every file's size, in bytes.
+    fn total(&self) -> u64 {
+        let blobs: u64 = self.seen.iter().map(|blob| blob.size).sum();
+        blobs + self.others.iter().map(|(_, size)| size).sum::<u64>()
+    }
+
+    /// Notes the file `name` in `cas/`, at `path`, of `len` bytes.
+    fn note(&mut self, name: &str, path: PathBuf, len: u64) -> io::Result<()> {
+        let (hex, executable) = name
+            .strip_suffix(".x")
+            .map_or((name, false), |hex| (hex, true));
+        // A file named for no digest, a copy, is no blob's own.
+        let Some(digest) = Digest::from_hex(hex) else {
+            self.others.push((path, len));
+            return Ok(());
+        };
+        let number = if let Some(number) = self.numbers.get(&digest) {
+            *number
+        } else {
+            let number = u32::try_from(self.seen.len())
+                .map_err(|_| io::Error::other("more blobs than an eviction can number"))?;
+            self.seen.push(BlobSeen {
+                digest,
+                plain: false,
+                executable: false,
+                size: 0,
+            });
+            self.numbers.insert(digest, number);
+            number
+        };
+        let blob = &mut self.seen[index(number)];
+        if executable {
+            blob.executable = true;
+        } else {
+            blob.plain = true;
+        }
+        blob.size += len;
+        Ok(())
+    }
+}
+
+/// A blob's number as an index of [`Blobs`]' own.
+fn index(number: u32) -> usize {
+    usize::try_from(number).unwrap_or(usize::MAX)
 }
 
 /// Journals what `store` was used for, `used`, and evicts until the store is
@@ -324,7 +414,7 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
         return Ok(None);
     }
     let blobs = blobs_of(root)?;
-    let measured: u64 = blobs.values().map(|blob| blob.size).sum();
+    let measured = blobs.total();
     let total = measured + scratch_size(&scratch);
     // Within its limit, nothing more is read: the journals wait for an
     // eviction that does something.
@@ -341,21 +431,13 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    let records = records_of(store, &blobs)?;
+    let (records, trees) = records_of(store, &blobs)?;
     let (journals, used) = journals_of(root)?;
     // What was used is live again, and weighed as now.
     for key in &used.records {
         state.evicted.remove(&key.hex());
     }
-    let weigh = |record: &RecordSeen| {
-        let size: u64 = record
-            .blobs
-            .iter()
-            .filter_map(|blob| blobs.get(blob))
-            .map(|blob| blob.size)
-            .sum();
-        cost_per_byte(record.cost, size)
-    };
+    let weigh = |record: &RecordSeen| cost_per_byte(record.cost, record.size);
     for key in &used.records {
         let hex = key.hex();
         if let Some(record) = records.get(&hex) {
@@ -370,7 +452,9 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     let low = limit / 10 * 9;
     let after = evict_to(
         &StoreSeen {
+            store,
             blobs: &blobs,
+            trees: &trees,
             scratch: &scratch,
             records: &records,
         },
@@ -408,50 +492,58 @@ fn cost_per_byte(cost: u64, size: u64) -> u64 {
 /// its size after.
 fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64, u64)) -> u64 {
     let StoreSeen {
+        store,
         blobs,
+        trees,
         scratch,
         records,
     } = seen;
     let live: Vec<(&String, &RecordSeen)> = records
         .iter()
-        .filter(|(hex, record)| {
-            !state.evicted.contains(*hex)
-                && record.blobs.iter().all(|blob| blobs.contains_key(blob))
-        })
+        .filter(|(hex, _)| !state.evicted.contains(*hex))
         .collect();
-    let mut named: HashMap<&str, u32> = HashMap::new();
-    for (_, record) in &live {
-        for blob in &record.blobs {
-            *named.entry(blob).or_default() += 1;
-        }
-    }
-    let remove = |blob: &str, total: &mut u64| {
-        if let Some(seen) = blobs.get(blob) {
-            for file in &seen.files {
-                let _ = fs::remove_file(file);
+    let mut named = named_of(&live, blobs, trees);
+    let remove = |blob: u32, total: &mut u64| {
+        let seen = blobs.get(blob);
+        for (there, executable) in [(seen.plain, false), (seen.executable, true)] {
+            if there {
+                let _ = fs::remove_file(store.blob_path(&seen.digest, executable));
             }
-            *total = total.saturating_sub(seen.size);
         }
+        *total = total.saturating_sub(seen.size);
     };
-    // What no live record names costs nothing to make again.
-    let mut unnamed: Vec<&String> = blobs
-        .keys()
-        .filter(|blob| !named.contains_key(blob.as_str()))
+    // What no live record names costs nothing to make again: a blob no
+    // live record names, and a copy, the largest first.
+    let mut unnamed: Vec<(u64, Result<u32, &Path>)> = (0..blobs.seen.len())
+        .filter(|at| named[*at] == 0)
+        .filter_map(|at| u32::try_from(at).ok())
+        .map(|blob| (blobs.get(blob).size, Ok(blob)))
+        .chain(
+            blobs
+                .others
+                .iter()
+                .map(|(path, size)| (*size, Err(path.as_path()))),
+        )
         .collect();
-    unnamed.sort_by_key(|blob| std::cmp::Reverse(blobs[*blob].size));
-    for blob in unnamed {
+    unnamed.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+    for (size, what) in unnamed {
         if total <= low {
             return total;
         }
-        remove(blob, &mut total);
+        match what {
+            Ok(blob) => remove(blob, &mut total),
+            Err(path) => {
+                let _ = fs::remove_file(path);
+                total = total.saturating_sub(size);
+            }
+        }
     }
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
     for (hex, record) in &live {
-        let size: u64 = record.blobs.iter().map(|blob| blobs[blob].size).sum();
         let priority = state.records.get(*hex).copied().unwrap_or_else(|| {
             state
                 .inflation
-                .saturating_add(cost_per_byte(record.cost, size))
+                .saturating_add(cost_per_byte(record.cost, record.size))
         });
         heap.push(Candidate {
             priority,
@@ -466,17 +558,26 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
         });
     }
     while total > low {
-        let Some(next) = heap.pop() else {
+        let Some(candidate) = heap.pop() else {
             break;
         };
-        state.inflation = state.inflation.max(next.priority);
-        match next.what {
+        state.inflation = state.inflation.max(candidate.priority);
+        match candidate.what {
             Evictable::Record(hex) => {
-                for blob in &records[&hex].blobs {
-                    let count = named.entry(blob).or_default();
+                // Each blob let go of by everything that named it is
+                // removed, and a tree lets go of its entries in turn.
+                let mut letting: Vec<u32> = records[&hex].roots.to_vec();
+                while let Some(blob) = letting.pop() {
+                    let count = &mut named[index(blob)];
                     *count = count.saturating_sub(1);
                     if *count == 0 {
                         remove(blob, &mut total);
+                        letting.extend(
+                            trees
+                                .get(&blob)
+                                .into_iter()
+                                .flat_map(|entries| entries.iter()),
+                        );
                     }
                 }
                 state.records.remove(&hex);
@@ -492,6 +593,40 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
         }
     }
     total
+}
+
+/// How many name each blob of `blobs`, by its number: each record of
+/// `live` that names it itself, and each tree such a record names at any
+/// depth, by `trees`, that holds it.
+fn named_of(
+    live: &[(&String, &RecordSeen)],
+    blobs: &Blobs,
+    trees: &HashMap<u32, Box<[u32]>>,
+) -> Vec<u32> {
+    let mut named: Vec<u32> = vec![0; blobs.seen.len()];
+    let mut reached: Vec<bool> = vec![false; blobs.seen.len()];
+    let mut next: Vec<u32> = Vec::new();
+    for (_, record) in live {
+        for root in &record.roots {
+            named[index(*root)] += 1;
+            next.push(*root);
+        }
+    }
+    // Each tree's entries are counted once, as the tree is first reached.
+    while let Some(blob) = next.pop() {
+        if std::mem::replace(&mut reached[index(blob)], true) {
+            continue;
+        }
+        for entry in trees
+            .get(&blob)
+            .into_iter()
+            .flat_map(|entries| entries.iter())
+        {
+            named[index(*entry)] += 1;
+            next.push(*entry);
+        }
+    }
+    named
 }
 
 /// Removes the scratch directory at `dir`, unless a run holds it: whether
@@ -511,9 +646,9 @@ fn remove_scratch(dir: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Every blob in the store at `root`, by its digest's hex digits.
-fn blobs_of(root: &Path) -> io::Result<HashMap<String, BlobSeen>> {
-    let mut blobs: HashMap<String, BlobSeen> = HashMap::new();
+/// Every blob in the store at `root`.
+fn blobs_of(root: &Path) -> io::Result<Blobs> {
+    let mut blobs = Blobs::default();
     for shard in fs::read_dir(root.join("cas"))? {
         let shard = shard?;
         if !shard.file_type()?.is_dir() {
@@ -522,11 +657,7 @@ fn blobs_of(root: &Path) -> io::Result<HashMap<String, BlobSeen>> {
         for entry in fs::read_dir(shard.path())? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let hex = name.trim_end_matches(".x").to_owned();
-            let size = entry.metadata()?.len();
-            let blob = blobs.entry(hex).or_default();
-            blob.files.push(entry.path());
-            blob.size += size;
+            blobs.note(&name, entry.path(), entry.metadata()?.len())?;
         }
     }
     Ok(blobs)
@@ -571,16 +702,14 @@ pub fn size_under(path: &Path) -> u64 {
     })
 }
 
-/// Every record of `store`, by its key's hex digits, with the blobs it
-/// names of `blobs`, at any depth.
-fn records_of(
-    store: &Store,
-    blobs: &HashMap<String, BlobSeen>,
-) -> io::Result<HashMap<String, RecordSeen>> {
+/// Every record of `store`, by its key's hex digits, with the blobs of
+/// `blobs` it names itself and the size of what it names at any depth, and
+/// the entries of every tree of `blobs` they name at any depth.
+fn records_of(store: &Store, blobs: &Blobs) -> io::Result<RecordsSeen> {
     let mut records = HashMap::new();
-    let mut trees: HashMap<String, Vec<String>> = HashMap::new();
+    let mut trees = TreesSeen::default();
     let Ok(shards) = fs::read_dir(store.root().join("records")) else {
-        return Ok(records);
+        return Ok((records, trees.entries));
     };
     for shard in shards {
         let shard = shard?;
@@ -604,16 +733,76 @@ fn records_of(
                 .unwrap_or(0);
             let mut named = Vec::new();
             digests_in(&value, &mut named);
-            let mut found: Vec<String> = Vec::new();
-            for digest in named {
-                named_blobs(store, &digest, (blobs, &mut trees), &mut found);
-            }
-            found.sort_unstable();
-            found.dedup();
-            records.insert(hex, RecordSeen { cost, blobs: found });
+            let mut roots: Vec<u32> = named
+                .iter()
+                .filter_map(|digest| Digest::from_hex(digest))
+                .filter_map(|digest| blobs.number(&digest))
+                .collect();
+            roots.sort_unstable();
+            roots.dedup();
+            let size = roots
+                .iter()
+                .map(|root| trees.size(store, *root, blobs))
+                .sum();
+            records.insert(
+                hex,
+                RecordSeen {
+                    cost,
+                    roots: roots.into_boxed_slice(),
+                    size,
+                },
+            );
         }
     }
-    Ok(records)
+    Ok((records, trees.entries))
+}
+
+/// What [`records_of`] gives: every record, and every tree's entries.
+type RecordsSeen = (HashMap<String, RecordSeen>, HashMap<u32, Box<[u32]>>);
+
+/// The trees an eviction has read, by their numbers in [`Blobs`].
+#[derive(Default)]
+struct TreesSeen {
+    /// Each tree's entries, each once, of the blobs the store has.
+    entries: HashMap<u32, Box<[u32]>>,
+    /// The size of what each blob is at any depth, in bytes, by its number.
+    sizes: HashMap<u32, u64>,
+}
+
+impl TreesSeen {
+    /// The size of the blob numbered `blob` of `blobs` and, if it is a
+    /// tree, of what it names at any depth, a file two of its directories
+    /// hold counted for each: its entries noted as it is read.
+    fn size(&mut self, store: &Store, blob: u32, blobs: &Blobs) -> u64 {
+        if let Some(size) = self.sizes.get(&blob) {
+            return *size;
+        }
+        let seen = blobs.get(blob);
+        // A tree's encoding begins so; a file's is not read to find it isn't one.
+        let tree = Some(seen.digest)
+            .filter(|digest| store.is_tree_blob(digest))
+            .and_then(|digest| store.read_tree(&digest).ok());
+        let mut size = seen.size;
+        if let Some(tree) = tree {
+            let mut entries: Vec<u32> = tree
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    TreeEntry::File { file, .. } => blobs.number(&file.digest),
+                    TreeEntry::Dir { tree, .. } => blobs.number(tree),
+                    TreeEntry::Link { .. } => None,
+                })
+                .collect();
+            entries.sort_unstable();
+            entries.dedup();
+            for entry in &entries {
+                size = size.saturating_add(self.size(store, *entry, blobs));
+            }
+            self.entries.insert(blob, entries.into_boxed_slice());
+        }
+        self.sizes.insert(blob, size);
+        size
+    }
 }
 
 /// Every string of 64 hex digits in `value`: what may name a blob.
@@ -624,54 +813,6 @@ pub(crate) fn digests_in(value: &Value, found: &mut Vec<String>) {
         Value::Object(fields) => fields.values().for_each(|item| digests_in(item, found)),
         _ => {}
     }
-}
-
-/// Adds to `found` the blob `digest`, if `blobs` has it, and, if it is a
-/// tree, every blob it names at any depth, each tree's remembered in
-/// `trees`.
-fn named_blobs(
-    store: &Store,
-    digest: &str,
-    (blobs, trees): (
-        &HashMap<String, BlobSeen>,
-        &mut HashMap<String, Vec<String>>,
-    ),
-    found: &mut Vec<String>,
-) {
-    if !blobs.contains_key(digest) {
-        return;
-    }
-    found.push(digest.to_owned());
-    if let Some(known) = trees.get(digest) {
-        found.extend(known.iter().cloned());
-        return;
-    }
-    // A tree's encoding begins so; a file's is not read to find it isn't one.
-    let Some(tree) = Digest::from_hex(digest)
-        .filter(|digest| store.is_tree_blob(digest))
-        .and_then(|digest| store.read_tree(&digest).ok())
-    else {
-        trees.insert(digest.to_owned(), Vec::new());
-        return;
-    };
-    let mut within = Vec::new();
-    for entry in tree_entries(&tree) {
-        named_blobs(store, &entry, (blobs, trees), &mut within);
-    }
-    found.extend(within.iter().cloned());
-    trees.insert(digest.to_owned(), within);
-}
-
-/// The digests a tree's entries name.
-fn tree_entries(tree: &Tree) -> Vec<String> {
-    tree.entries
-        .iter()
-        .filter_map(|entry| match entry {
-            TreeEntry::File { file, .. } => Some(file.digest.hex()),
-            TreeEntry::Dir { tree, .. } => Some(tree.hex()),
-            TreeEntry::Link { .. } => None,
-        })
-        .collect()
 }
 
 /// Every journal of the store at `root`, and what they say was used.
