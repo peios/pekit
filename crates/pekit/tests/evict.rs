@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use building::{Options, build_in, observed_with};
 use pekit::evict::{DEFAULT_LIMIT, limit_of};
-use pekit::store::Store;
+use pekit::store::{Digest, Store, TreeEntry};
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -242,6 +242,57 @@ fn a_tree_known_complete_is_walked_again_once_an_eviction_ran() {
     assert!(!marks.exists());
     assert_eq!(built(dir.path(), state.path(), None), (1, 1));
     assert_eq!(built(dir.path(), state.path(), None), (0, 2));
+}
+
+#[test]
+fn a_subtree_two_records_name_stays_until_both_are_evicted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    let tree = dir.path().join("tree");
+    let (outer, inner) = ("o".repeat(1 << 20), "i".repeat(1 << 20));
+    write(&tree, &[("outer", &outer), ("shared/inner", &inner)]);
+    let whole = store.put_tree(&tree).unwrap();
+    let entries = store.read_tree(&whole).unwrap().entries;
+    let digest_of = |wanted: &str| {
+        entries
+            .iter()
+            .find_map(|entry| match entry {
+                TreeEntry::File { name, file, .. } if name == wanted => Some(file.digest),
+                TreeEntry::Dir { name, tree, .. } if name == wanted => Some(*tree),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let (outer, shared) = (digest_of("outer"), digest_of("shared"));
+    let inner = store
+        .read_tree(&shared)
+        .unwrap()
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            TreeEntry::File { file, .. } => Some(file.digest),
+            _ => None,
+        })
+        .unwrap();
+    // One record names the whole tree and was quick to make; another names
+    // its subtree alone and was slow.
+    let record = |name: &str, tree: Digest, cost: u64| {
+        let key = Digest::of(name.as_bytes());
+        let value = serde_json::json!({"tree": tree.hex(), "duration_ms": cost});
+        store.put_record(&key, &value).unwrap();
+    };
+    record("whole", whole, 0);
+    record("shared", shared, 1 << 40);
+    let state = dir.path();
+    ledger(state, 0, 2 * 86_400);
+    // Over its limit by a megabyte: the whole tree's record is evicted, and
+    // the subtree the other names stays, with its file.
+    pekit::evict::evict(&store, &store.used(), 3 << 19).unwrap();
+    assert!(!store.has(&whole) && !store.has(&outer));
+    assert!(store.has(&shared) && store.has(&inner));
+    // Both evicted, nothing is left.
+    pekit::evict::evict(&store, &store.used(), 1).unwrap();
+    assert!(!store.has(&shared) && !store.has(&inner));
 }
 
 #[test]
