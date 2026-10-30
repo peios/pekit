@@ -38,6 +38,33 @@ const SHOUT: &str = "#[hermetic] fn shout(src: File) -> File {\n\
                      }\n";
 
 #[test]
+fn a_step_s_long_output_is_found_again_and_run_again_once_evicted() {
+    // A step whose result is a program's output of 100,000 bytes, which its
+    // record names as a blob.
+    let text = "#[hermetic] fn long() -> String {\n\
+                \x20   = exec([\"/bin/sh\", \"-c\", \"head -c 100000 /dev/zero | tr '\\\\0' a\"]).stdout\n\
+                }\n\
+                def build out() { = long() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "out").unwrap();
+    assert_eq!((built.ran, built.cached), (1, 0));
+    let long = "a".repeat(100_000);
+    assert_eq!(built.value, gcsl::eval::plain::Plain::Str(long.clone()));
+    // Found again, whole.
+    let again = build_in(dir.path(), state.path(), "out").unwrap();
+    assert_eq!((again.ran, again.cached), (0, 1));
+    assert_eq!(again.value, built.value);
+    // Its blob gone, the record is no hit: the step runs again.
+    let hex = pekit::store::Digest::of(long.as_bytes()).hex();
+    let blob = state.path().join("store/cas").join(&hex[..2]).join(&hex);
+    fs::remove_file(&blob).unwrap();
+    let evicted = build_in(dir.path(), state.path(), "out").unwrap();
+    assert_eq!((evicted.ran, evicted.cached), (1, 0));
+    assert_eq!(evicted.value, built.value);
+}
+
+#[test]
 fn a_step_runs_once_and_is_then_found_in_the_store() {
     let text = format!("{SHOUT}def build hello() {{ out = shout(file(\"name.txt\")) }}\n");
     let dir = workspace(&text, &[("name.txt", "world\n")]);

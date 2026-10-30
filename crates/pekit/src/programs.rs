@@ -116,8 +116,11 @@ pub fn perform_program(
     let Ok(key) = key else {
         return plainly(sandbox);
     };
+    // A record whose long strings the store no longer holds is a program
+    // run again.
     if work.reuse == Reuse::Store
         && let Ok(Some(found)) = work.store.record::<ExecRecord>(&key)
+        && let Ok(result) = found.result.plain(&work.store)
     {
         match replay(sandbox, &work.store, &found, before) {
             Ok(true) => {
@@ -125,7 +128,7 @@ pub fn perform_program(
                     found: true,
                     writable: Some((found.own, found.tmp)),
                 };
-                return (Ok(found.result.plain()), ran);
+                return (Ok(result), ran);
             }
             Ok(false) => {}
             Err(message) => {
@@ -143,7 +146,7 @@ pub fn perform_program(
     // What it wrote is hashed again whether it ran well or not.
     let after = captured(sandbox, &work.store);
     if let (Ok(plain), Some((own, tmp)), false) = (&outcome, after, work.reuse == Reuse::Compare)
-        && let Ok(result) = stored(plain, &HashMap::new())
+        && let Ok(result) = stored(plain, &HashMap::new(), &work.store)
     {
         // A record that cannot be written is a program run again.
         let _ = work.store.put_record(

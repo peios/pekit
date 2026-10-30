@@ -305,8 +305,8 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
         ("n".to_owned(), Plain::Int(1)),
     ]);
     let files = keep_files(&result, &store, &host, &std::collections::HashMap::new()).unwrap();
-    let kept = stored(&result, &files).unwrap();
-    assert_eq!(kept.plain(), result);
+    let kept = stored(&result, &files, &store).unwrap();
+    assert_eq!(kept.plain(&store).unwrap(), result);
     let [(path, Kept::File(entry))] = kept.files()[..] else {
         panic!("{:?}", kept.files());
     };
@@ -341,14 +341,47 @@ fn a_result_is_recorded_with_its_files_and_given_back() {
     .unwrap();
     assert!(files.contains_key("/pekit-out/hello"));
     assert!(matches!(
-        stored(&with_secret, &files),
+        stored(&with_secret, &files, &store),
         Err(StoreError::Secret)
     ));
     // A file not kept is no record's.
     assert!(matches!(
-        stored(&result, &std::collections::HashMap::new()),
+        stored(&result, &std::collections::HashMap::new(), &store),
         Err(StoreError::Unkept(path)) if path == "/pekit-out/hello"
     ));
+}
+
+#[test]
+fn a_long_string_of_a_result_is_kept_as_a_blob_the_record_names() {
+    let (store, _dir) = store();
+    let none = std::collections::HashMap::new();
+    // A program's output of NULs, which JSON writes six bytes each, and a
+    // short string, which the record holds itself.
+    let long = "\0".repeat(pekit::record::INLINE_TEXT + 1);
+    let result = Plain::Record(vec![
+        ("stdout".to_owned(), Plain::Str(long.clone())),
+        ("code".to_owned(), Plain::Str("0".to_owned())),
+    ]);
+    let kept = stored(&result, &none, &store).unwrap();
+    let digest = Digest::of(long.as_bytes());
+    assert_eq!(kept.texts(), [digest]);
+    let receipt = Digest::of(b"long");
+    let record = StepRecord {
+        receipt,
+        result: kept,
+        duration_ms: 1,
+    };
+    store.put_record(&receipt, &record).unwrap();
+    let bytes = store.record_bytes(&receipt).unwrap().unwrap();
+    assert!(bytes.len() < 1024, "{} bytes", bytes.len());
+    // Read back whole.
+    let found = store.record::<StepRecord>(&receipt).unwrap().unwrap();
+    assert_eq!(found.result.plain(&store).unwrap(), result);
+    // Its blob gone, the result can't be given back.
+    let blob = store.blob_path(&digest, false);
+    fs::set_permissions(&blob, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::remove_file(&blob).unwrap();
+    assert!(found.result.plain(&store).is_err());
 }
 
 /// The identity of a step of the function number `function` of
