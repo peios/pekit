@@ -98,6 +98,28 @@ fn build_all(
 }
 
 #[test]
+fn a_target_that_ends_a_shared_call_another_waits_on_is_progress() {
+    // `second` begins the memoised `shared`, which waits for a slow step.
+    // `first` needs it only after a quick step, so waits for `second`'s
+    // unit; then, in the round `second` ends `shared`, `first` runs before
+    // it and waits again, though nothing waits for anything any more.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "#[hermetic] fn made(n: Int, pause: String) -> File {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep {pause}; echo {n} > out\"])\n\
+         \x20   = working_dir().file(\"out\")\n\
+         }\n\
+         fn shared() ->> String { = made(7, \"1\").read() }\n\
+         def build first() { = if made(1, \"0.05\").read() != \"\" { shared() } else { \"\" } }\n\
+         def build second() { = shared() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |_| {});
+    let shared = Plain::Str("7\n".to_owned());
+    assert_eq!(outcomes, [Ok(shared.clone()), Ok(shared)]);
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (

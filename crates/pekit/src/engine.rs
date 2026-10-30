@@ -21,8 +21,10 @@
 //! A unit runs again only once what it stopped for is given, carrying on
 //! from where it stopped. A target or a step that stopped for another
 //! unit's run, which computes a memoised call or a `lazy` it needs, runs
-//! again once anything else in the build has run; if nothing else can, the
-//! units wait for each other, and the build fails. A step that
+//! again once anything else in the build has run, a step, an effect, or a
+//! unit that ended a memoised call (`Workspace::memo_ended`), as the other
+//! may have; if nothing else can, the units wait for each other, and the
+//! build fails. A step that
 //! fails, by its code's own failure, is run again from its start in a fresh
 //! sandbox as its `#[retry]` allows, and one that passes only then is
 //! *flaky*; its `#[timeout]` spans every attempt. A step that succeeds is
@@ -1300,6 +1302,10 @@ impl Run<'_> {
     /// to is its root's.
     fn drive(&mut self) -> Result<(), BuildError> {
         loop {
+            // The memoised calls ended before this round's runs: a round
+            // that ends one has moved on what a waiting unit waits for,
+            // though no step or effect ran.
+            let ended = self.loaded.workspace.memo_ended();
             self.run_roots();
             self.name_new_steps();
             let demands = self.root_demands();
@@ -1323,9 +1329,11 @@ impl Run<'_> {
                 }
                 progressed = true;
             }
+            progressed |= self.loaded.workspace.memo_ended() != ended;
             // A unit waiting for another's shared result runs again once
             // anything else has run, the other unit perhaps; if nothing else
-            // can, the units wait for each other.
+            // can, and no shared result was finished, the units wait for
+            // each other.
             let waiting = self.wake_waiting(progressed);
             if waiting && !progressed {
                 return Err(BuildError::Engine(
