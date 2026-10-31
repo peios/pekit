@@ -745,7 +745,10 @@ fn root_workspace(extra: usize) -> tempfile::TempDir {
 fn a_step_is_given_the_workspace_s_root_but_its_history_and_outputs() {
     let dir = root_workspace(0);
     let state = tempfile::tempdir().unwrap();
-    assert_eq!(build_in(dir.path(), state.path(), "listing").unwrap().ran, 1);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
     let out = dir.path().join("pekit-out/listing/lists/out.txt");
     assert_eq!(
         fs::read_to_string(&out).unwrap(),
@@ -753,10 +756,16 @@ fn a_step_is_given_the_workspace_s_root_but_its_history_and_outputs() {
     );
     // A commit and the build's own outputs change nothing it was given.
     write(dir.path(), &[(".git/HEAD", "two\n")]);
-    assert_eq!(build_in(dir.path(), state.path(), "listing").unwrap().ran, 0);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        0
+    );
     // A file of the workspace does.
     write(dir.path(), &[("sub/new.txt", "")]);
-    assert_eq!(build_in(dir.path(), state.path(), "listing").unwrap().ran, 1);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
     assert!(fs::read_to_string(&out).unwrap().contains("./sub/new.txt"));
 }
 
@@ -764,7 +773,10 @@ fn a_step_is_given_the_workspace_s_root_but_its_history_and_outputs() {
 fn a_large_workspace_root_is_given_too() {
     let dir = root_workspace(100);
     let state = tempfile::tempdir().unwrap();
-    assert_eq!(build_in(dir.path(), state.path(), "listing").unwrap().ran, 1);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
     let out = dir.path().join("pekit-out/listing/lists/out.txt");
     let listed = fs::read_to_string(&out).unwrap();
     assert!(listed.contains("./many/99\n") && !listed.contains("./.git"));
