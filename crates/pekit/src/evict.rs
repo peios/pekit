@@ -51,8 +51,8 @@ use serde_json::Value;
 use crate::layers::remove_tree;
 use crate::store::{Digest, Store, TreeEntry, Used};
 
-/// The limit a store has when `PEKIT_CACHE_LIMIT` says none: 50 GiB.
-pub const DEFAULT_LIMIT: u64 = 50 << 30;
+/// The limit a store has when `PEKIT_CACHE_LIMIT` says none: 100 GiB.
+pub const DEFAULT_LIMIT: u64 = 100 << 30;
 
 /// The limit `PEKIT_CACHE_LIMIT`, `setting`, gives the store: its default
 /// if it is unset, none if it is `0`.

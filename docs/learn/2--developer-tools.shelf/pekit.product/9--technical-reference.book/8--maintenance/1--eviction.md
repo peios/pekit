@@ -5,7 +5,7 @@ description: How pekit keeps its store within PEKIT_CACHE_LIMIT by
   store's size is known, and when an eviction runs.
 ---
 
-The store can grow to the size `PEKIT_CACHE_LIMIT` gives: 50 GiB by default,
+The store can grow to the size `PEKIT_CACHE_LIMIT` gives: 100 GiB by default,
 or no limit for `0` (`evict::limit_of`). As a build ends, pekit journals
 what the build used and, if the store is larger than its limit, evicts until
 it is below nine tenths of the limit (`evict`).

@@ -121,7 +121,7 @@ Remote Cache](~pekit/sharing-a-remote-cache).
 
 ## Keeping the store to its size
 
-The store has a size limit, 50 GiB unless you set `PEKIT_CACHE_LIMIT`.
+The store has a size limit, 100 GiB unless you set `PEKIT_CACHE_LIMIT`.
 When a build ends with the store over its limit, pekit evicts until the
 store is under nine tenths of it. It removes first what is cheapest to make
 again for the space it takes, and among those, what was used longest ago.
