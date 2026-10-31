@@ -41,7 +41,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus};
+use std::process::{self, ExitCode, ExitStatus};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -424,7 +424,7 @@ pub struct Terminal<'a> {
 /// busy, as GCSL's `exec` does: a file just written can be, for moments,
 /// open in a process forked meanwhile, and a program that didn't start did
 /// nothing.
-fn started(command: &mut Command) -> std::io::Result<ExitStatus> {
+fn started(command: &mut process::Command) -> std::io::Result<ExitStatus> {
     let mut wait = Duration::from_millis(1);
     loop {
         match command.status() {
