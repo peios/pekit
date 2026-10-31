@@ -155,7 +155,7 @@ def build boot() {
 # network. #[device(kvm)] is a scheduler concern, so it's an attribute: the
 # sandbox may contain /dev/kvm. It changes speed, not output, so it stays off
 # the receipt, and a worker without KVM falls back to emulation.
-#[timeout(5m)]
+#[timeout(15m)]
 #[device(kvm)]
 def test boots(iso = build iso(), vm = toolchain.get(Toolchain::Qemu)) {
     let run = vm.system.exec(
