@@ -6,8 +6,11 @@
 //! the build environment that would give a step `tar` is itself an archive.
 //! An unpacking is keyed by the archive's digest and `strip`, and recorded in
 //! the store as the tree it made, so the same archive is unpacked once, on
-//! any machine that shares the store. Its directory is
-//! `/pekit-out/.unpack/<key>`, fixed by what it holds.
+//! any machine that shares the store. Unpackings of one key take turns, so
+//! that steps that need the same archive at once, as a build's compiles
+//! need a toolchain's, unpack it once: one that waited finds the record the
+//! other made. Its directory is `/pekit-out/.unpack/<key>`, fixed by what
+//! it holds.
 //!
 //! The archive is read as a zip by its first bytes, as a wheel or a jar is,
 //! else as gzip, xz, bzip2 or zstd, or as a plain tar. Each entry's path has its first `strip` components left off,
@@ -22,8 +25,10 @@
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -45,6 +50,22 @@ struct Unpacked {
 
 /// The number of the next directory unpacked into, in this process.
 static NEXT: AtomicU32 = AtomicU32::new(0);
+
+/// How many archives this process has unpacked, not found: what a test of
+/// unpacking once counts.
+#[must_use]
+pub fn unpackings() -> u32 {
+    NEXT.load(Ordering::Relaxed)
+}
+
+/// The lock of the unpacking of key `key`, which an unpacking holds, one
+/// for each key the process unpacks.
+fn lock_of(key: &Digest) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<Digest, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(*key).or_default())
+}
 
 /// The key of the unpacking of the archive `archive` with `strip`.
 #[must_use]
@@ -78,10 +99,19 @@ pub fn unpack(
     scratch: &Path,
 ) -> Result<Digest, String> {
     let key = unpack_key(&archive.digest, strip);
-    // An unpacking whose contents were evicted is done again.
-    if let Ok(Some(Unpacked { tree, .. })) = store.record::<Unpacked>(&key)
-        && store.holds_tree(&tree)
-    {
+    let found = || match store.record::<Unpacked>(&key) {
+        // An unpacking whose contents were evicted is done again.
+        Ok(Some(Unpacked { tree, .. })) if store.holds_tree(&tree) => Some(tree),
+        _ => None,
+    };
+    if let Some(tree) = found() {
+        return Ok(tree);
+    }
+    // Unpackings of one key take turns; one that waited finds the record
+    // the other made.
+    let lock = lock_of(&key);
+    let _turn = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(tree) = found() {
         return Ok(tree);
     }
     let began = std::time::Instant::now();
