@@ -16,7 +16,7 @@ defaults don't suit a machine.
 
 ## Set the size limit
 
-The store can grow to 50 GiB unless you set `PEKIT_CACHE_LIMIT`. To set a
+The store can grow to 100 GiB unless you set `PEKIT_CACHE_LIMIT`. To set a
 limit of 20 GiB, set the variable in your shell's startup file:
 
 ```sh
