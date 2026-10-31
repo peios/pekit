@@ -102,7 +102,8 @@ flags it gives every crate. The library reads each member's manifest for
 them with the python library's pinned Python, and compiles the member's
 crates with them, as Cargo does. Link-time optimization follows Cargo too:
 the programs a profile's `lto` names are optimized whole, and the libraries
-they link carry what that needs.
+they link carry what that needs. A profile's `strip` applies as Cargo
+applies it, so `strip = "symbols"` gives programs without symbols.
 
 ## Crates that read outside their directory
 
@@ -140,7 +141,9 @@ Each setting does one thing:
 `rust.tests(ws, package)` gives a member's test programs, its unit tests
 and each integration test, as `cargo test -p` builds them. Give
 `features` too if the tests need them. `rust.run_test(test)` runs one as a
-step, in a sandbox of the toolchain's runtime with a writable `/tmp`:
+step, in a sandbox of the toolchain's runtime with a writable `/tmp`. It
+runs from its package's directory, as Cargo does, and the sandbox holds
+that directory with the package's `data` and `beside`:
 
 ```gcsl
 def test server_tests(tests: List<rust.RustTest> = rust.tests(crates(), "server")) {
@@ -148,9 +151,15 @@ def test server_tests(tests: List<rust.RustTest> = rust.tests(crates(), "server"
 }
 ```
 
-Give `run_test` what a test reads in `given`, its variables in `env`, and
-its arguments in `args`, such as a filter and `--test-threads=1`. A test
-whose program didn't change is found in the store.
+So a test reads its own files by relative paths or through
+`CARGO_MANIFEST_DIR`, as it does under Cargo. What a test writes there stays
+in its sandbox, so no change reaches your workspace.
+
+Give `run_test` what else a test reads in `given`, such as another member's
+directory, its variables in `env`, and its arguments in `args`, such as a
+filter and `--test-threads=1`. A path in `given` that the package already
+places is placed once, from the package. A test reruns when its program or
+any file of its package changes.
 
 A test target with `harness = false` in its manifest is compiled as a
 program of its own, as Cargo compiles it.
@@ -168,12 +177,21 @@ and examples, each crate a step. `flags` come after the member's lints, so
 `flags = ["-Dwarnings"]` denies every warning. A check fails when a lint it
 denies fires.
 
+Clippy's `cargo` lints read `cargo metadata`, which a check of one crate
+can't run, so `rust.clippy` allows them. `rust.cargo_lints(ws)` checks them
+instead, as `cargo clippy --workspace` does, in one step for the whole
+workspace. The step holds what Cargo plans with: the manifests, the lock,
+the vendored crates, and Cargo's home, with the network off. The member's
+`[lints]` that name these lints apply, then `flags`, so `flags =
+["-Wclippy::cargo", "-Dwarnings"]` denies them. It reads the workspace's
+Clippy configuration too, such as `allowed-duplicate-crates`.
+
 `rust.docs(ws, package)` makes a member's library documentation, as `cargo
 doc --no-deps` does, as a step, and gives the directory rustdoc wrote.
 `flags` come after the member's lints, as they do for Clippy, so `flags =
 ["-Dwarnings"]` fails it when rustdoc warns, such as about a broken link.
 
-All three are steps that the rust library makes, so make them in a test's
+All of these are steps that the rust library makes, so make them in a test's
 parameter defaults, where a test plans and builds what it needs:
 
 ```gcsl
@@ -182,6 +200,8 @@ def test clippy(checked: List<List<{}>> = rust.clippy(crates(), "server", flags 
 def test doctests(ran: List<List<{}>> = rust.doctests(crates(), "server")) {}
 
 def test docs(made: Dir = rust.docs(crates(), "server", flags = ["-Dwarnings"])) {}
+
+def test cargo_lints(checked: {} = rust.cargo_lints(crates(), flags = ["-Wclippy::cargo", "-Dwarnings"])) {}
 ```
 
 ## Build with Cargo, whole
