@@ -59,12 +59,20 @@ pekit reads build files from every directory of the workspace, except:
 - A directory or file whose name starts with a dot, such as `.git`.
 - A directory below the root that has a `workspace.gcsl` of its own. A
   nested workspace is a separate workspace, built on its own.
+- A path that `.gcslignore` at the root names. Use it for `.gcsl` files that
+  are data, such as test fixtures. Each line names one file or directory,
+  relative to the root, and lines that start with `#` are comments.
 
 These rules decide only which `.gcsl` files declare definitions. A build
 can read any file under the root, hidden or not, and a directory listing
 such as `dir(".").files()` includes them all. The one exception is
 `pekit-out/`, the output directory: no listing includes it, and no build
 reads it as part of the workspace.
+
+A step can take the whole workspace, by being given `dir(".")` at the root.
+It receives everything under the root except `.git` and `pekit-out/`, so a
+commit doesn't rerun the step, but any other file there does, whether or not
+Git tracks it. Listing only what a step needs avoids those reruns.
 
 ## `workspace.gcsl` and `pekitconf`
 

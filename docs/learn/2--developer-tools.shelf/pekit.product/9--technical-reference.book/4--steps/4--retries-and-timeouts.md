@@ -18,6 +18,11 @@ again from its start, in a new sandbox staged afresh as
 of the failed attempt carries over: not its files, not its `/tmp`, and
 not its programs' writes.
 
+A program that can't start because its file is open for writing isn't an
+attempt. GCSL starts it again for about a second, whatever the step's
+`#[retry]`. A file just written can stay open for moments in a process forked
+meanwhile, and a program that didn't start did nothing.
+
 A step that passes on an attempt after the first is *flaky*. It is
 recorded as any step that succeeds, and the build warns:
 

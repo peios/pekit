@@ -41,8 +41,9 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode, ExitStatus};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
@@ -419,6 +420,26 @@ pub struct Terminal<'a> {
     pub live: bool,
 }
 
+/// What `command` did, started again after a wait while its program is
+/// busy, as GCSL's `exec` does: a file just written can be, for moments,
+/// open in a process forked meanwhile, and a program that didn't start did
+/// nothing.
+fn started(command: &mut process::Command) -> std::io::Result<ExitStatus> {
+    let mut wait = Duration::from_millis(1);
+    loop {
+        match command.status() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && wait <= Duration::from_millis(512) =>
+            {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            ran => return ran,
+        }
+    }
+}
+
 /// Runs the command `args`, `pekit` first, from the directory `cwd`,
 /// writing to `terminal` (see [Commands](#commands)). Like all of GCSL's
 /// pipeline, it must run on a thread with at least [`gcsl::STACK_SIZE`]
@@ -681,9 +702,7 @@ fn run_command(args: &RunArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitC
         return ExitCode::FAILURE;
     };
     let ran = program_command(&loaded, &settings, (path, &args.args)).and_then(|mut command| {
-        command
-            .status()
-            .map_err(|error| BuildError::Engine(error.to_string()))
+        started(&mut command).map_err(|error| BuildError::Engine(error.to_string()))
     });
     match ran {
         Ok(status) => status

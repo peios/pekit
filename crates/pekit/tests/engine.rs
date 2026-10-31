@@ -714,6 +714,74 @@ fn a_step_is_given_the_toolchain_the_workspace_registers() {
     );
 }
 
+/// What the workspace's root holds, as a step given it lists it.
+const LISTS_ROOT: &str = "#[hermetic] fn lists(root: Dir) -> File {\n\
+                          \x20   let r = exec([\"/bin/sh\", \"-c\", \"(cd {root.path} && find . -type f | sort) > out.txt\"])\n\
+                          \x20   working_dir().file(\"out.txt\")\n\
+                          }\n\
+                          def build listing() { out = lists(dir(\".\")) }\n";
+
+/// A workspace with `LISTS_ROOT` at its root, and `extra` empty files.
+fn root_workspace(extra: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("build.gcsl", LISTS_ROOT),
+            ("a.txt", "a\n"),
+            ("sub/b.txt", "b\n"),
+            (".git/HEAD", "one\n"),
+            (".hidden", "h\n"),
+        ],
+    );
+    for n in 0..extra {
+        write(dir.path(), &[(&format!("many/{n}"), "")]);
+    }
+    dir
+}
+
+#[test]
+fn a_step_is_given_the_workspace_s_root_but_its_history_and_outputs() {
+    let dir = root_workspace(0);
+    let state = tempfile::tempdir().unwrap();
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
+    let out = dir.path().join("pekit-out/listing/lists/out.txt");
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        "./.hidden\n./a.txt\n./build.gcsl\n./sub/b.txt\n./workspace.gcsl\n"
+    );
+    // A commit and the build's own outputs change nothing it was given.
+    write(dir.path(), &[(".git/HEAD", "two\n")]);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        0
+    );
+    // A file of the workspace does.
+    write(dir.path(), &[("sub/new.txt", "")]);
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
+    assert!(fs::read_to_string(&out).unwrap().contains("./sub/new.txt"));
+}
+
+#[test]
+fn a_large_workspace_root_is_given_too() {
+    let dir = root_workspace(100);
+    let state = tempfile::tempdir().unwrap();
+    assert_eq!(
+        build_in(dir.path(), state.path(), "listing").unwrap().ran,
+        1
+    );
+    let out = dir.path().join("pekit-out/listing/lists/out.txt");
+    let listed = fs::read_to_string(&out).unwrap();
+    assert!(listed.contains("./many/99\n") && !listed.contains("./.git"));
+}
+
 #[test]
 fn with_no_toolchain_registered_a_step_compiles_with_the_host_s() {
     let has_cc = std::process::Command::new("cc")
@@ -744,6 +812,12 @@ fn with_no_toolchain_registered_a_step_compiles_with_the_host_s() {
         build_in(dir.path(), state.path(), "hello").unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(built.ran, 1);
     let binary = dir.path().join("pekit-out/app/hello/compile/hello");
-    let run = std::process::Command::new(binary).output().unwrap();
+    // Another test forking just then can hold it open for a moment.
+    let run = (0..10)
+        .find_map(|tries| {
+            std::thread::sleep(std::time::Duration::from_millis(tries * tries));
+            std::process::Command::new(&binary).output().ok()
+        })
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout), "hi\n");
 }

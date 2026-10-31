@@ -183,6 +183,8 @@ struct Walk<'a> {
     refuse: &'a dyn Fn(&Path, &fs::Metadata) -> bool,
     /// When the put began, by the file system's clock.
     now: (i64, i64),
+    /// What is no part of the tree, by where it is.
+    left_out: &'a [PathBuf],
 }
 
 /// A SHA-256 digest, of a file's contents, a tree or a receipt.
@@ -1117,7 +1119,28 @@ impl Store {
         (seen, now): (&mut Seen, (i64, i64)),
         refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
     ) -> io::Result<Option<Digest>> {
-        let mut walk = Walk { seen, refuse, now };
+        self.put_tree_seen_without(path, (seen, now), refuse, &[])
+    }
+
+    /// [`Store::put_tree_seen_at`], what is at the paths `left_out` no part
+    /// of the tree.
+    ///
+    /// # Errors
+    ///
+    /// That something under `path` cannot be read, or the store written.
+    pub fn put_tree_seen_without(
+        &self,
+        path: &Path,
+        (seen, now): (&mut Seen, (i64, i64)),
+        refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
+        left_out: &[PathBuf],
+    ) -> io::Result<Option<Digest>> {
+        let mut walk = Walk {
+            seen,
+            refuse,
+            now,
+            left_out,
+        };
         let meta = fs::symlink_metadata(path)?;
         if refuse(path, &meta) {
             return Ok(None);
@@ -1134,6 +1157,9 @@ impl Store {
                 io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
             })?;
             let at = entry.path();
+            if walk.left_out.contains(&at) {
+                continue;
+            }
             let meta = fs::symlink_metadata(&at)?;
             let kind = meta.file_type();
             entries.push(if kind.is_symlink() {
@@ -1187,6 +1213,7 @@ impl Store {
             seen,
             refuse: &never,
             now,
+            left_out: &[],
         };
         self.file_seen(path, &meta, &mut walk)?
             .ok_or_else(|| io::Error::other("refused"))

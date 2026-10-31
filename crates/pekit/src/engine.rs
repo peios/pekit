@@ -80,7 +80,7 @@ use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
 use crate::remote::Remote;
 use crate::scratch::Scratch;
-use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE};
+use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
 use crate::sweep::Sweeper;
 use crate::target::Target;
@@ -2639,10 +2639,7 @@ impl Run<'_> {
             }
             None => {}
         }
-        let Some(rest) = path
-            .strip_prefix(WORKSPACE)
-            .and_then(|rest| rest.strip_prefix('/'))
-        else {
+        let Some(rest) = under(path, WORKSPACE) else {
             if path == OUTPUTS || path.starts_with(&format!("{OUTPUTS}/")) {
                 return Err(format!("`{path}` is no output of any step of this build"));
             }
@@ -2665,9 +2662,16 @@ impl Run<'_> {
         let unreadable = |error: io::Error| format!("cannot read `{path}`: {error}");
         let kept = if dir {
             let never = |_: &Path, _: &fs::Metadata| false;
+            // The workspace's root but its history and the build's outputs,
+            // which change with every commit and build, and no step reads.
+            let left_out = if rest.is_empty() {
+                vec![self.loaded.root.join(".git"), outputs.to_path_buf()]
+            } else {
+                Vec::new()
+            };
             let tree = self
                 .store
-                .put_tree_seen_at(&host, (seen, *now), &never)
+                .put_tree_seen_without(&host, (seen, *now), &never, &left_out)
                 .map_err(unreadable)?;
             Kept::Dir(tree.ok_or_else(|| format!("cannot read `{path}`"))?)
         } else {

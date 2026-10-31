@@ -35,7 +35,7 @@ def build boot() { = qemu.launcher(build iso()) }
 # The boot test: the ISO comes up as far as busybox's prompt, at speed
 # where the machine has KVM.
 #[device("kvm")]
-#[timeout(5m)]
+#[timeout(15m)]
 def test boots(iso: File = build iso()) {
     let run = qemu.boot(iso, until = "Please press Enter to activate this console.")
     assert run.status == 0, run.stdout

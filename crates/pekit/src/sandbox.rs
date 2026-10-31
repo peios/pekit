@@ -69,7 +69,7 @@ pub const SECRETS: &str = "/pekit-secrets";
 
 /// `path` under the logical root `root`, if it is it or under it: the rest,
 /// relative, `""` for the root itself.
-fn under<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+pub(crate) fn under<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     let rest = path.strip_prefix(root)?;
     if rest.is_empty() {
         return Some("");
@@ -642,7 +642,8 @@ impl StepSandbox {
     ///
     /// That `path` is under neither, or it cannot be staged.
     pub fn stage(&self, store: &Store, path: &str, kept: Kept) -> io::Result<()> {
-        if self.host_path(path).map_err(io::Error::other)?.exists() {
+        // The workspace's root is there from the start, empty.
+        if path != WORKSPACE && self.host_path(path).map_err(io::Error::other)?.exists() {
             return Ok(());
         }
         let at = self.staged_path(path).map_err(io::Error::other)?;
