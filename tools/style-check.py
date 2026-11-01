@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUST_ROOTS = ("crates",)
+RUST_ROOTS = ("crates", "gcslib")
 SHELL_SOURCES = ("tools/check", "tools/check-docs")
 
 
@@ -36,7 +36,10 @@ def run(arguments: list[str]) -> None:
 def main() -> None:
     """Check declared owned source roots; generated and imported vendor files stay excluded."""
     rust = sorted(
-        str(path.relative_to(ROOT)) for name in RUST_ROOTS for path in (ROOT / name).rglob("*.rs")
+        str(path.relative_to(ROOT))
+        for name in RUST_ROOTS
+        for path in (ROOT / name).rglob("*.rs")
+        if "target" not in path.parts
     )
     python = sorted(
         str(path.relative_to(ROOT)) for name in ("tools",) for path in (ROOT / name).rglob("*.py")

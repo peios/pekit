@@ -1376,3 +1376,161 @@ fn the_rust_library_builds_ppk_one_crate_at_a_time() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
 }
+
+/// A workspace with the Rust toolchains, whose keychain's `module-signing`
+/// key is the test key, and whose `example/signed` signs `example/modules`,
+/// where it writes two modules, which it gives by their paths in the tree.
+fn modsig_workspace(dir: &Path) -> Vec<(&'static str, Vec<u8>)> {
+    libraries(&dir.join(".gcsl/libraries"));
+    let key = "tests/fixtures/modsig/test-key.pem";
+    fs::create_dir_all(dir.join("keys")).unwrap();
+    fs::copy(repository().join(key), dir.join("keys/test.pem")).unwrap();
+    fs::write(
+        dir.join("workspace.gcsl"),
+        RUST.replace(
+            "rust_1_98]}",
+            "rust_1_98]; keychain = [\
+             {profile = \"dev\"; name = \"module-signing\"; file = \"keys/test.pem\"}]}",
+        ),
+    )
+    .unwrap();
+    let made = vec![
+        ("1.0/kernel/a.ko.zst", b"\x7fELF module a".to_vec()),
+        ("1.0/kernel/sub/b.ko.zst", b"\x7fELF module b".repeat(1000)),
+    ];
+    let tree = dir.join("example/modules");
+    for (path, module) in &made {
+        let at = tree.join(path);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(at, zstd::encode_all(module.as_slice(), 3).unwrap()).unwrap();
+    }
+    fs::write(tree.join("1.0/modules.dep"), "kernel/a.ko.zst:\n").unwrap();
+    fs::write(
+        dir.join("example/build.gcsl"),
+        "import \"github.com/gcslib/modsig\"\n\
+         def build signed() { = modsig.sign(dir(\"modules\")) }\n",
+    )
+    .unwrap();
+    made
+}
+
+/// The tree of the directory `value`, a build's value in `root`: its
+/// files by their paths, with their contents.
+fn signed_tree(root: &Path, value: &Plain) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &Path, within: &Path, found: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = within.join(entry.file_name());
+            if entry.path().is_dir() {
+                walk(&entry.path(), &path, found);
+            } else {
+                found.push((path, fs::read(entry.path()).unwrap()));
+            }
+        }
+    }
+    let Plain::Dir { path, .. } = value else {
+        panic!("not a directory: {value:?}");
+    };
+    let mut found = Vec::new();
+    walk(&built_file(root, path), Path::new(""), &mut found);
+    found.sort();
+    found
+}
+
+/// Whether any file under `dir` holds `text`.
+fn anywhere(dir: &Path, text: &str) -> bool {
+    fs::read_dir(dir).unwrap().flatten().any(|entry| {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            anywhere(&path, text)
+        } else {
+            entry.file_type().unwrap().is_file() && holds(&path, text)
+        }
+    })
+}
+
+#[test]
+#[ignore = "opt-in, as it takes about five minutes: `tools/check --all`, or `cargo test --test \
+            examples -- --ignored`"]
+fn the_modsig_library_signs_after_the_build_with_a_key_of_the_keychain_s() {
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let crates_here = rust.iter().any(|path| path.ends_with("ml-dsa-0.1.2.crate"));
+    let Some(state) = seeded(&names).filter(|_| crates_here) else {
+        eprintln!("skipped: Rust or the crates of modsig's tool are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let made = modsig_workspace(dir.path());
+    let built = build_in(dir.path(), state.path(), "signed").unwrap();
+    let tree = signed_tree(dir.path(), &built.value);
+    assert_eq!(
+        tree.len(),
+        3,
+        "{:?}",
+        tree.iter().map(|t| &t.0).collect::<Vec<_>>()
+    );
+    for (path, module) in &made {
+        let (_, file) = tree.iter().find(|(at, _)| at.ends_with(path)).unwrap();
+        let signed = zstd::decode_all(file.as_slice()).unwrap();
+        assert!(signed.starts_with(module));
+        assert!(signed.ends_with(b"~Module signature appended~\n"));
+    }
+    let (_, index) = tree
+        .iter()
+        .find(|(at, _)| at.ends_with("modules.dep"))
+        .unwrap();
+    assert_eq!(index, b"kernel/a.ko.zst:\n");
+
+    // Built again, nothing runs: it is kept under the key's identity.
+    let again = build_in(dir.path(), state.path(), "signed").unwrap();
+    assert_eq!(again.ran, 0);
+
+    // Neither the store nor what a build exposes holds the key.
+    let key = fs::read_to_string(dir.path().join("keys/test.pem")).unwrap();
+    let line = key.lines().nth(1).unwrap();
+    assert!(!anywhere(&state.path().join("store"), line));
+    assert!(!anywhere(&dir.path().join("pekit-out"), line));
+
+    // Run again, it gives what it gave; and on a machine with a keychain
+    // key of its own it runs again, and gives the same bytes.
+    let check = Options {
+        reuse: pekit::engine::Reuse::Compare,
+        ..Options::default()
+    };
+    let (checked, _) = observed_with(dir.path(), state.path(), "signed", check);
+    checked.unwrap();
+    fs::remove_file(state.path().join("state/keychain-key")).unwrap();
+    let other = build_in(dir.path(), state.path(), "signed").unwrap();
+    assert_eq!(other.ran, 1, "only the signing step");
+    assert_eq!(signed_tree(dir.path(), &other.value), tree);
+
+    // Strictly, with nothing of the host: the same bytes.
+    let strict = Options {
+        strict: true,
+        ..Options::default()
+    };
+    let (strictly, _) = observed_with(dir.path(), state.path(), "signed", strict);
+    assert_eq!(signed_tree(dir.path(), &strictly.unwrap().value), tree);
+
+    // A module that can't be signed fails with the reason, in the step.
+    let plain = dir.path().join("example/modules/1.0/kernel/c.ko");
+    fs::write(&plain, "\x7fELF module c").unwrap();
+    let failed = build_in(dir.path(), state.path(), "signed").unwrap_err();
+    let printed = format!("{failed:?}");
+    assert!(
+        printed.contains("1.0/kernel/c.ko: a module that is not compressed as .ko.zst"),
+        "{printed}"
+    );
+    fs::remove_file(plain).unwrap();
+
+    // With no key, the build says so, by the secret's name.
+    fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
+    let failed = build_in(dir.path(), state.path(), "signed").unwrap_err();
+    let printed = format!("{failed:?}");
+    assert!(printed.contains("no secret `module-signing`"), "{printed}");
+}

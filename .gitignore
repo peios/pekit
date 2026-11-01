@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 /pekit-out
 /docs/learn/.trail-cache/
+/gcslib/github.com/gcslib/modsig/tool/target

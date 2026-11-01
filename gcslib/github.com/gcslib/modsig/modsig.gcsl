@@ -1,0 +1,55 @@
+# The modsig library: Linux kernel modules signed for a kernel that enforces
+# module signatures, with a key of the keychain's.
+#
+# - `sign(tree)`: a copy of the directory `tree` with each of its modules
+#   signed: a hermetic step, given `key`, by default the keychain's
+#   `module-signing`, a PEM file holding an ML-DSA-65 private key with its
+#   seed, and its certificate. Every module must be compressed as `.ko.zst`:
+#   each is decompressed, signed and compressed again at zstd's level 19. A
+#   `.ko`, `.ko.gz` or `.ko.xz` fails the step, as does a tree with no
+#   module. The rest of the tree is copied as it is.
+# - `tool()`: the program that signs, built from `tool/` with the Rust and C
+#   toolchains the workspace registers, as a static program.
+#
+# Signing is deterministic pure ML-DSA-65, with no signed attributes, so the
+# same modules and key give the same bytes on every machine and a signed
+# package reproduces. Only this step is given the key: the steps that made
+# `tree` never see it, and their outputs stay unsigned in the store.
+import keychain
+import "github.com/gcslib/rust"
+
+def tool() -> File {
+    let target = "x86_64-unknown-linux-musl"
+    = rust.bin(
+        rust.workspace(
+            dir("tool"),
+            rust.vendored(file("tool/Cargo.lock")),
+            target = target,
+            rustflags = rust.default_rustflags(target),
+        ),
+        "modsig",
+    )
+}
+
+# The step's result holds no secret, so it is kept under the key's identity. A
+# program given a secret can't fail with a message of its own, so it reports
+# why it did not sign in a file, which holds nothing of the key.
+#[hermetic]
+def sign(
+    tree: Dir,
+    key: Secret<File> = keychain.file("module-signing"),
+    signer: File = tool(),
+) -> Dir {
+    let signed = working_dir().dir("signed")
+    let report = working_dir().file("report.txt")
+    let ran = exec_secret(
+        [signer.path, "sign", tree.path, signed.path, report.path],
+        secrets = {MODSIG_KEY = key.reveal().path},
+        panic = false,
+    )
+    let problem = report.read()
+    if problem != "" {
+        panic("cannot sign the modules: {problem}")
+    }
+    = signed
+}
