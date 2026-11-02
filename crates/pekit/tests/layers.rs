@@ -7,7 +7,7 @@ use std::process::Command;
 
 use gcsl::eval::Effects;
 use pekit::record::Kept;
-use pekit::sandbox::StepSandbox;
+use pekit::sandbox::{GROUP, PASSWD, StepSandbox};
 use pekit::store::Store;
 
 /// A temporary directory removed, sealed directories and all, when it is
@@ -85,6 +85,80 @@ fn a_sandbox_of_a_staged_directory_is_an_overlay_read_upper_over_lower() {
     let own = sandbox.temp_dir().unwrap().unwrap();
     let other = sandbox.temp_dir().unwrap().unwrap();
     assert_eq!(sandbox.make_sandbox(&own, &other), None);
+}
+
+/// What `script` prints under the static busybox in the sandbox at `root`
+/// of `sandbox`.
+fn output_in(sandbox: &StepSandbox, root: &str, script: &str) -> String {
+    let mut inner = Command::new("/bin/sh");
+    inner.args(["-c", script]).current_dir("/").env_clear();
+    let mut command = sandbox.sandbox_command(root, inner).unwrap().unwrap();
+    String::from_utf8_lossy(&command.output().unwrap().stdout).into_owned()
+}
+
+#[test]
+fn a_sandbox_has_the_step_s_user_database_unless_its_root_has_its_own() {
+    let busybox = Path::new("/usr/bin/busybox");
+    if !busybox.exists() {
+        eprintln!("skipped: no static busybox on this host");
+        return;
+    }
+    let dir = Scratch(tempfile::tempdir().unwrap());
+    let store = Store::open(&dir.0.path().join("store")).unwrap();
+    let bare = dir.0.path().join("bare");
+    fs::create_dir_all(bare.join("bin")).unwrap();
+    fs::copy(busybox, bare.join("bin/busybox")).unwrap();
+    std::os::unix::fs::symlink("busybox", bare.join("bin/sh")).unwrap();
+    let own = dir.0.path().join("own");
+    fs::create_dir_all(own.join("etc")).unwrap();
+    fs::create_dir_all(own.join("bin")).unwrap();
+    fs::copy(busybox, own.join("bin/busybox")).unwrap();
+    std::os::unix::fs::symlink("busybox", own.join("bin/sh")).unwrap();
+    fs::write(own.join("etc/passwd"), "own:x:0:0::/:/bin/sh\n").unwrap();
+    let sandbox = StepSandbox::new(&dir.0.path().join("stage"), "t/s").unwrap();
+    let show = "busybox cat /etc/passwd /etc/group; busybox id -u; echo $LOGNAME";
+    // An overlay of a root with no `/etc` has them, beneath it.
+    let digest = store.put_tree(&bare).unwrap();
+    sandbox.stage(&store, "/w/bare", Kept::Dir(digest)).unwrap();
+    let root = sandbox.temp_dir().unwrap().unwrap();
+    assert_eq!(sandbox.make_sandbox("/w/bare", &root), Some(Ok(())));
+    assert_eq!(
+        output_in(&sandbox, &root, show),
+        format!("{PASSWD}{GROUP}1000\npekit\n")
+    );
+    assert!(
+        !sandbox.host_path(&root).unwrap().join("etc").exists(),
+        "nothing is written into the sandbox"
+    );
+    // One whose root has its own `/etc/passwd` keeps it, and has the
+    // group file it lacks.
+    let digest = store.put_tree(&own).unwrap();
+    sandbox.stage(&store, "/w/own", Kept::Dir(digest)).unwrap();
+    let root = sandbox.temp_dir().unwrap().unwrap();
+    assert_eq!(sandbox.make_sandbox("/w/own", &root), Some(Ok(())));
+    assert_eq!(
+        output_in(&sandbox, &root, show),
+        format!("own:x:0:0::/:/bin/sh\n{GROUP}1000\npekit\n")
+    );
+    // A copied root has them written into it, but what it has of its own.
+    for (tree, passwd) in [(&bare, PASSWD), (&own, "own:x:0:0::/:/bin/sh\n")] {
+        let copy = sandbox.temp_dir().unwrap().unwrap();
+        let at = sandbox.host_path(&copy).unwrap();
+        assert!(
+            Command::new("cp")
+                .arg("-a")
+                .arg(format!("{}/.", tree.display()))
+                .arg(&at)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            output_in(&sandbox, &copy, show),
+            format!("{passwd}{GROUP}1000\npekit\n")
+        );
+        assert_eq!(fs::read_to_string(at.join("etc/passwd")).unwrap(), passwd);
+    }
 }
 
 #[test]

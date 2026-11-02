@@ -7,7 +7,7 @@ use std::process::Command;
 
 use gcsl::eval::Effects;
 use pekit::record::Kept;
-use pekit::sandbox::{HostTools, HostView, StepSandbox};
+use pekit::sandbox::{GROUP, HostTools, HostView, PASSWD, StepSandbox};
 use pekit::store::Store;
 
 /// The host tools a test's shell needs, which a real step never borrows.
@@ -69,13 +69,13 @@ fn a_step_sees_only_what_it_is_given() {
     assert_eq!(fs::read_to_string(written).unwrap(), "out\n");
     let (_, ok) = shell(&sandbox, "echo x > /w/app/new.c", &[]);
     assert!(!ok, "the workspace is read-only");
-    // Only what its `exec` sets.
+    // Only what its `exec` sets, and its user's name.
     let (env, _) = shell(
         &sandbox,
         "env | sort | grep -v '^PWD=' | grep -v '^SHLVL=' | grep -v '^_='",
         &[("ONLY", "this")],
     );
-    assert_eq!(env, "ONLY=this");
+    assert_eq!(env, "LOGNAME=pekit\nONLY=this\nUSER=pekit");
     // A path outside it is none of its.
     assert_eq!(
         sandbox.host_path("/home/x").unwrap_err(),
@@ -89,6 +89,27 @@ fn a_step_sees_only_what_it_is_given() {
         sandbox.working_dir().unwrap(),
         Path::new("/pekit-out/hello/compile")
     );
+}
+
+#[test]
+fn a_step_runs_as_its_own_user_with_a_fixed_user_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let sandbox = StepSandbox::new(&dir.path().join("stage"), "t/s")
+        .unwrap()
+        .with_host(&host_tools());
+    // The same user and database whoever runs pekit.
+    let (who, ok) = shell(&sandbox, "id -u; id -g; id -un; id -gn", &[]);
+    assert!(ok, "{who}");
+    assert_eq!(who, "1000\n1000\npekit\npekit");
+    let (passwd, _) = shell(&sandbox, "cat /etc/passwd", &[]);
+    assert_eq!(passwd, PASSWD.trim_end());
+    let (group, _) = shell(&sandbox, "cat /etc/group", &[]);
+    assert_eq!(group, GROUP.trim_end());
+    let (_, ok) = shell(&sandbox, "echo x >> /etc/passwd", &[]);
+    assert!(!ok, "the user database is read-only");
+    // Its `exec` can name its user otherwise.
+    let (names, _) = shell(&sandbox, "echo $LOGNAME $USER", &[("LOGNAME", "builder")]);
+    assert_eq!(names, "builder pekit");
 }
 
 #[test]
