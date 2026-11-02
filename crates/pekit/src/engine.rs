@@ -70,17 +70,17 @@ use crate::evict::{Evicted, evict};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
 use crate::fetch::IN_A_STEP;
 use crate::git_fetch;
-use crate::pool::{Done, Pool, Ran, Work};
-use crate::layers::remove_tree;
 use crate::keychain::{self, Keychain};
+use crate::layers::remove_tree;
 use crate::load::Loaded;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
+use crate::pool::{Done, Pool, Ran, Work};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
 use crate::remote::Remote;
-use crate::scratch::Scratch;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
+use crate::scratch::Scratch;
 use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
 use crate::sweep::Sweeper;
 use crate::target::Target;
@@ -110,6 +110,24 @@ const KEYCHAIN_KEYS: &str = "keychain_keys";
 
 /// The context the `packaging` module lists the packagers in.
 const PACKAGERS: &str = "packagers";
+
+/// The field of `pekitconf` that sets any other declared context, each of
+/// its fields one.
+const CONTEXTS: &str = "contexts";
+
+/// The contexts pekit sets itself, each from the build or a field of its
+/// own, so that `pekitconf.contexts` sets none of them: each is the
+/// context's name and where its value comes from.
+const OWN_CONTEXTS: &[(&str, &str)] = &[
+    (HOST_PLATFORM, "the machine pekit runs on"),
+    (PLATFORM, "`--platform`"),
+    (KEYCHAIN_PROFILE, "`--profile`"),
+    (PINNED_LIBRARIES, "`pekit.lock`"),
+    (TOOLCHAINS, "`pekitconf.toolchains`"),
+    (KEYCHAIN_KEYS, "`pekitconf.keychain`"),
+    (PACKAGERS, "`pekitconf.packagers`"),
+    (SCRIPT_SESSION, "the script's command line"),
+];
 
 /// The directory under `/pekit-out` that steps' directories are in, each
 /// `<function>/<identity>`.
@@ -705,7 +723,7 @@ fn new_run<'a>(
             settings.state.display()
         ))
     })?);
-    let roots = prepare_roots(loaded, targets, (settings, &keychain), (wrap, contexts));
+    let roots = prepare_roots(loaded, targets, (settings, &keychain), (wrap, contexts))?;
     let code_table: Rc<[(String, Digest)]> = loaded
         .names
         .iter()
@@ -764,20 +782,33 @@ fn new_run<'a>(
 /// contexts `extra` are made values of the workspace here, readied for this
 /// build, never of one an earlier build used (see
 /// [Loading](crate::load#loading)).
+///
+/// # Errors
+///
+/// Those of [`root_fields`], which no target could be prepared with.
 fn prepare_roots(
     loaded: &mut Loaded,
     targets: &[Target],
     (settings, keychain): (&Settings, &Arc<Keychain>),
     (wrap, extra): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
-) -> Vec<Root> {
+) -> Result<Vec<Root>, BuildError> {
     let mut contexts = root_contexts(loaded, settings);
     contexts.extend(
         extra
             .into_iter()
             .map(|(name, plain)| (name, loaded.workspace.from_plain(&plain))),
     );
-    let fields = root_fields(loaded);
-    targets
+    let conf = root_fields(loaded)?;
+    let paths: Vec<Vec<&str>> = conf
+        .iter()
+        .map(|field| field.path.iter().map(String::as_str).collect())
+        .collect();
+    let fields: Vec<RootField<'_>> = conf
+        .iter()
+        .zip(&paths)
+        .map(|(field, path)| field.root_field(path))
+        .collect();
+    Ok(targets
         .iter()
         .map(|target| {
             let host = Arc::new(
@@ -818,7 +849,7 @@ fn prepare_roots(
                 },
             }
         })
-        .collect()
+        .collect())
 }
 
 /// The root contexts every target of `loaded`'s workspace is evaluated in,
@@ -861,30 +892,89 @@ fn root_contexts(loaded: &mut Loaded, settings: &Settings) -> Vec<(String, Value
     contexts
 }
 
-/// The root contexts set from `workspace.gcsl`'s `pekitconf`: the
-/// toolchains and the keychain, where the module that declares each
-/// context is loaded and the field is there.
-fn root_fields(loaded: &Loaded) -> Vec<RootField<'static>> {
-    let mut fields = Vec::new();
-    if let Some(file) = loaded.workspace.file(WORKSPACE_FILE) {
-        for (context, path) in [
-            (TOOLCHAINS, &["toolchains"] as &[&str]),
-            (KEYCHAIN_KEYS, &["keychain"]),
-            (PACKAGERS, &["packagers"]),
-        ] {
-            if loaded.workspace.declares_context(context)
-                && loaded.workspace.top_level_has(file, PEKITCONF, path)
-            {
-                fields.push(RootField {
-                    context,
-                    file,
-                    field: PEKITCONF,
-                    path,
-                });
-            }
+/// A root context set from a field of `workspace.gcsl`'s `pekitconf`: the
+/// context's name, the field's path in `pekitconf`, and the file's number.
+struct ConfField {
+    context: String,
+    path: Vec<String>,
+    file: u32,
+}
+
+impl ConfField {
+    /// The field as GCSL binds it, its path's parts those of `path`.
+    fn root_field<'a>(&'a self, path: &'a [&'a str]) -> RootField<'a> {
+        RootField {
+            context: &self.context,
+            file: self.file,
+            field: PEKITCONF,
+            path,
         }
     }
-    fields
+}
+
+/// The root contexts set from `workspace.gcsl`'s `pekitconf`: the
+/// toolchains, the keychain and the packagers, where the module that
+/// declares each context is loaded and the field is there; then each field
+/// of `pekitconf.contexts`, the context of its name, which the workspace or
+/// a library it imports declares. GCSL checks each value against its
+/// context's type, as a `with`'s, and a target's own `with` binds over it.
+///
+/// # Errors
+///
+/// That `pekitconf.contexts` is no record of named fields, or names a
+/// context no file declares or one pekit sets itself.
+fn root_fields(loaded: &Loaded) -> Result<Vec<ConfField>, BuildError> {
+    let mut fields = Vec::new();
+    let Some(file) = loaded.workspace.file(WORKSPACE_FILE) else {
+        return Ok(fields);
+    };
+    for (context, field) in [
+        (TOOLCHAINS, "toolchains"),
+        (KEYCHAIN_KEYS, "keychain"),
+        (PACKAGERS, "packagers"),
+    ] {
+        if loaded.workspace.declares_context(context)
+            && loaded.workspace.top_level_has(file, PEKITCONF, &[field])
+        {
+            fields.push(ConfField {
+                context: context.to_owned(),
+                path: vec![field.to_owned()],
+                file,
+            });
+        }
+    }
+    if !loaded.workspace.top_level_has(file, PEKITCONF, &[CONTEXTS]) {
+        return Ok(fields);
+    }
+    let Some(names) = loaded
+        .workspace
+        .top_level_fields(file, PEKITCONF, &[CONTEXTS])
+    else {
+        return Err(BuildError::Engine(format!(
+            "`{PEKITCONF}.{CONTEXTS}` in `{WORKSPACE_FILE}` must be a record whose fields name \
+             contexts, as `{CONTEXTS} = {{NAME = VALUE}}`"
+        )));
+    };
+    for name in names {
+        if let Some((_, from)) = OWN_CONTEXTS.iter().find(|(own, _)| *own == name) {
+            return Err(BuildError::Engine(format!(
+                "`{PEKITCONF}.{CONTEXTS}.{name}` in `{WORKSPACE_FILE}` cannot set `{name}`: \
+                 pekit sets it from {from}"
+            )));
+        }
+        if !loaded.workspace.declares_context(&name) {
+            return Err(BuildError::Engine(format!(
+                "`{PEKITCONF}.{CONTEXTS}.{name}` in `{WORKSPACE_FILE}` names no context: \
+                 neither the workspace nor a library it imports declares `context {name}`"
+            )));
+        }
+        fields.push(ConfField {
+            path: vec![CONTEXTS.to_owned(), name.clone()],
+            context: name,
+            file,
+        });
+    }
+    Ok(fields)
 }
 
 /// Where the store keeps the stamps of the workspace at `root`'s files.

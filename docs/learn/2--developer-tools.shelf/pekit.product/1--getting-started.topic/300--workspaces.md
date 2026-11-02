@@ -99,11 +99,17 @@ Each field is optional:
   Secrets](~pekit/using-secrets).
 - **`packagers`.** The package formats `pekit package` packs into. See
   [Packaging](~pekit/packaging).
+- **`contexts`.** Values for contexts that the workspace or its libraries
+  declare, by name, as `contexts = {greeting = "Good morning"}`. pekit sets
+  each one for every target it builds. See [Setting a Context for the
+  Whole Workspace](~pekit/setting-a-context-for-the-workspace).
 
-pekit reads a field only when the workspace imports the module the setting
-belongs to: `toolchain` for `toolchains`, `keychain` for `keychain`, and
-`packaging` for `packagers`. A library's `import` of the module counts, so
-importing the gcc library is enough for `toolchains`.
+pekit reads `toolchains`, `keychain`, and `packagers` only when the
+workspace imports the module the setting belongs to: `toolchain` for
+`toolchains`, `keychain` for `keychain`, and `packaging` for `packagers`. A
+library's `import` of the module counts, so importing the gcc library is
+enough for `toolchains`. Each name in `contexts` must be a context that
+some file of the workspace declares.
 
 ## Files pekit adds
 
