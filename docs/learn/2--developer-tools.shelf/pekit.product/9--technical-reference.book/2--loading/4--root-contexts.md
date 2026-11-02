@@ -27,6 +27,25 @@ without one of these fields leaves the context at its default: the
 `toolchain` module's `[Toolchain::C system_c]`, and an empty keychain and
 packager list.
 
+## Contexts the workspace sets
+
+`pekitconf.contexts` sets any other context, each of its fields the context
+of its name, as [Setting a Context for the Whole
+Workspace](~pekit/setting-a-context-for-the-workspace) shows. pekit binds
+them in the same `with` as the fields above, so a target's own `with`
+binds over them. Before it prepares any target, pekit fails the build if:
+
+- `contexts` is not a record whose fields name contexts, such as a record
+  type with a rest-field;
+- a field names a context that no loaded file declares; or
+- a field names one of the contexts in the table above, which pekit sets
+  itself.
+
+GCSL checks each value against its context's type, as it checks a `with`
+binding, so a value of another type is a check error. Each value is
+evaluated as part of `workspace.gcsl`, in the declared defaults of every
+context, so it can't depend on a target's `^platform`.
+
 ## Contexts and keys
 
 Binding a context changes no step that doesn't read it. A step is keyed by

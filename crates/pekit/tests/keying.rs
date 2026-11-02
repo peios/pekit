@@ -127,3 +127,118 @@ fn a_step_is_given_a_context_s_files_only_once_it_reads_it() {
     assert_eq!(fs::read_to_string(out.join("before")).unwrap(), "hidden\n");
     assert_eq!(fs::read_to_string(out.join("after")).unwrap(), "seen\n1\n");
 }
+
+/// A library declaring a context `flavour`, with a default, and two steps,
+/// one that reads it and one that doesn't.
+const FLAVOURS: &str = "context flavour: String = \"plain\"\n\
+                        #[hermetic] def plainly(src: File) -> File {\n\
+                        \x20   let r = exec([\"sh\", \"-c\", \"tr a-z A-Z < {src.path} > out\"])\n\
+                        \x20   = working_dir().file(\"out\")\n\
+                        }\n\
+                        #[hermetic] def flavoured(src: File) -> File {\n\
+                        \x20   let r = exec([\"sh\", \"-c\", \"echo {^flavour} > out\"])\n\
+                        \x20   = working_dir().file(\"out\")\n\
+                        }\n";
+
+/// A workspace with `FLAVOURS` as a library and `workspace.gcsl` of `conf`,
+/// whose `app` imports it and builds both steps, `both`, and the flavoured
+/// one in its own `with`, `own`.
+fn library_workspace(conf: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                ".gcsl/libraries/github.com/x/flavours/flavours.gcsl",
+                FLAVOURS,
+            ),
+            (
+                "app/build.gcsl",
+                "import \"github.com/x/flavours\"\n\
+                 def build both() {\n\
+                 \x20   = [flavours.plainly(file(\"name.txt\")), flavours.flavoured(file(\"name.txt\"))]\n\
+                 }\n\
+                 def build own() {\n\
+                 \x20   = flavours.flavoured(file(\"name.txt\")) with { flavour = \"sour\" }\n\
+                 }\n",
+            ),
+            ("app/name.txt", "n\n"),
+        ],
+    );
+    reconf(dir.path(), conf);
+    dir
+}
+
+/// Writes `workspace.gcsl` of the workspace at `root` as `conf`, which
+/// needn't import the library to set its context: `app` imports it.
+fn reconf(root: &Path, conf: &str) {
+    write(root, &[("workspace.gcsl", conf)]);
+}
+
+#[test]
+fn the_workspace_sets_a_library_s_context_for_every_target() {
+    let dir = library_workspace("");
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((built.ran, built.cached), (2, 0));
+    let flavoured = dir.path().join("pekit-out/app/both/flavoured/out");
+    assert_eq!(fs::read_to_string(&flavoured).unwrap(), "plain\n");
+    // Set from `pekitconf.contexts`: only the step that reads it runs again.
+    reconf(
+        dir.path(),
+        "pekitconf = {contexts = {flavour = \"sweet\"}}\n",
+    );
+    let set = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((set.ran, set.cached), (1, 1));
+    assert_eq!(fs::read_to_string(&flavoured).unwrap(), "sweet\n");
+    // So is it for a new value.
+    reconf(
+        dir.path(),
+        "pekitconf = {contexts = {flavour = \"salt\"}}\n",
+    );
+    let again = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((again.ran, again.cached), (1, 1));
+    assert_eq!(fs::read_to_string(&flavoured).unwrap(), "salt\n");
+    // A target's own `with` binds over the workspace's.
+    let own = build_in(dir.path(), state.path(), "own").unwrap();
+    assert_eq!(own.ran, 1);
+    let out = dir.path().join("pekit-out/app/own/flavoured/out");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "sour\n");
+    // And the same value bound either way is the same step.
+    reconf(
+        dir.path(),
+        "pekitconf = {contexts = {flavour = \"sour\"}}\n",
+    );
+    let same = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((same.ran, same.cached), (0, 2));
+}
+
+#[test]
+fn the_workspace_sets_only_contexts_declared_and_not_pekit_s_own() {
+    let state = tempfile::tempdir().unwrap();
+    for (conf, expected) in [
+        (
+            "pekitconf = {contexts = {flavor = \"sweet\"}}\n",
+            "`pekitconf.contexts.flavor` in `workspace.gcsl` names no context: neither the \
+             workspace nor a library it imports declares `context flavor`",
+        ),
+        (
+            "pekitconf = {contexts = {host_platform = {}}}\n",
+            "`pekitconf.contexts.host_platform` in `workspace.gcsl` cannot set \
+             `host_platform`: pekit sets it from the machine pekit runs on",
+        ),
+        (
+            "pekitconf = {contexts = 1}\n",
+            "`pekitconf.contexts` in `workspace.gcsl` must be a record whose fields name \
+             contexts, as `contexts = {NAME = VALUE}`",
+        ),
+    ] {
+        let dir = library_workspace(conf);
+        let error = build_in(dir.path(), state.path(), "both").unwrap_err();
+        assert!(error.contains(expected), "{conf}: {error}");
+    }
+    // A value not of the context's type is GCSL's own error, as a `with`'s.
+    let dir = library_workspace("pekitconf = {contexts = {flavour = 1}}\n");
+    let error = build_in(dir.path(), state.path(), "both").unwrap_err();
+    assert!(error.contains("mismatched types"), "{error}");
+}
