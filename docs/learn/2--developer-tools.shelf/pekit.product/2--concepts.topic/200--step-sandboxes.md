@@ -27,6 +27,7 @@ Every step sees the same layout, on every machine and in every checkout:
 | `/pekit-out/.steps/<function>/<identity>` | The step's own directory, where it writes what it makes. |
 | `/tmp` | An empty, writable directory of the step's own. |
 | `/usr`, `/bin`, `/lib`, `/lib64`, `/sbin` | The host's own, read-only, unless the build is strict. |
+| `/etc/passwd`, `/etc/group` | A fixed user database, the same in every step. |
 
 A file the step wasn't given isn't there. If a step is given
 `file("src/main.c")` from the directory `app`, it finds `/w/app/src/main.c`,
@@ -106,11 +107,26 @@ to build without the host's tools.
 
 A step's programs run with only the environment variables their `exec`
 call sets, and `PATH` set to `/usr/bin:/bin:/usr/sbin:/sbin` if the call
-doesn't set it. Nothing of the environment you ran pekit in reaches them.
+doesn't set it. `LOGNAME` and `USER` are `pekit` unless the call sets
+them. Nothing of the environment you ran pekit in reaches them.
 
 A step has no network. It has its own processes, its own users, and a
 `/dev` that holds only the usual few devices, such as `/dev/null` and
 `/dev/urandom`. If pekit stops, its steps' programs are stopped too.
+
+## The step's user
+
+A step's programs run as the user `pekit`, number 1000, in the group
+`pekit`, number 1000, whoever runs pekit. Every step has the same
+`/etc/passwd` and `/etc/group`, holding `root`, `pekit` and `nobody`, as
+Nix gives its builds. They don't come from the host, so a step behaves the
+same on every machine. A program that looks up the current user's name
+finds it, and a test that needs `/etc/passwd` to exist finds it.
+
+`pekit` has no home directory. A program that tries to write to its home
+fails, instead of leaving files that nothing keys. Give a step a `HOME`,
+such as a directory under `/tmp`, if its programs need one.
+[The Step Sandbox](~pekit/the-step-sandbox) lists the files' contents.
 
 A step that runs a virtual machine can ask for KVM with
 `#[device("kvm")]`. [Writing Steps](~pekit/writing-steps) shows how, and
@@ -123,3 +139,8 @@ does to run a pinned compiler on the compiler's own runtime. Each sandbox's
 programs see the sandbox's directory as their `/`, and are cut off from the
 network and the host as the step's own programs are. A sandbox is a copy:
 nothing a program writes in it reaches the directory it was made of.
+
+A sandbox's programs run as the step's user, and find the step's
+`/etc/passwd` and `/etc/group` unless the sandbox's directory has its own.
+A build environment that puts its own user database in the directory it
+composes keeps it.

@@ -27,9 +27,12 @@ why the layout is as it is.
 | `/pekit-secrets/<profile>/<name>` | A secret file. | No | The step was given the secret. |
 | `/usr`, `/bin`, `/lib`, `/lib64`, `/sbin` | The host's own programs and libraries. | No | The build isn't strict. |
 | `/etc/alternatives`, `/etc/ld.so.cache` | What the host's programs need to start. | No | The build isn't strict. |
+| `/etc/passwd`, `/etc/group` | A fixed user database of `root`, `pekit` and `nobody`, the same in every step. | No | Always. |
 | `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty`, and the standard streams. | Yes, as devices allow | Always. |
 | `/dev/kvm` | The machine's KVM device. | Yes | The step is marked `#[device("kvm")]` and the machine has KVM. |
 | `/proc` | The step's own processes. | No | Always. |
 
 A program the step runs starts in the step's own directory, with `PATH`
-set to `/usr/bin:/bin:/usr/sbin:/sbin` unless its `exec` sets one.
+set to `/usr/bin:/bin:/usr/sbin:/sbin` unless its `exec` sets one. It runs
+as the user `pekit`, number 1000, with `LOGNAME` and `USER` set to `pekit`
+unless its `exec` sets them. `pekit`'s home, `/nonexistent`, isn't there.

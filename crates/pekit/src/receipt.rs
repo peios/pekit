@@ -43,7 +43,12 @@
 //! - its arguments, as plain data, every file and directory by its path
 //!   alone, and each result of a step not given yet by that step's
 //!   identity, so that a step is named before the steps it waits for run;
-//! - the platform it runs on.
+//! - the platform it runs on;
+//! - the version of its tag, which changes when what every step's sandbox
+//!   holds beyond its inputs does: version 2 gave every step its user
+//!   database and a fixed user (see [The step's
+//!   users](crate::sandbox#the-steps-users)), so that no step recorded
+//!   without them is found.
 //!
 //! The contexts it was made in name no step, so that binding one moves only
 //! the steps that read it, as their receipts say (see `design/engine.md`,
@@ -321,7 +326,7 @@ pub fn identity(of: IdentityOf<'_>) -> Result<Digest, String> {
         code_of: &code_of,
         step_of: of.step_of,
     };
-    out.text("pekit-identity-1");
+    out.text("pekit-identity-2");
     out.plain(of.callee)?;
     out.count(of.args.len());
     for arg in of.args {

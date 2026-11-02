@@ -36,6 +36,20 @@
 //! off as the step is; others' have their own users and processes, as plain
 //! GCSL gives them.
 //!
+//! # The step's users
+//!
+//! A hermetic step's programs run as [`STEP_USER`], of user and group
+//! [`STEP_UID`] and [`STEP_GID`], whoever runs pekit, and find a user
+//! database of three users, `root`, it and `nobody`, the same on every
+//! machine: [`PASSWD`] at `/etc/passwd` and [`GROUP`] at `/etc/group`,
+//! read-only, as Nix gives its builds. `LOGNAME` and `USER` name it unless
+//! the program's `exec` sets them. A sandbox a step makes has them too: an
+//! overlay's root has them as its lowest layer, so that its directory's own
+//! `/etc` hides them, and a copied root has them written into it unless its
+//! `/etc` already holds them, or is no directory. A program's other groups,
+//! the host's, are `nogroup`'s number, which no unprivileged sandbox can
+//! drop.
+//!
 //! Each counts its temporary directories itself, so both are `Sync`: a
 //! step's effects run on a pool's threads.
 
@@ -66,6 +80,30 @@ pub const OUTPUTS: &str = "/pekit-out";
 
 /// The root of the secret files steps are given, in the logical layout.
 pub const SECRETS: &str = "/pekit-secrets";
+
+/// The user a hermetic step's programs run as (see [The step's
+/// users](#the-steps-users)).
+pub const STEP_USER: &str = "pekit";
+
+/// The number of [`STEP_USER`], the first a Linux distribution gives a
+/// person, as a build run by one commonly has.
+pub const STEP_UID: u32 = 1000;
+
+/// The number of [`STEP_USER`]'s group, of its name.
+pub const STEP_GID: u32 = 1000;
+
+/// A hermetic step's `/etc/passwd`. No home is there, so that what writes
+/// to one fails rather than leaving files nothing keys.
+pub const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
+                          pekit:x:1000:1000:pekit:/nonexistent:/bin/sh\n\
+                          nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
+
+/// A hermetic step's `/etc/group`.
+pub const GROUP: &str = "root:x:0:\npekit:x:1000:\nnogroup:x:65534:\n";
+
+/// The variables that name a hermetic step's user, unless its `exec` sets
+/// them.
+const USER_VARS: [&str; 2] = ["LOGNAME", "USER"];
 
 /// `path` under the logical root `root`, if it is it or under it: the rest,
 /// relative, `""` for the root itself.
@@ -132,25 +170,75 @@ enum Root {
     Overlay(Overlay),
 }
 
+/// Writes the step's user database into `root`, a copied sandbox's root on
+/// the host, unless its `etc` holds its own, or is no directory (see [The
+/// step's users](#the-steps-users)).
+fn provide_users(root: &Path) -> io::Result<()> {
+    let etc = root.join("etc");
+    match fs::symlink_metadata(&etc) {
+        Ok(meta) if !meta.is_dir() => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&etc)?,
+        Err(error) => return Err(error),
+    }
+    for (name, contents) in [("passwd", PASSWD), ("group", GROUP)] {
+        let at = etc.join(name);
+        if fs::symlink_metadata(&at).is_err() {
+            fs::write(&at, contents)?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets `LOGNAME` and `USER` to the step's user in `wrapped`, each unless
+/// `env`, a program's environment, sets it.
+fn name_user(wrapped: &mut Command, env: &[(String, Option<String>)]) {
+    for name in USER_VARS {
+        if !env
+            .iter()
+            .any(|(set, value)| set == name && value.is_some())
+        {
+            wrapped.args(["--setenv", name, STEP_USER]);
+        }
+    }
+}
+
 /// The command that runs `command`, a program of a sandbox whose root is
 /// `root` on the host, with it as its `/`, cut off as `isolation` says: one
 /// bubblewrap, never one inside another, which a host such as Ubuntu
-/// forbids.
+/// forbids. A hermetic one runs as the step's user, `users` the directory
+/// of its user database's `etc` (see [The step's users](#the-steps-users)).
 fn sandboxed(
     root: &Root,
     command: &Command,
-    (isolation, devices, scratch): (Isolation, &[PathBuf], Option<&Path>),
+    (isolation, devices, scratch, users): (Isolation, &[PathBuf], Option<&Path>, Option<&Path>),
 ) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
     let mut wrapped = Command::new(bwrap()?);
     match isolation {
         Isolation::Plain => wrapped.args(["--unshare-user", "--unshare-pid"]),
-        Isolation::Hermetic => wrapped.args(["--unshare-all", "--new-session"]),
+        Isolation::Hermetic => wrapped.args(["--unshare-all", "--new-session"]).args([
+            "--uid",
+            &STEP_UID.to_string(),
+            "--gid",
+            &STEP_GID.to_string(),
+        ]),
     };
     wrapped.arg("--die-with-parent");
     match root {
-        Root::Dir(root) => wrapped.arg("--bind").arg(root).arg("/"),
+        Root::Dir(root) => {
+            if users.is_some() {
+                provide_users(root).map_err(|error| {
+                    format!("cannot give the sandbox its user database: {error}")
+                })?;
+            }
+            wrapped.arg("--bind").arg(root).arg("/")
+        }
         Root::Overlay(overlay) => {
+            // The user database lowest, so that the root's own hides it.
+            if let Some(users) = users {
+                wrapped.arg("--overlay-src").arg(users);
+            }
             wrapped
                 .arg("--overlay-src")
                 .arg(&overlay.lower)
@@ -179,6 +267,9 @@ fn sandboxed(
     }
     wrapped.args(["--chdir", cwd.as_deref().unwrap_or("/")]);
     wrapped.arg("--clearenv");
+    if isolation == Isolation::Hermetic {
+        name_user(&mut wrapped, &env);
+    }
     for (name, value) in env {
         if let Some(value) = value {
             wrapped.args(["--setenv", &name, &value]);
@@ -300,11 +391,13 @@ impl Effects for HostView {
     }
 
     fn sandbox_command(&self, root: &str, command: Command) -> Option<Result<Command, String>> {
-        Some(
-            self.host_path(root).and_then(|root| {
-                sandboxed(&Root::Dir(root), &command, (Isolation::Plain, &[], None))
-            }),
-        )
+        Some(self.host_path(root).and_then(|root| {
+            sandboxed(
+                &Root::Dir(root),
+                &command,
+                (Isolation::Plain, &[], None, None),
+            )
+        }))
     }
 
     fn host_path(&self, path: &str) -> Result<PathBuf, String> {
@@ -368,7 +461,8 @@ pub struct HostTools {
 pub struct StepSandbox {
     /// The staging directory: `w` the workspace files it is given, `out`
     /// the outputs of earlier steps, with its own output directory among
-    /// them, writable, and `tmp` its own `/tmp`.
+    /// them, writable, `tmp` its own `/tmp`, and `users/etc` its user
+    /// database (see [The step's users](#the-steps-users)).
     stage: PathBuf,
     /// Its own output directory's logical path, `/pekit-out/<target>/<step>`.
     own: String,
@@ -436,6 +530,10 @@ impl StepSandbox {
         let own_host = stage.join("out").join(relative);
         fs::create_dir_all(&own_host)?;
         fs::create_dir_all(stage.join("layers"))?;
+        let etc = stage.join("users/etc");
+        fs::create_dir_all(&etc)?;
+        fs::write(etc.join("passwd"), PASSWD)?;
+        fs::write(etc.join("group"), GROUP)?;
         let layers = Layers::new(
             vec![stage.join("w"), stage.join("out")],
             &own_host,
@@ -670,12 +768,24 @@ impl Effects for StepSandbox {
         let (words, cwd, env) = parts(&command);
         let mut wrapped = Command::new(bwrap()?);
         wrapped.args(["--unshare-all", "--die-with-parent", "--new-session"]);
+        wrapped.args([
+            "--uid",
+            &STEP_UID.to_string(),
+            "--gid",
+            &STEP_GID.to_string(),
+        ]);
         wrapped.args(["--tmpfs", "/"]);
         for path in &self.host.bind {
             wrapped.arg("--ro-bind").arg(path).arg(path);
         }
         for path in &self.host.hide {
             wrapped.arg("--tmpfs").arg(path);
+        }
+        for name in ["passwd", "group"] {
+            wrapped
+                .arg("--ro-bind")
+                .arg(self.stage.join("users/etc").join(name))
+                .arg(format!("/etc/{name}"));
         }
         wrapped
             .arg("--ro-bind")
@@ -719,9 +829,10 @@ impl Effects for StepSandbox {
             wrapped.arg("--dev-bind").arg(device).arg(device);
         }
         wrapped.args(["--chdir", cwd.as_deref().unwrap_or(&self.own)]);
-        // Only what its `exec` sets, and the host tools' `PATH` if it sets
-        // none.
+        // Only what its `exec` sets, its user's name and the host tools'
+        // `PATH` where it sets none.
         wrapped.arg("--clearenv");
+        name_user(&mut wrapped, &env);
         let mut has_path = false;
         for (name, value) in env {
             if let Some(value) = value {
@@ -748,10 +859,16 @@ impl Effects for StepSandbox {
                 Err(error) => return Some(Err(error)),
             },
         };
+        let users = self.stage.join("users");
         Some(sandboxed(
             &root,
             &command,
-            (Isolation::Hermetic, &self.devices, self.scratch.as_deref()),
+            (
+                Isolation::Hermetic,
+                &self.devices,
+                self.scratch.as_deref(),
+                Some(&users),
+            ),
         ))
     }
 

@@ -55,11 +55,21 @@ composition or a staged input, is an overlay (`Layers::make_sandbox`):
   its mount point, with an upper layer of its own, `.pekit-upper-<n>` in
   the step's output directory.
 
+- The step's user database, the directory holding its `etc/passwd` and
+  `etc/group`, is a layer below the directory. So a composition that has
+  its own `/etc/passwd` or `/etc/group` shows its own, and one with none
+  shows the step's.
+
 So a program in the sandbox can write anywhere, and nothing it writes
 reaches the composition. It can't move or remove a nested overlay's mount
-point, which fails with `EBUSY`, "Device or resource busy".
+point, which fails with `EBUSY`, "Device or resource busy". GCSL's own
+reads of the sandbox don't see the user database layer, only programs do.
 
 A `Dir.sandbox` of any other directory is copied, as plain GCSL does.
+Before a program runs in a copy, pekit writes the step's `etc/passwd` and
+`etc/group` into it, each unless the copy already has it. If the copy's
+`etc` is a symbolic link or a file, pekit leaves it alone.
+[The Step Sandbox](~pekit/the-step-sandbox) lists their contents.
 
 ## Reading an overlay
 

@@ -13,7 +13,7 @@ have, and of every key those paths reach.
 ## What it covers
 
 The identity is a digest of what the step is, encoded after the tag
-`pekit-identity-1`:
+`pekit-identity-2`:
 
 - **Its callee.** The name of its code's file, its function's number in that
   code, and the function's captures.
@@ -27,6 +27,18 @@ The contexts it was made in don't name it. Two steps of one build that only
 their contexts tell apart, such as one compile for two platforms through
 `with`, would have one identity. The one met later is named with a digest of
 those contexts too.
+
+## The tag's version
+
+The tag's version changes when what every step's sandbox holds, beyond
+the step's inputs, changes in a way that can change what a step gives.
+A new version gives every step a new identity, so no step recorded under
+the old sandbox is found in the store, and every step runs again once.
+
+| Version | What changed |
+|---|---|
+| 1 | The first. |
+| 2 | Every step runs as user and group 1000, `pekit`, with a fixed `/etc/passwd` and `/etc/group`, and `LOGNAME` and `USER` set, as [The Step Sandbox](~pekit/the-step-sandbox) describes. Before, a step ran as whoever ran pekit, with no user database. |
 
 ## Why not its contents
 
