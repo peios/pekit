@@ -306,14 +306,11 @@ fn example_5_packs_two_packages_and_repacks_what_a_change_reaches() {
     // and the two packs.
     assert_eq!((built.ran, built.cached), (6, 0));
     let greet = built_file(dir.path(), file_of_dir(&built.value, "greet"));
-    // The identity packing by hand gives, as example 5 records it.
-    assert!(
-        greet
-            .join(
-                "manifests/sha256/7b27eb467e0a79eb6d231a9464bb6f627f8352e8a35ea78fc432c63d213fdeca"
-            )
-            .is_file()
-    );
+    // The identity packing by hand gives. Example 5 records one, but ppk now
+    // derives the program's requirements, such as its glibc floor, so the
+    // identity depends on the C library it was linked against.
+    let identity = packed_by_hand(dir.path(), state.path());
+    assert!(greet.join(format!("manifests/sha256/{identity}")).is_file());
     assert!(greet.join("refs/dev.example.greet/1.0-1/x86_64").is_file());
     let dev = built_file(dir.path(), file_of_dir(&built.value, "greet_dev"));
     assert!(
@@ -389,6 +386,117 @@ fn example_5_s_packages_are_packed_and_published_by_their_packager() {
         );
         assert!(!published.join("refs/dev.example.greet-dev").exists());
     }
+}
+
+/// Example 5 with `ppk` written in the developers' package's body before
+/// its closing brace.
+fn example_5_with_ppk(ppk: &str) -> Option<tempfile::TempDir> {
+    let Some(tool) = ppk_tool() else {
+        eprintln!("skipped: no `ppk` on PATH");
+        return None;
+    };
+    let dir = example(5, PPK);
+    fs::create_dir_all(dir.path().join("tools")).unwrap();
+    fs::copy(tool, dir.path().join("tools/ppk")).unwrap();
+    let path = dir.path().join("example/package.gcsl");
+    let text = fs::read_to_string(&path).unwrap();
+    let from = "\"lib/libgreet.a\" = g.archive}\n";
+    assert!(text.contains(from), "{text}");
+    fs::write(&path, text.replacen(from, &format!("{from}{ppk}\n"), 1)).unwrap();
+    Some(dir)
+}
+
+#[test]
+fn a_package_s_ppk_field_is_its_manifest_s_metadata() {
+    let Some(dir) = example_5_with_ppk(
+        "    ppk = {\n\
+         \x20       description = \"The greet library, for developers\"\n\
+         \x20       license_class = \"free\"\n\
+         \x20       dependencies = {\"dev.example.greet\" = \"= 1.0-1\"; \"dev.example.any\" = \"\"}\n\
+         \x20       requires = {\"libc.so.6\" = \"\"}\n\
+         \x20       provides = {greeting = \"1\"}\n\
+         \x20       claims = {\"/usr/lib/libgreet-current.a\" = \"libgreet.a\"}\n\
+         \x20   }",
+    ) else {
+        return;
+    };
+    let cache = tempfile::tempdir().unwrap();
+    let (out, success) = pekit(dir.path(), cache.path(), &["package"]);
+    assert!(success, "{out}");
+    let manifests = dir
+        .path()
+        .join("pekit-out/example/dev.example.greet-dev/pack/artifacts/manifests/sha256");
+    let manifest = fs::read_dir(&manifests)
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<Vec<_>>();
+    let [manifest] = &manifest[..] else {
+        panic!("not one manifest: {manifest:?}");
+    };
+    for part in [
+        "description = \"The greet library, for developers\"\n",
+        "license_class = \"free\"\n",
+        "[claims]\n\"/usr/lib/libgreet-current.a\" = \"libgreet.a\"\n",
+        "[dependencies]\n\"dev.example.any\" = \"\"\n\"dev.example.greet\" = \"= 1.0-1\"\n",
+        "[provides]\n\"greeting\" = \"1\"\n",
+        "[requires]\n\"libc.so.6\" = \"\"\n",
+    ] {
+        assert!(manifest.contains(part), "no {part:?} in {manifest}");
+    }
+    // The program's package has no `ppk`, so it packs as `ppk pack` packs it
+    // with no options.
+    let greet = dir
+        .path()
+        .join("pekit-out/example/dev.example.greet/pack/artifacts");
+    let identity = packed_by_hand(dir.path(), cache.path());
+    assert!(greet.join(format!("manifests/sha256/{identity}")).is_file());
+}
+
+/// The identity of example 5's program packed by hand, as
+/// `dev.example.greet@1.0-1`, with `tools/ppk` and no options.
+fn packed_by_hand(dir: &Path, state: &Path) -> String {
+    let built = build_in(dir, state, "app").unwrap();
+    let files = tempfile::tempdir().unwrap();
+    fs::create_dir_all(files.path().join("bin")).unwrap();
+    fs::copy(
+        built_file(dir, file_of(&built.value, None)),
+        files.path().join("bin/greet"),
+    )
+    .unwrap();
+    let artifacts = tempfile::tempdir().unwrap();
+    let ran = Command::new(dir.join("tools/ppk"))
+        .args(["pack", "dev.example.greet@1.0-1?arch=x86_64"])
+        .arg(files.path())
+        .arg("--artifact-dir")
+        .arg(artifacts.path())
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    let out = String::from_utf8(ran.stdout).unwrap();
+    out.trim().strip_prefix("sha256:").unwrap().to_owned()
+}
+
+#[test]
+fn a_ppk_field_ppk_has_no_form_for_is_an_error_naming_it() {
+    let Some(dir) =
+        example_5_with_ppk("    ppk = {dependency = {\"dev.example.greet\" = \"= 1.0-1\"}}")
+    else {
+        return;
+    };
+    let cache = tempfile::tempdir().unwrap();
+    let ran = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["package"])
+        .current_dir(dir.path())
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .output()
+        .unwrap();
+    assert!(!ran.status.success());
+    let err = String::from_utf8(ran.stderr).unwrap();
+    assert!(
+        err.contains("dev.example.greet-dev: ppk has no field `dependency`"),
+        "{err}"
+    );
 }
 
 #[test]

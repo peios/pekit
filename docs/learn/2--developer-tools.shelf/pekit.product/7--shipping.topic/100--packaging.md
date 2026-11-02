@@ -45,6 +45,47 @@ at its path under `/usr`: a file at its path, a list of files under it by
 their names, and a directory's tree under it. Files in one directory see
 each other's declarations, so `build app()` needs no import.
 
+## Give a package its metadata
+
+A package can carry more than its files. pekit keeps any other field of a
+package's body and never reads it, so each packager defines the fields it
+takes. The ppk packager reads a field named `ppk`, and records what it holds
+in the package's manifest:
+
+```gcsl
+def package dev.example.greet-dev() {
+    let g = build greet()
+    version = version
+    files = {"include" = g.headers; "lib/libgreet.a" = g.archive}
+    ppk = {
+        description = "The greet library, for developers"
+        license = "MIT"
+        license_class = "free"
+        homepage = "https://example.com/greet"
+        dependencies = {"dev.example.greet" = "= {version}"}
+    }
+}
+```
+
+`ppk` has two kinds of field:
+
+- **Single values,** each a string: `description`, `homepage`, `license`,
+  `license_class`, and `source_license`.
+- **Tables,** each a record of strings:
+  - `dependencies`: the packages this one needs, each with a version
+    constraint.
+  - `requires`: the capabilities it needs, such as `sh`, each with a
+    constraint.
+  - `provides`: the capabilities it offers, each with a version.
+  - `claims`: links it owns outside its files, each an absolute path and
+    the link's target, such as `"/usr/bin/sh" = "dash"`.
+
+An empty string means any version, or no version. ppk checks every value as
+`ppk pack` does, and finds an ELF program's libraries and their floors
+itself, so don't write those. A field ppk has no form for is an error
+naming it, so a misspelt field never goes missing quietly. A package
+without `ppk` is packed with no metadata, as before.
+
 ## Register the packager
 
 1. In `workspace.gcsl`, register the `ppk` tool as a toolchain, and the ppk

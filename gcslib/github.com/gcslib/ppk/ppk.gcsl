@@ -10,6 +10,12 @@
 #   the same directory, and a package whose files did not change is not
 #   packed again. Copying it into an artifact store, which ppk refuses for
 #   a version whose content changed, is publishing, which is no step.
+#   The package's `ppk` field, if it has one, is its manifest's metadata:
+#   `description`, `homepage`, `license`, `license_class` and
+#   `source_license`, each a string, and `dependencies`, `requires`,
+#   `provides` and `claims`, each a record of strings, given to `ppk pack`
+#   as its options of those names, `--depends` for `dependencies`. Any
+#   other field in `ppk` is an error naming it.
 # - `packager()`: ppk as a `packaging.Packager`, for a workspace to list in
 #   `pekitconf.packagers`: its `pack` is `pack`, and its `publish` copies a
 #   packed package into an artifact directory with `ppk fetch`, which
@@ -50,8 +56,64 @@ def pack(
         files.path,
         "--artifact-dir",
         out.path,
+        ...metadata_args(pkg),
     ])
     = out
+}
+
+# The fields of a package's `ppk` that are one value, each given to
+# `ppk pack` as the option of its name with `-` for `_`, such as
+# `--license-class <class>`.
+let SINGLE_FIELDS = ["description", "homepage", "license", "license_class", "source_license"]
+
+# The fields of a package's `ppk` that are tables, each entry given to
+# `ppk pack` as `table_option(field)`, the entry's key and its value.
+let TABLE_FIELDS = ["claims", "dependencies", "provides", "requires"]
+
+# The `ppk pack` option of a table field: `--depends` for `dependencies`,
+# and the field's own name for the others.
+fn table_option(field: String) -> String {
+    if field == "dependencies" { = "--depends" } else { = "--{field}" }
+}
+
+# The `ppk pack` options that give `pkg`'s manifest the metadata in its
+# `ppk` field, in the order of its fields' names, or none if it has no
+# `ppk`. A field ppk has no form for is an error naming it, so that a
+# misspelt one is never silently left out.
+fn metadata_args(pkg: Package) -> List<String> {
+    # In the branch, `pkg` is a `{ppk: {}}`, and a `{}` fits `{*: *}`.
+    let meta: {*: *} = if pkg is {ppk: {}} { = pkg.ppk } else { = {} }
+    let mut args: List<String> = []
+    for field in entries(meta) {
+        args := [...args, ...field_args(pkg.name, field)]
+    }
+    = args
+}
+
+# The options of one field of the package `name`'s `ppk`.
+fn field_args(name: String, field: {key: String, *: *}) -> List<String> {
+    let key = field.key
+    if SINGLE_FIELDS.contains(key) {
+        if field is {value: String} {
+            = ["--{key.split("_").join("-")}", field.value]
+        } else {
+            = panic("{name}: `ppk.{key}` is not a string")
+        }
+    } else if TABLE_FIELDS.contains(key) {
+        if field is {value: {*: String}} {
+            let mut args: List<String> = []
+            for each in entries(field.value) {
+                args := [...args, table_option(key), each.key, each.value]
+            }
+            = args
+        } else {
+            = panic("{name}: `ppk.{key}` is not a table of strings")
+        }
+    } else {
+        = panic(
+            "{name}: ppk has no field `{key}`; its fields are {[...SINGLE_FIELDS, ...TABLE_FIELDS].join(", ")}",
+        )
+    }
 }
 
 type PpkPackage = {name: String, version: String, arch: String, artifacts: Dir}
