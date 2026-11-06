@@ -2232,8 +2232,10 @@ impl Run<'_> {
     /// is the same in every build that makes it, whichever targets reach it
     /// (see [Identities](crate::receipt#identities)). Two steps whose
     /// identities are one, which only the contexts they were made in tell
-    /// apart, are told apart by the digest of those contexts too, the later
-    /// met.
+    /// apart, are told apart by the digest of the contexts they differ in
+    /// too, the later met: not of every context, since one that both were
+    /// made in alike, a large list of the workspace's say, would rename the
+    /// later, and every step after it, whenever its value changed.
     fn name_new_steps(&mut self) {
         let mut found = Vec::new();
         for (id, node) in self.graph.nodes().skip(self.named) {
@@ -2252,13 +2254,9 @@ impl Run<'_> {
         for (id, function, root) in found {
             self.step_roots.insert(id, root);
             self.unit_roots.insert(STEP_UNITS + id.number(), root);
-            let mut name = format!("{function}/{}", self.identity_of(id, false));
-            if self
-                .named_steps
-                .get(&name)
-                .is_some_and(|&other| other != id)
-            {
-                name = format!("{name}-{}", self.identity_of(id, true));
+            let mut name = format!("{function}/{}", self.identity_of(id, None));
+            if let Some(&other) = self.named_steps.get(&name).filter(|&&other| other != id) {
+                name = format!("{name}-{}", self.identity_of(id, Some(other)));
             }
             self.named_steps.insert(name.clone(), id);
             self.step_names.insert(id.number(), name.clone());
@@ -2267,31 +2265,39 @@ impl Run<'_> {
     }
 
     /// The identity of the step `id`, as the start of its digest's hex (see
-    /// [Identities](crate::receipt#identities)), every context it was made
-    /// in naming it if `every`: its node's number if it cannot be had, which
-    /// starting it then fails on.
-    fn identity_of(&self, id: NodeId, every: bool) -> String {
-        let made = self
-            .loaded
-            .workspace
-            .step_identity(&self.graph, id)
-            .and_then(|inputs| {
-                let callee = inputs.callee.ok_or("a step with no callee")?;
-                let context: Vec<(String, Plain)> =
-                    inputs.context.into_iter().filter(|_| every).collect();
-                let table = Rc::clone(&self.code_table);
-                let code_name =
-                    move |input: u32| table.get(input as usize).map(|(name, _)| name.clone());
-                let step_of = |node: u32| self.step_names.get(&node).cloned();
-                identity(IdentityOf {
-                    callee: &callee,
-                    args: &inputs.args,
-                    context: &context,
-                    platform: &self.settings.platform,
-                    code_name: &code_name,
-                    step_of: &step_of,
-                })
-            });
+    /// [Identities](crate::receipt#identities)), each context it was made in
+    /// that the step `apart_from`, whose identity is the same, was made in
+    /// with another value or not at all naming it too: its node's number if
+    /// it cannot be had, which starting it then fails on.
+    fn identity_of(&self, id: NodeId, apart_from: Option<NodeId>) -> String {
+        let workspace = &self.loaded.workspace;
+        let made = workspace.step_identity(&self.graph, id).and_then(|inputs| {
+            let callee = inputs.callee.ok_or("a step with no callee")?;
+            let other = match apart_from {
+                Some(other) => Some(workspace.step_identity(&self.graph, other)?.context),
+                None => None,
+            };
+            let context: Vec<(String, Plain)> = match other {
+                Some(other) => inputs
+                    .context
+                    .into_iter()
+                    .filter(|each| !other.contains(each))
+                    .collect(),
+                None => Vec::new(),
+            };
+            let table = Rc::clone(&self.code_table);
+            let code_name =
+                move |input: u32| table.get(input as usize).map(|(name, _)| name.clone());
+            let step_of = |node: u32| self.step_names.get(&node).cloned();
+            identity(IdentityOf {
+                callee: &callee,
+                args: &inputs.args,
+                context: &context,
+                platform: &self.settings.platform,
+                code_name: &code_name,
+                step_of: &step_of,
+            })
+        });
         match made {
             Ok(digest) => digest.hex().chars().take(IDENTITY_DIGITS).collect(),
             Err(_) => format!("node-{}", id.number()),

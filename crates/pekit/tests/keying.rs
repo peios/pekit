@@ -213,6 +213,54 @@ fn the_workspace_sets_a_library_s_context_for_every_target() {
     assert_eq!((same.ran, same.cached), (0, 2));
 }
 
+/// Writes a workspace whose `app` makes one step in two contexts that only
+/// `stage` tells apart, each step's result taken by another, all with
+/// `unrelated` bound to `value`, which no step reads.
+fn twice(root: &Path, value: &str) {
+    write(
+        root,
+        &[
+            (
+                "workspace.gcsl",
+                "context stage: Int = 1\n\
+                 context unrelated: String = \"a\"\n\
+                 #[hermetic] def made() -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"echo made > out\"])\n\
+                 \x20   = working_dir().file(\"out\")\n\
+                 }\n\
+                 #[hermetic] def taken(from: File, tag: String) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"cat {from.path} > out; echo {tag} >> out\"])\n\
+                 \x20   = working_dir().file(\"out\")\n\
+                 }\n",
+            ),
+            (
+                "app/build.gcsl",
+                &format!(
+                    "def build both() {{\n\
+                     \x20   = [taken(made() with {{ stage = 1 }}, \"one\"), \
+                     taken(made() with {{ stage = 3 }}, \"three\")] \
+                     with {{ unrelated = \"{value}\" }}\n\
+                     }}\n"
+                ),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_context_two_steps_of_one_identity_share_names_neither() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    twice(dir.path(), "a");
+    let built = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((built.ran, built.cached), (4, 0));
+    // `unrelated` names neither `made`, though the later met is named by
+    // the context it differs in, so nothing runs again.
+    twice(dir.path(), "b");
+    let again = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((again.ran, again.cached), (0, 4));
+}
+
 #[test]
 fn the_workspace_sets_only_contexts_declared_and_not_pekit_s_own() {
     let state = tempfile::tempdir().unwrap();
