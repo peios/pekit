@@ -53,8 +53,9 @@
 //! The contexts it was made in name no step, so that binding one moves only
 //! the steps that read it, as their receipts say (see `design/engine.md`,
 //! R2). Two steps a build makes that only their contexts tell apart, one
-//! compile for two platforms say, are named by the digest of those contexts
-//! too, the later met.
+//! compile for two platforms say, are named by the digest of the contexts
+//! they differ in too, the later met: a context both were made in alike
+//! names neither, so changing its value renames nothing.
 //!
 //! Its inputs' contents are its receipt's alone: a rebuilt input with the
 //! same bytes keys the steps after it the same, and a changed one reruns

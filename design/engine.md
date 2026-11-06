@@ -109,8 +109,9 @@ whichever targets reach it and in whatever order; and since GCSL's graph
 makes one call one node, whichever definition makes it, a step two
 targets reach is one step and runs once. Contexts name no step, so that
 binding one moves only the steps that read it (R2); two steps a build
-makes that only their contexts tell apart are named by those contexts'
-digest too, the later met. A target's results are linked under
+makes that only their contexts tell apart are named by the digest of the
+contexts they differ in too, the later met; a context both were made in
+alike names neither. A target's results are linked under
 `pekit-out/<target>/<function>/`, `<function>.2` for its second step of
 that function, which is the path the commands print.
 

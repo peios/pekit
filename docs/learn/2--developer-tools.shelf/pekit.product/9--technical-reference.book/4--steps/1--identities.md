@@ -26,7 +26,8 @@ The identity is a digest of what the step is, encoded after the tag
 The contexts it was made in don't name it. Two steps of one build that only
 their contexts tell apart, such as one compile for two platforms through
 `with`, would have one identity. The one met later is named with a digest of
-those contexts too.
+the contexts the two differ in too. A context both were made in with the same
+value doesn't name either, so changing it renames neither step.
 
 ## The tag's version
 
