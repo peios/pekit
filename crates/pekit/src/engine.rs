@@ -2549,14 +2549,15 @@ impl Run<'_> {
     }
 
     /// Gives the step `id` the result of the step `holder`, which is the
-    /// same step (see [`Run::claim_name`]): neither run nor found again, and
-    /// reported to its target only if that is another.
+    /// same step (see [`Run::claim_name`]), or its failure: neither run nor
+    /// found again, and reported to its target only if that is another.
     fn share(&mut self, id: NodeId, holder: NodeId) {
-        let Some(NodeState::Done(value)) = self.graph.node(holder).map(Node::state) else {
-            return;
+        let outcome = match self.graph.node(holder).map(Node::state) {
+            Some(NodeState::Done(value)) => Ok(value.clone()),
+            Some(NodeState::Failed(failure)) => Err(failure.clone()),
+            _ => return,
         };
-        let value = value.clone();
-        self.graph.resolve(id, Ok(value));
+        self.graph.resolve(id, outcome);
         if self.step_roots.get(&id) != self.step_roots.get(&holder) {
             self.report(id, (true, false));
         }
