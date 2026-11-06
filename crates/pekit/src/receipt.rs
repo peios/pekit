@@ -52,10 +52,13 @@
 //!
 //! The contexts it was made in name no step, so that binding one moves only
 //! the steps that read it, as their receipts say (see `design/engine.md`,
-//! R2). Two steps a build makes that only their contexts tell apart, one
-//! compile for two platforms say, are named by the digest of the contexts
-//! they differ in too, the later met: a context both were made in alike
-//! names neither, so changing its value renames nothing.
+//! R2). Steps a build makes that only their contexts tell apart, one
+//! compile for two platforms say, share a name: the first to start holds
+//! it, and each other is the same step if its receipt, by the contexts the
+//! first was keyed by, is the first's, or is named apart by that receipt's
+//! digest if not (see `Run::claim_name` in the engine). So a step that
+//! reads none of the contexts they differ in is one step, in whatever order
+//! the build meets it.
 //!
 //! Its inputs' contents are its receipt's alone: a rebuilt input with the
 //! same bytes keys the steps after it the same, and a changed one reruns
