@@ -215,8 +215,12 @@ fn the_workspace_sets_a_library_s_context_for_every_target() {
 
 /// Writes a workspace whose `app` makes one step in two contexts that only
 /// `stage` tells apart, each step's result taken by another, all with
-/// `unrelated` bound to `value`, which no step reads.
-fn twice(root: &Path, value: &str) {
+/// `unrelated` bound to `value`, which no step reads: the step made with
+/// `stage` 1 first, or, `swapped`, with `stage` 3.
+fn twice(root: &Path, value: &str, swapped: bool) {
+    let one = "taken(made() with { stage = 1 }, \"one\")";
+    let three = "taken(made() with { stage = 3 }, \"three\")";
+    let (first, second) = if swapped { (three, one) } else { (one, three) };
     write(
         root,
         &[
@@ -237,9 +241,7 @@ fn twice(root: &Path, value: &str) {
                 "app/build.gcsl",
                 &format!(
                     "def build both() {{\n\
-                     \x20   = [taken(made() with {{ stage = 1 }}, \"one\"), \
-                     taken(made() with {{ stage = 3 }}, \"three\")] \
-                     with {{ unrelated = \"{value}\" }}\n\
+                     \x20   = [{first}, {second}] with {{ unrelated = \"{value}\" }}\n\
                      }}\n"
                 ),
             ),
@@ -251,14 +253,47 @@ fn twice(root: &Path, value: &str) {
 fn a_context_two_steps_of_one_identity_share_names_neither() {
     let dir = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
-    twice(dir.path(), "a");
+    twice(dir.path(), "a", false);
     let built = build_in(dir.path(), state.path(), "both").unwrap();
-    assert_eq!((built.ran, built.cached), (4, 0));
-    // `unrelated` names neither `made`, though the later met is named by
-    // the context it differs in, so nothing runs again.
-    twice(dir.path(), "b");
+    // The two `made` are one step, run once, since neither reads `stage`.
+    assert_eq!((built.ran, built.cached), (3, 0));
+    // `unrelated` names neither `made`, so nothing runs again.
+    twice(dir.path(), "b", false);
     let again = build_in(dir.path(), state.path(), "both").unwrap();
-    assert_eq!((again.ran, again.cached), (0, 4));
+    assert_eq!((again.ran, again.cached), (0, 3));
+}
+
+/// The step names a build of the workspace at `root` left, sorted.
+fn step_names(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for function in fs::read_dir(root.join("pekit-out/.steps")).unwrap() {
+        let function = function.unwrap();
+        for step in fs::read_dir(function.path()).unwrap() {
+            let step = step.unwrap();
+            names.push(format!(
+                "{}/{}",
+                function.file_name().to_string_lossy(),
+                step.file_name().to_string_lossy()
+            ));
+        }
+    }
+    names.sort();
+    names
+}
+
+#[test]
+fn steps_of_one_identity_are_named_alike_in_either_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    twice(dir.path(), "a", false);
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let names = step_names(dir.path());
+    // Met the other way round, the steps are the ones built before, at the
+    // same paths, so nothing runs again.
+    twice(dir.path(), "a", true);
+    let swapped = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((swapped.ran, swapped.cached), (0, 3));
+    assert_eq!(step_names(dir.path()), names);
 }
 
 #[test]

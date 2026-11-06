@@ -46,7 +46,7 @@
 //! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
 //! dependency, fails there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -748,7 +748,8 @@ fn new_run<'a>(
         steps: HashMap::new(),
         step_names: HashMap::new(),
         step_roots: HashMap::new(),
-        named_steps: HashMap::new(),
+        named_steps: HashSet::new(),
+        held: HashMap::new(),
         named: 0,
         pool: Pool::new(settings.jobs.max(1)),
         in_flight: HashMap::new(),
@@ -1219,9 +1220,13 @@ struct Run<'a> {
     step_names: HashMap<u32, String>,
     /// The target each step is of, by node, its number among the roots.
     step_roots: HashMap<NodeId, usize>,
-    /// The step each name is of, so that two steps of one identity but for
-    /// the workspace's configuration are told apart.
-    named_steps: HashMap<String, NodeId>,
+    /// Every step name told so far, so that steps of one identity, which
+    /// share it, are told once.
+    named_steps: HashSet<String>,
+    /// The step that holds each name, the first of its steps to start, and,
+    /// once it is given, what the others are told apart from it by (see
+    /// [`Run::claim_name`]).
+    held: HashMap<String, Held>,
     /// How many of the graph's nodes have been looked at to name steps.
     named: usize,
     /// The pool effects run on.
@@ -1271,6 +1276,28 @@ struct Run<'a> {
     /// How many uploads to the remote cache are on the pool, which the
     /// build's end waits for.
     uploads: usize,
+}
+
+/// The step that holds a name (see [`Run::claim_name`]).
+struct Held {
+    /// Its node.
+    node: NodeId,
+    /// Once it is given, its receipt and the contexts it is by: those its
+    /// run read, or that the record it was found by was keyed by.
+    keyed_by: Option<(Digest, Vec<String>)>,
+}
+
+/// Whether a step may start under the name it has (see
+/// [`Run::claim_name`]).
+enum Claim {
+    /// It holds the name, and starts.
+    Holds,
+    /// Another step of its identity holds it and is not given yet.
+    Waits,
+    /// It is the step that holds the name, whose result it is given.
+    Shares(NodeId),
+    /// It is another step, and is named apart.
+    Apart,
 }
 
 /// A step being looked for in the remote cache (see [The remote
@@ -1802,7 +1829,11 @@ impl Run<'_> {
                 continue;
             }
             match node.kind() {
-                NodeKind::Deferred => self.start_step(id)?,
+                NodeKind::Deferred => {
+                    if !self.start_step(id)? {
+                        continue;
+                    }
+                }
                 NodeKind::Effect(_) if node.unit() < STEP_UNITS => {
                     let root = self.root_of(node.unit());
                     let Some(view) = self.roots.get(root).map(|found| Arc::clone(&found.host))
@@ -2227,15 +2258,14 @@ impl Run<'_> {
         (self.events)(&Event { at, kind });
     }
 
-    /// Names every step the graph has that is not named, in the order the
-    /// target's code met them: its function's name and its identity, which
-    /// is the same in every build that makes it, whichever targets reach it
-    /// (see [Identities](crate::receipt#identities)). Two steps whose
-    /// identities are one, which only the contexts they were made in tell
-    /// apart, are told apart by the digest of the contexts they differ in
-    /// too, the later met: not of every context, since one that both were
-    /// made in alike, a large list of the workspace's say, would rename the
-    /// later, and every step after it, whenever its value changed.
+    /// Names every step the graph has that is not named: its function's
+    /// name and its identity, which is the same in every build that makes
+    /// it, whichever targets reach it, in whatever order (see
+    /// [Identities](crate::receipt#identities)). Steps whose identities are
+    /// one, which only the contexts they were made in tell apart, share the
+    /// name: whether they are one step is found as they start
+    /// ([`Run::claim_name`]), since only a run says which contexts a step
+    /// reads.
     fn name_new_steps(&mut self) {
         let mut found = Vec::new();
         for (id, node) in self.graph.nodes().skip(self.named) {
@@ -2254,37 +2284,27 @@ impl Run<'_> {
         for (id, function, root) in found {
             self.step_roots.insert(id, root);
             self.unit_roots.insert(STEP_UNITS + id.number(), root);
-            let mut name = format!("{function}/{}", self.identity_of(id, None));
-            if let Some(&other) = self.named_steps.get(&name).filter(|&&other| other != id) {
-                name = format!("{name}-{}", self.identity_of(id, Some(other)));
-            }
-            self.named_steps.insert(name.clone(), id);
+            let name = format!("{function}/{}", self.identity_of(id));
             self.step_names.insert(id.number(), name.clone());
+            self.discovered(name);
+        }
+    }
+
+    /// Tells that the step `name` was found, once for all the steps that
+    /// share it.
+    fn discovered(&mut self, name: String) {
+        if self.named_steps.insert(name.clone()) {
             self.emit(EventKind::Discovered { step: name });
         }
     }
 
     /// The identity of the step `id`, as the start of its digest's hex (see
-    /// [Identities](crate::receipt#identities)), each context it was made in
-    /// that the step `apart_from`, whose identity is the same, was made in
-    /// with another value or not at all naming it too: its node's number if
-    /// it cannot be had, which starting it then fails on.
-    fn identity_of(&self, id: NodeId, apart_from: Option<NodeId>) -> String {
+    /// [Identities](crate::receipt#identities)): its node's number if it
+    /// cannot be had, which starting it then fails on.
+    fn identity_of(&self, id: NodeId) -> String {
         let workspace = &self.loaded.workspace;
         let made = workspace.step_identity(&self.graph, id).and_then(|inputs| {
             let callee = inputs.callee.ok_or("a step with no callee")?;
-            let other = match apart_from {
-                Some(other) => Some(workspace.step_identity(&self.graph, other)?.context),
-                None => None,
-            };
-            let context: Vec<(String, Plain)> = match other {
-                Some(other) => inputs
-                    .context
-                    .into_iter()
-                    .filter(|each| !other.contains(each))
-                    .collect(),
-                None => Vec::new(),
-            };
             let table = Rc::clone(&self.code_table);
             let code_name =
                 move |input: u32| table.get(input as usize).map(|(name, _)| name.clone());
@@ -2292,7 +2312,6 @@ impl Run<'_> {
             identity(IdentityOf {
                 callee: &callee,
                 args: &inputs.args,
-                context: &context,
                 platform: &self.settings.platform,
                 code_name: &code_name,
                 step_of: &step_of,
@@ -2378,8 +2397,13 @@ impl Run<'_> {
     }
 
     /// Starts the step `id`: from its record if the store has one for its
-    /// receipt, else in a sandbox of its own, its inputs staged.
-    fn start_step(&mut self, id: NodeId) -> Result<(), BuildError> {
+    /// receipt, else in a sandbox of its own, its inputs staged; or, if
+    /// another step of its identity holds its name, as [`Run::claim_name`]
+    /// says. Whether it started.
+    fn start_step(&mut self, id: NodeId) -> Result<bool, BuildError> {
+        if self.waits_for_holder(id) {
+            return Ok(false);
+        }
         let inputs = self
             .loaded
             .workspace
@@ -2390,7 +2414,7 @@ impl Run<'_> {
             Err(message) => {
                 let span = self.graph.node(id).map_or(Span::new(0, 0), Node::span);
                 self.finish_now(id, Err(Diagnostic::error(message, span)));
-                return Ok(());
+                return Ok(true);
             }
         };
         let code: Vec<(String, Digest)> = inputs
@@ -2398,27 +2422,38 @@ impl Run<'_> {
             .iter()
             .filter_map(|&file| self.code_table.get(file as usize).cloned())
             .collect();
-        let own = self.own_dir(id);
-        let own_path = format!("{OUTPUTS}/{own}");
-        let keyed = Keyed {
+        let mut keyed = Keyed {
             code,
-            own: own_path,
+            own: format!("{OUTPUTS}/{}", self.own_dir(id)),
             contexts: self.contexts_of(&inputs).map_err(BuildError::Engine)?,
             inputs,
         };
+        // Named apart, it is keyed by its new name, and may meet a step of
+        // that name too.
+        loop {
+            match self.claim_name(id, &keyed)? {
+                Claim::Holds => break,
+                Claim::Waits => return Ok(false),
+                Claim::Shares(holder) => {
+                    self.share(id, holder);
+                    return Ok(true);
+                }
+                Claim::Apart => keyed.own = format!("{OUTPUTS}/{}", self.own_dir(id)),
+            }
+        }
         let mut given: Vec<(String, Kept)> = Vec::new();
         let base = self.receipt_of(&keyed, &[], Some(&mut given))?;
         // A record whose contents were evicted is no hit: the step runs
         // again and puts them back.
         let found = if self.settings.reuse == Reuse::Store {
             self.looked_up(&keyed, &base)?
-                .filter(|record| self.holds_all(&record.result))
+                .filter(|(record, _)| self.holds_all(&record.result))
         } else {
             None
         };
-        if let Some(record) = found {
-            self.found_step(id, &record);
-            return Ok(());
+        if let Some((record, keys)) = found {
+            self.found_step(id, &record, keys);
+            return Ok(true);
         }
         let looking = Looking {
             keyed,
@@ -2441,13 +2476,106 @@ impl Run<'_> {
             self.pool.send(id, work, None);
             self.background += 1;
             self.looking.insert(id, looking);
-            return Ok(());
+            return Ok(true);
         }
-        self.run_step(id, looking)
+        self.run_step(id, looking)?;
+        Ok(true)
     }
 
-    /// The step `id` found in the store, as `record` holds it.
-    fn found_step(&mut self, id: NodeId, record: &StepRecord) {
+    /// Whether the step `id` waits for another of its identity, which holds
+    /// its name and is not given yet (see [`Run::claim_name`]): told before
+    /// its inputs are, which waiting needs none of.
+    fn waits_for_holder(&self, id: NodeId) -> bool {
+        self.held.get(&self.step_name(id)).is_some_and(|held| {
+            held.node != id && held.keyed_by.is_none() && self.is_waiting(held.node)
+        })
+    }
+
+    /// Whether the step `id`, keyed as `keyed`, may start under the name it
+    /// has. Steps of one identity share a name ([`Run::name_new_steps`]),
+    /// and the first to start holds it; each other waits until it is given,
+    /// then is keyed by the contexts it was keyed by. A step whose receipt
+    /// so is the holder's is the holder's step, since a run is a function
+    /// of what it reads (see `design/engine.md`, R2), and is given its
+    /// result. One whose receipt differs, which reads a context they were
+    /// made in apart, or was given what such a step gave, is named apart, by
+    /// that receipt's digest, so that each step of that receipt is one
+    /// step too: so steps that only contexts none of them reads tell apart
+    /// are one, whatever order they are met in.
+    ///
+    /// A holder that failed gives the name up to the step that meets it
+    /// next: what it read is not known.
+    fn claim_name(&mut self, id: NodeId, keyed: &Keyed) -> Result<Claim, BuildError> {
+        let name = self.step_name(id);
+        let holder = match self.held.get(&name) {
+            Some(held) if held.node != id => held,
+            _ => {
+                self.held.insert(
+                    name,
+                    Held {
+                        node: id,
+                        keyed_by: None,
+                    },
+                );
+                return Ok(Claim::Holds);
+            }
+        };
+        let Some((receipt, keys)) = holder.keyed_by.clone() else {
+            if self.is_waiting(holder.node) {
+                return Ok(Claim::Waits);
+            }
+            // Given without being keyed, it failed.
+            self.held.insert(
+                name,
+                Held {
+                    node: id,
+                    keyed_by: None,
+                },
+            );
+            return Ok(Claim::Holds);
+        };
+        let holder = holder.node;
+        let mine = self.receipt_of(keyed, &keys, None)?;
+        if mine == receipt {
+            return Ok(Claim::Shares(holder));
+        }
+        let apart = format!(
+            "{name}-{}",
+            mine.hex().chars().take(IDENTITY_DIGITS).collect::<String>()
+        );
+        self.step_names.insert(id.number(), apart.clone());
+        self.discovered(apart);
+        Ok(Claim::Apart)
+    }
+
+    /// Gives the step `id` the result of the step `holder`, which is the
+    /// same step (see [`Run::claim_name`]): neither run nor found again, and
+    /// reported to its target only if that is another.
+    fn share(&mut self, id: NodeId, holder: NodeId) {
+        let Some(NodeState::Done(value)) = self.graph.node(holder).map(Node::state) else {
+            return;
+        };
+        let value = value.clone();
+        self.graph.resolve(id, Ok(value));
+        if self.step_roots.get(&id) != self.step_roots.get(&holder) {
+            self.report(id, (true, false));
+        }
+    }
+
+    /// Notes that the step `id`, if it holds its name, has the receipt
+    /// `receipt` by the contexts `keys`, so that another step of its
+    /// identity is told apart from it or not (see [`Run::claim_name`]).
+    fn keyed_by(&mut self, id: NodeId, receipt: Digest, keys: Vec<String>) {
+        let name = self.step_name(id);
+        if let Some(held) = self.held.get_mut(&name).filter(|held| held.node == id) {
+            held.keyed_by = Some((receipt, keys));
+        }
+    }
+
+    /// The step `id` found in the store, as `record` holds it, by the
+    /// contexts `keys`.
+    fn found_step(&mut self, id: NodeId, record: &StepRecord, keys: Vec<String>) {
+        self.keyed_by(id, record.receipt, keys);
         // Its outputs kept as a step's that ran are, since a target's own
         // code may read them (see [Exposure](crate::exposure#exposure)).
         for (path, kept) in record.result.files() {
@@ -2488,14 +2616,18 @@ impl Run<'_> {
         if looking.records {
             let found = self
                 .looked_up(&looking.keyed, &looking.base)?
-                .filter(|record| self.holds_all(&record.result));
-            if let Some(record) = found {
+                .filter(|(record, _)| self.holds_all(&record.result));
+            if let Some((record, keys)) = found {
                 self.found_remotely += 1;
-                self.found_step(id, &record);
+                self.found_step(id, &record, keys);
                 return Ok(());
             }
         } else if let Some(remote) = &self.settings.remote {
-            let receipts = self.receipts_by_manifest(&looking.keyed, &looking.base)?;
+            let receipts: Vec<Digest> = self
+                .receipts_by_manifest(&looking.keyed, &looking.base)?
+                .into_iter()
+                .map(|(receipt, _)| receipt)
+                .collect();
             if !receipts.is_empty() {
                 let work = Work::Remote {
                     remote: Arc::clone(remote),
@@ -2942,8 +3074,10 @@ impl Run<'_> {
             self.outputs.insert(path.clone(), *entry);
             self.expose(path, *entry);
         }
+        let receipt = self.read_receipt(step)?;
+        self.keyed_by(id, receipt, read_keys(step));
         match stored(plain, &kept, &self.store) {
-            Ok(result) => self.keep_record(id, step, result)?,
+            Ok(result) => self.keep_record(id, step, receipt, result)?,
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
             Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
@@ -2965,15 +3099,16 @@ impl Run<'_> {
     }
 
     /// Records `result`, what the step `step`, the node `id`, gave, by its
-    /// receipt; or, with [`Reuse::Compare`] and a record there already,
-    /// compares it with that record's, noting a step that gave another.
+    /// receipt `receipt`; or, with [`Reuse::Compare`] and a record there
+    /// already, compares it with that record's, noting a step that gave
+    /// another.
     fn keep_record(
         &mut self,
         id: NodeId,
         step: &StepRun,
+        receipt: Digest,
         result: Stored,
     ) -> Result<(), BuildError> {
-        let receipt = self.read_receipt(step)?;
         if self.settings.reuse == Reuse::Compare
             && let Some(first) = self
                 .store
@@ -3089,19 +3224,20 @@ impl Run<'_> {
 
     /// The step `keyed` found in the store, by each set of contexts its
     /// manifest has for its base `base`, its receipt by each made of the
-    /// values its context gives them now, the first found.
+    /// values its context gives them now, the first found, with the set it
+    /// was found by.
     fn looked_up(
         &mut self,
         keyed: &Keyed,
         base: &Digest,
-    ) -> Result<Option<StepRecord>, BuildError> {
-        for receipt in self.receipts_by_manifest(keyed, base)? {
+    ) -> Result<Option<(StepRecord, Vec<String>)>, BuildError> {
+        for (receipt, keys) in self.receipts_by_manifest(keyed, base)? {
             let found = self
                 .store
                 .record::<StepRecord>(&receipt)
                 .map_err(|error| engine(&error))?;
-            if found.is_some() {
-                return Ok(found);
+            if let Some(found) = found {
+                return Ok(Some((found, keys)));
             }
         }
         Ok(None)
@@ -3109,12 +3245,13 @@ impl Run<'_> {
 
     /// The receipts the step `keyed` is looked up by: one for each set of
     /// contexts the store's manifest has for its base `base`, made of the
-    /// values its context gives them now, in the manifest's order.
+    /// values its context gives them now, in the manifest's order, each
+    /// with its set.
     fn receipts_by_manifest(
         &mut self,
         keyed: &Keyed,
         base: &Digest,
-    ) -> Result<Vec<Digest>, BuildError> {
+    ) -> Result<Vec<(Digest, Vec<String>)>, BuildError> {
         let manifest = self
             .store
             .record::<Manifest>(&manifest_key(base))
@@ -3122,8 +3259,8 @@ impl Run<'_> {
         manifest
             .map(|manifest| manifest.sets)
             .unwrap_or_default()
-            .iter()
-            .map(|keys| self.receipt_of(keyed, keys, None))
+            .into_iter()
+            .map(|keys| Ok((self.receipt_of(keyed, &keys, None)?, keys)))
             .collect()
     }
 

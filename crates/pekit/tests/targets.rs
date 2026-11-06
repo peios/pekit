@@ -268,6 +268,61 @@ fn one_call_made_in_two_contexts_is_two_steps_at_two_paths() {
 }
 
 #[test]
+fn steps_given_two_contexts_steps_results_stay_apart_in_either_order() {
+    // Each `after` is made where `case` is not bound, and given a `loud`
+    // made in its own `case`: the two `after` have one identity and one
+    // context, and differ only in what their `loud` gives them.
+    let text = |swapped: bool| {
+        let (up, down) = (
+            "up = after(loud(file(\"name.txt\")))",
+            "down = after(loud(file(\"name.txt\")) with { case = \"lower\" })",
+        );
+        let (first, second) = if swapped { (down, up) } else { (up, down) };
+        format!(
+            "context case: String = \"upper\"\n\
+             #[hermetic] fn loud(src: File) -> File {{\n\
+             \x20   let how = if ^case == \"upper\" {{ \"a-z A-Z\" }} else {{ \"A-Z a-z\" }}\n\
+             \x20   let r = exec([\"/bin/sh\", \"-c\", \"tr {{how}} < {{src.path}} > out.txt\"])\n\
+             \x20   working_dir().file(\"out.txt\")\n\
+             }}\n\
+             #[hermetic] fn after(src: File) -> File {{\n\
+             \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {{src.path}} > out.txt; echo after >> out.txt\"])\n\
+             \x20   working_dir().file(\"out.txt\")\n\
+             }}\n\
+             def build both() {{\n\
+             \x20   {first}\n\
+             \x20   {second}\n\
+             }}\n"
+        )
+    };
+    let dir = workspace(&[
+        ("app/build.gcsl", &text(false)),
+        ("app/name.txt", "Mixed\n"),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let read = |at: &str| fs::read_to_string(dir.path().join(at)).unwrap();
+    let afters = || {
+        let mut found = [
+            read("pekit-out/app/both/after/out.txt"),
+            read("pekit-out/app/both/after.2/out.txt"),
+        ];
+        found.sort();
+        found
+    };
+    let (_, counts) = build_all(dir.path(), state.path(), &["both"], |_| {});
+    assert_eq!(counts, (4, 0));
+    assert_eq!(afters(), ["MIXED\nafter\n", "mixed\nafter\n"]);
+    let (_, counts) = build_all(dir.path(), state.path(), &["both"], |_| {});
+    assert_eq!(counts, (0, 4));
+    // Met the other way round, each `after` still takes its own `loud`.
+    write(dir.path(), &[("app/build.gcsl", &text(true))]);
+    let fresh = tempfile::tempdir().unwrap();
+    let (_, counts) = build_all(dir.path(), fresh.path(), &["both"], |_| {});
+    assert_eq!(counts, (4, 0));
+    assert_eq!(afters(), ["MIXED\nafter\n", "mixed\nafter\n"]);
+}
+
+#[test]
 fn no_dynamic_fails_a_target_that_waits_for_a_step() {
     let text = format!(
         "{SHOUT}def build waits() {{ = shout(file(\"name.txt\")).read() }}\n\
