@@ -402,7 +402,6 @@ fn identity_of(function: u32, args: &[Plain], steps: &[(u32, &str)]) -> Digest {
     identity(IdentityOf {
         callee: &callee,
         args,
-        context: &[],
         platform: "x86_64-linux",
         code_name: &code_name,
         step_of: &step_of,
@@ -444,7 +443,6 @@ fn an_identity_is_what_a_step_is_apart_from_its_inputs_contents() {
     let unnamed = identity(IdentityOf {
         callee: &callee,
         args: &[Plain::Step(3)],
-        context: &[],
         platform: "x86_64-linux",
         code_name: &|_| Some("app/build.gcsl".to_owned()),
         step_of: &|_| None,

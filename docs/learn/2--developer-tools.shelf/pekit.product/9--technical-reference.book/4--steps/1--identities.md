@@ -23,11 +23,38 @@ The identity is a digest of what the step is, encoded after the tag
   for have run.
 - **The platform it runs on.**
 
-The contexts it was made in don't name it. Two steps of one build that only
-their contexts tell apart, such as one compile for two platforms through
-`with`, would have one identity. The one met later is named with a digest of
-the contexts the two differ in too. A context both were made in with the same
-value doesn't name either, so changing it renames neither step.
+The contexts it was made in don't name it, so binding a context moves only
+the steps that read it, as their receipts say.
+
+## Steps that only their contexts tell apart
+
+GCSL makes one call made in two contexts two steps, such as one compile
+made through `with` for two platforms. Both have one identity and share one
+name. Whether they are one step depends on whether the step reads a context
+they were made in differently, and only running it says which contexts it
+reads. So pekit settles it as they start:
+
+1. The first of them to start holds the name, and is found in the store or
+   runs, as any step is.
+2. Each of the others waits until the first is done. Then it is keyed by the
+   contexts the first was keyed by: those its run read, or those the record
+   it was found by was keyed by.
+3. If its receipt is the same as the first step's, it is the same step. It
+   takes the first step's result, and is neither run nor looked up.
+4. If its receipt differs, it is another step. It reads a context they were
+   made in with different values, or it was given the result of a step that
+   does. It is named `<identity>-<receipt>`, with the first 16 hexadecimal
+   digits of that receipt, and is found or runs there. Others with that
+   receipt share that name in the same way.
+
+A step that doesn't read the contexts the steps differ in therefore has one
+name and runs once, in whatever order evaluation meets the steps. Steps that
+really differ never share a name or a result. Which of them keeps the plain
+name still depends on which starts first, so reordering a build can rename
+those steps, and the steps after them.
+
+If the first step fails, the next of the others to start holds the name
+instead, since what the failed step read is not known.
 
 ## The tag's version
 

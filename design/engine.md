@@ -108,12 +108,24 @@ the rule must give the same path in every build that makes the step,
 whichever targets reach it and in whatever order; and since GCSL's graph
 makes one call one node, whichever definition makes it, a step two
 targets reach is one step and runs once. Contexts name no step, so that
-binding one moves only the steps that read it (R2); two steps a build
-makes that only their contexts tell apart are named by the digest of the
-contexts they differ in too, the later met; a context both were made in
-alike names neither. A target's results are linked under
+binding one moves only the steps that read it (R2). Steps a build makes
+that only their contexts tell apart share a name: the first to start holds
+it, and each other, once the holder is given, is keyed by the contexts the
+holder was keyed by. A receipt that matches is the holder's step, and takes
+its result; one that differs is named apart by that receipt's digest. So
+steps that only contexts none of them reads tell apart are one step,
+whatever order evaluation meets them in. A target's results are linked under
 `pekit-out/<target>/<function>/`, `<function>.2` for its second step of
 that function, which is the path the commands print.
+
+*Changed 2026-11-06 (PEI-1654).* The later met of two steps of one identity
+was named apart by the digest of the contexts it was made in (narrowed on
+2026-11-06 to those the two differ in, PEI-1645). Which was later depended
+on evaluation order, so an edit that only reordered evaluation renamed one
+of the two and reran every step after it: 1,135 steps of pkgs' stage 3 build
+once. A step's reads are known only once it runs, so naming can't tell
+whether the two differ; sharing the name and comparing receipts as the
+second starts can.
 
 *Changed 2026-10-26 (Jack, PEI-1596).* Steps were first named
 `/pekit-out/<target>/<function>.N`, by the target that met them and in

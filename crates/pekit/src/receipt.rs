@@ -52,10 +52,13 @@
 //!
 //! The contexts it was made in name no step, so that binding one moves only
 //! the steps that read it, as their receipts say (see `design/engine.md`,
-//! R2). Two steps a build makes that only their contexts tell apart, one
-//! compile for two platforms say, are named by the digest of the contexts
-//! they differ in too, the later met: a context both were made in alike
-//! names neither, so changing its value renames nothing.
+//! R2). Steps a build makes that only their contexts tell apart, one
+//! compile for two platforms say, share a name: the first to start holds
+//! it, and each other is the same step if its receipt, by the contexts the
+//! first was keyed by, is the first's, or is named apart by that receipt's
+//! digest if not (see `Run::claim_name` in the engine). So a step that
+//! reads none of the contexts they differ in is one step, in whatever order
+//! the build meets it.
 //!
 //! Its inputs' contents are its receipt's alone: a rebuilt input with the
 //! same bytes keys the steps after it the same, and a changed one reruns
@@ -299,13 +302,10 @@ pub struct IdentityOf<'a> {
     pub callee: &'a Plain,
     /// Its arguments, in parameter order.
     pub args: &'a [Plain],
-    /// The contexts that name it, by key, sorted, each with its value: none,
-    /// but to tell two steps apart that only their contexts do.
-    pub context: &'a [(String, Plain)],
     /// The platform it runs on, as pekit describes it.
     pub platform: &'a str,
     /// The name of the file of each input number, which a function in its
-    /// callee, arguments or context is named by.
+    /// callee or arguments is named by.
     pub code_name: &'a dyn Fn(u32) -> Option<String>,
     /// The name of each step, by its node's number, whose result it is
     /// given, not given yet, which names it.
@@ -333,11 +333,9 @@ pub fn identity(of: IdentityOf<'_>) -> Result<Digest, String> {
     for arg in of.args {
         out.plain(arg)?;
     }
-    out.count(of.context.len());
-    for (key, plain) in of.context {
-        out.text(key);
-        out.plain(plain)?;
-    }
+    // No context names it. The count of those that did, none, stays, so
+    // that every step keeps the name it had.
+    out.count(0);
     out.text(of.platform);
     Ok(Digest::from_hasher(hasher))
 }
