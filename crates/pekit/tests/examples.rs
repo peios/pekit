@@ -738,6 +738,36 @@ fn holds(path: &Path, text: &str) -> bool {
         .any(|window| window == text.as_bytes())
 }
 
+/// The program interpreter the 64-bit little-endian ELF executable at
+/// `path` asks for, from its `PT_INTERP` program header; `None` for a
+/// static program, which has none. A search of the file's bytes can't
+/// tell: a static program can hold an interpreter's name as data, as ppk
+/// does in the libraries it derives requirements from.
+fn interpreter(path: &Path) -> Option<String> {
+    const PT_INTERP: u32 = 3;
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(
+        bytes.get(..6),
+        Some(&b"\x7fELF\x02\x01"[..]),
+        "{}",
+        path.display()
+    );
+    let number = |at: usize, size: usize| {
+        let mut word = [0; 8];
+        word[..size].copy_from_slice(&bytes[at..at + size]);
+        usize::try_from(u64::from_le_bytes(word)).unwrap()
+    };
+    let (table, size, count) = (number(0x20, 8), number(0x36, 2), number(0x38, 2));
+    (0..count)
+        .map(|index| table + index * size)
+        .find(|&header| number(header, 4) == PT_INTERP as usize)
+        .map(|header| {
+            let (offset, length) = (number(header + 8, 8), number(header + 32, 8));
+            let name = &bytes[offset..offset + length];
+            String::from_utf8(name.strip_suffix(b"\0").unwrap_or(name).to_vec()).unwrap()
+        })
+}
+
 /// The time each member's header of the `ar` archive at `path` records,
 /// as written: `0` for each of an archive made deterministically.
 fn member_times(path: &Path) -> Vec<String> {
@@ -1392,12 +1422,8 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     let version = Command::new(&ppk).arg("--version").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
     // A static program, which needs nothing of the system it runs on.
+    assert_eq!(interpreter(&ppk), None);
     let header = fs::read(&ppk).unwrap();
-    assert!(
-        !header
-            .windows(b"ld-linux".len())
-            .any(|window| window == b"ld-linux")
-    );
     // Built again, nothing runs.
     let again = build_in(dir.path(), state.path(), "ppk").unwrap();
     assert_eq!(again.ran, 0);
@@ -1422,7 +1448,10 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
     let ppk = built_file(dir.path(), &format!("{path}/ppk"));
     let version = Command::new(&ppk).arg("--version").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
-    assert!(holds(&ppk, "ld-linux-x86-64.so.2"));
+    assert_eq!(
+        interpreter(&ppk).as_deref(),
+        Some("/lib64/ld-linux-x86-64.so.2")
+    );
 }
 
 #[test]
@@ -1452,7 +1481,10 @@ fn the_rust_library_builds_ppk_one_crate_at_a_time() {
     let ppk = built_file(dir.path(), file_of(&built.value, None));
     let version = Command::new(&ppk).arg("--version").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&version.stdout), "ppk 0.1.0\n");
-    assert!(holds(&ppk, "ld-linux-x86-64.so.2"));
+    assert_eq!(
+        interpreter(&ppk).as_deref(),
+        Some("/lib64/ld-linux-x86-64.so.2")
+    );
     // Each crate a step: far more than Cargo's one.
     assert!(built.ran > 50, "{}", built.ran);
     // Built again, nothing runs.
