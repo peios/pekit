@@ -861,6 +861,7 @@ dependencies = [
  "liblzma",
  "pekit-reapi",
  "prost",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

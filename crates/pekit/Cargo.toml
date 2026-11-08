@@ -27,6 +27,9 @@ zstd = "0.13"
 ureq = "3"
 xattr = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Walking a tree by descriptors, without `unsafe`: removing one deeper than
+# a process may open descriptors or a path may be long.
+rustix = { version = "1.1", features = ["fs"] }
 # The remote cache (`design/additive.md`, F5).
 pekit-reapi = { path = "../pekit-reapi" }
 prost = "0.14"
@@ -44,6 +47,8 @@ tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["router", "server", "transport"] }
 liblzma = { version = "0.4", features = ["static"] }
+# Making a tree deeper than the descriptor limit, which it lowers.
+rustix = { version = "1.1", features = ["fs", "process"] }
 tar = "0.4"
 tempfile = "3.27"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

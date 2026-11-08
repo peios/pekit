@@ -57,11 +57,16 @@
 //!   tree's digest ([`Layers::mounted`]).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat};
+use rustix::io::Errno;
 
 use crate::store::{Digest, FileEntry, Store};
 
@@ -241,32 +246,136 @@ fn seal(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o222))
 }
 
-/// Removes the tree at `path`, if there is one, its directories made
-/// writable first, since a sealed composition's are not.
+/// Removes the tree at `path`, if there is one, each directory made
+/// writable by its owner before it is emptied, since a sealed
+/// composition's are not. However deep the tree, it holds a few
+/// descriptors at once and names no path longer than an entry's name: a
+/// step can leave a tree in its `/tmp` deeper than this process may open
+/// descriptors, and longer than a path may be ([`clear`]).
 ///
 /// # Errors
 ///
 /// That it could not be removed.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
-    if !present(path) {
-        return Ok(());
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_dir() {
+        return fs::remove_file(path);
     }
-    unseal(path)?;
-    fs::remove_dir_all(path)
+    fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() | 0o700))?;
+    clear(open_dir(CWD, path)?)?;
+    fs::remove_dir(path)
 }
 
-/// Makes every directory under `path`, and it, writable by its owner.
-fn unseal(path: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.is_dir() {
-        return Ok(());
+/// A directory being emptied by [`clear`], below the one it began with.
+struct Level {
+    /// Its name in its parent.
+    name: CString,
+    /// Its parent's device and inode, which `..` must lead back to.
+    parent: (u64, u64),
+    /// What of its parent is still to be removed.
+    left: Vec<(CString, FileType)>,
+}
+
+/// Empties the directory `top`, a descriptor of it, owner-writable, walking
+/// down and back up by name, one directory open at a time, and a level's
+/// entries read whole before any is removed. A directory is reached again
+/// through its child's `..`, which must be the directory left, so that a
+/// tree moved while it is emptied is an error, not a walk out of it.
+fn clear(top: OwnedFd) -> io::Result<()> {
+    let mut at = top;
+    let mut left = entries(&at)?;
+    let mut above: Vec<Level> = Vec::new();
+    loop {
+        if let Some((name, kind)) = left.pop() {
+            let kind = match kind {
+                FileType::Unknown => {
+                    match statat(&at, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(stat) => FileType::from_raw_mode(stat.st_mode),
+                        Err(Errno::NOENT) => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                kind => kind,
+            };
+            if kind != FileType::Directory {
+                ignore_gone(unlinkat(&at, name.as_c_str(), AtFlags::empty()))?;
+                continue;
+            }
+            let stat = match statat(&at, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(Errno::NOENT) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if stat.st_mode & 0o700 != 0o700 {
+                chmodat(
+                    &at,
+                    name.as_c_str(),
+                    Mode::from_raw_mode(stat.st_mode | 0o700),
+                    AtFlags::empty(),
+                )?;
+            }
+            let below = open_dir(&at, name.as_c_str())?;
+            let here = fstat(&at)?;
+            above.push(Level {
+                name,
+                parent: (here.st_dev, here.st_ino),
+                left: std::mem::take(&mut left),
+            });
+            at = below;
+            left = entries(&at)?;
+            continue;
+        }
+        let Some(level) = above.pop() else {
+            return Ok(());
+        };
+        let parent = open_dir(&at, c"..")?;
+        let stat = fstat(&parent)?;
+        if (stat.st_dev, stat.st_ino) != level.parent {
+            return Err(io::Error::other(format!(
+                "`{}` was moved while it was removed",
+                level.name.to_string_lossy()
+            )));
+        }
+        at = parent;
+        ignore_gone(unlinkat(&at, level.name.as_c_str(), AtFlags::REMOVEDIR))?;
+        left = level.left;
     }
-    let mode = meta.permissions().mode();
-    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
-    for entry in fs::read_dir(path)? {
-        unseal(&entry?.path())?;
+}
+
+/// Opens the directory `name` in `dir`, not following a link.
+fn open_dir<Fd: AsFd, P: rustix::path::Arg>(dir: Fd, name: P) -> io::Result<OwnedFd> {
+    Ok(openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
+/// The entries of the directory `dir`, but `.` and `..`, each its name and
+/// kind, read whole and the reading closed.
+fn entries(dir: &OwnedFd) -> io::Result<Vec<(CString, FileType)>> {
+    let mut found = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != c"." && name != c".." {
+            found.push((name.to_owned(), entry.file_type()));
+        }
     }
-    Ok(())
+    Ok(found)
+}
+
+/// `removed`, but an entry already gone is no error.
+fn ignore_gone(removed: rustix::io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(Errno::NOENT) => Ok(()),
+        removed => Ok(removed?),
+    }
 }
 
 impl Layers {
