@@ -3566,8 +3566,7 @@ impl Run<'_> {
             let Some(kept) = self.outputs.get(path) else {
                 continue;
             };
-            let _ = std::fs::remove_file(&at);
-            let _ = std::fs::remove_dir_all(&at);
+            let _ = remove_tree(&at);
             let copied = match kept {
                 Kept::File(entry) => self.store.copy_file(entry, &at),
                 Kept::Dir(tree) => self.store.copy_tree(tree, &at),
@@ -3645,13 +3644,7 @@ pub fn target_view(target: &str, paths: &[&str]) -> Vec<(String, String)> {
 /// Makes `at` a symbolic link to `from`, by a relative path, whatever was
 /// there before.
 fn link_view(from: &Path, at: &Path) -> io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(at) {
-        if meta.is_dir() {
-            fs::remove_dir_all(at)?;
-        } else {
-            fs::remove_file(at)?;
-        }
-    }
+    remove_tree(at)?;
     let parent = at.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     std::os::unix::fs::symlink(relative_to(from, parent), at)

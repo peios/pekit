@@ -160,6 +160,20 @@ impl Seen {
     }
 }
 
+/// The entries of the directory at `path`, each its name, kind and path,
+/// read whole and the directory closed: a walk that goes down a level
+/// holds no descriptor open per level above, so a tree deeper than this
+/// process may open descriptors can be read. A `DirEntry` kept would keep
+/// its directory open.
+fn listing(path: &Path) -> io::Result<Vec<(std::ffi::OsString, fs::FileType, PathBuf)>> {
+    fs::read_dir(path)?
+        .map(|entry| {
+            let entry = entry?;
+            Ok((entry.file_name(), entry.file_type()?, entry.path()))
+        })
+        .collect()
+}
+
 /// Now, as the clock of the file system `path` is on tells it, as coarsely
 /// as that file system keeps times: the change time of a file made beside
 /// it, and removed.
@@ -1063,13 +1077,10 @@ impl Store {
             return Ok(digest);
         }
         let mut entries = Vec::new();
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|name| {
+        for (name, kind, at) in listing(path)? {
+            let name = name.into_string().map_err(|name| {
                 io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
             })?;
-            let kind = entry.file_type()?;
-            let at = entry.path();
             entries.push(if kind.is_symlink() {
                 let target = fs::read_link(&at)?.to_string_lossy().into_owned();
                 TreeEntry::Link { name, target }
@@ -1151,12 +1162,10 @@ impl Store {
     /// [`Store::put_tree_seen`] of `path`, as `walk` has it.
     fn tree_seen(&self, path: &Path, walk: &mut Walk<'_>) -> io::Result<Option<Digest>> {
         let mut entries = Vec::new();
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name().into_string().map_err(|name| {
+        for (name, _, at) in listing(path)? {
+            let name = name.into_string().map_err(|name| {
                 io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
             })?;
-            let at = entry.path();
             if walk.left_out.contains(&at) {
                 continue;
             }
