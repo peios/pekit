@@ -63,8 +63,14 @@
 //! and so would be ignored by every program of every step, which a test
 //! suite of signals sees.
 //!
-//! The process's resource limits, such as how many files it may open, and
-//! its file-creation mask, `umask`, are still inherited, as from pekit.
+//! And they create files with the file-creation mask [`UMASK`], `022`,
+//! whatever pekit was started with ([`fixed_umask`]): a mode a step gives a
+//! file, as an archive it makes records, is part of what it made. pekit
+//! sets its own mask, since it can't set a child's alone, so that GCSL's
+//! file work for a step, which runs in pekit's process, has it too.
+//!
+//! The process's resource limits, such as how many files it may open, are
+//! still inherited, as from pekit.
 //!
 //! Each counts its temporary directories itself, so both are `Sync`: a
 //! step's effects run on a pool's threads.
@@ -77,6 +83,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Once};
 
+use rustix::fs::Mode;
 use signal_hook::consts::{FORBIDDEN, SIGPIPE};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -170,10 +177,34 @@ pub fn default_dispositions() {
     });
 }
 
-/// A command that runs bubblewrap, which [`default_dispositions`] has made
-/// sure starts with every signal's default disposition.
-fn bwrap_command() -> Result<Command, String> {
+/// The file-creation mask every program pekit starts has (see [What a
+/// program inherits](#what-a-program-inherits)).
+pub const UMASK: u32 = 0o022;
+
+/// Sets this process's file-creation mask to [`UMASK`], once, so that every
+/// program it starts after this, and every file it makes, has it, whatever
+/// mask pekit was started with (see [What a program
+/// inherits](#what-a-program-inherits)).
+pub fn fixed_umask() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        rustix::process::umask(Mode::from_raw_mode(UMASK));
+    });
+}
+
+/// Makes what every program pekit starts inherits of how pekit was
+/// started the same, however that was: default signal dispositions
+/// ([`default_dispositions`]) and the file-creation mask [`UMASK`]
+/// ([`fixed_umask`]). A build does this before it runs anything.
+pub fn steady_inheritance() {
     default_dispositions();
+    fixed_umask();
+}
+
+/// A command that runs bubblewrap, which [`steady_inheritance`] has made
+/// sure starts as every program pekit starts does.
+fn bwrap_command() -> Result<Command, String> {
+    steady_inheritance();
     Ok(Command::new(bwrap()?))
 }
 

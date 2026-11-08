@@ -28,8 +28,9 @@ ureq = "3"
 xattr = "1"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Walking a tree by descriptors, without `unsafe`: removing one deeper than
-# a process may open descriptors or a path may be long.
-rustix = { version = "1.1", features = ["fs"] }
+# a process may open descriptors or a path may be long. And setting the
+# file-creation mask every program pekit starts has.
+rustix = { version = "1.1", features = ["fs", "process"] }
 # Starting every program with default signal dispositions, without `unsafe`:
 # a signal caught, unlike one ignored, is reset by `exec`.
 signal-hook = "0.4"

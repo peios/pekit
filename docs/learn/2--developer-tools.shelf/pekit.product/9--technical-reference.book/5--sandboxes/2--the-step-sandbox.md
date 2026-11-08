@@ -102,12 +102,19 @@ reaching a step's programs:
   `exec` resets a caught signal to its default, and pekit itself still
   ignores the signal. `SIGILL`, `SIGFPE` and `SIGSEGV` can't be caught
   this way, so a pekit started with one of them ignored passes it on.
+- **The file-creation mask.** A program's `umask` is `022`
+  (`sandbox::UMASK`), whatever pekit was started with. The modes a step
+  gives its files are part of what it made, as an archive it makes
+  records them. pekit can't set a child's mask alone, so it sets its own
+  before a build runs anything (`fixed_umask`). GCSL's file work for a
+  step, which runs in pekit's process, gets the same mask, and so does
+  every other program pekit starts and every file it makes, a step's or
+  not.
 
 A program does inherit pekit's resource limits, such as `ulimit -n`, the
-number of files it can open, and its file-creation mask, `umask`. These
-can differ between a terminal and another launcher: an agent's shell can
-raise the open-file limit from 1,024 to 524,288. Neither is part of a
-step's key.
+number of files it can open. These can differ between a terminal and
+another launcher: an agent's shell can raise the open-file limit from
+1,024 to 524,288. They aren't part of a step's key.
 
 ## GCSL's own file work
 

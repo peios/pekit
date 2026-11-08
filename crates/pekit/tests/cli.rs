@@ -977,13 +977,13 @@ fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
 }
 
 #[test]
-fn a_step_inherits_neither_ignored_signals_nor_standard_input() {
+fn a_step_inherits_neither_ignored_signals_nor_standard_input_nor_the_umask() {
     let dir = tempfile::tempdir().unwrap();
     let probe = |name: &str, interactive: &str| {
         format!(
             "#[hermetic] fn {name}() -> File {{\n\
              \x20   let r = exec([\"sh\", \"-c\", \"( grep SigIgn /proc/self/status; \
-             readlink /proc/self/fd/0 ) > probe.txt\"]{interactive})\n\
+             readlink /proc/self/fd/0; umask ) > probe.txt\"]{interactive})\n\
              \x20   = working_dir().file(\"probe.txt\")\n\
              }}\n"
         )
@@ -1000,11 +1000,11 @@ fn a_step_inherits_neither_ignored_signals_nor_standard_input() {
     );
     let cache = tempfile::tempdir().unwrap();
     // Started as a shell's `&` starts it, ignoring `SIGINT` and `SIGQUIT`,
-    // its standard input a pipe.
+    // its standard input a pipe, and with a mask of its own.
     let built = Command::new("/bin/sh")
         .args([
             "-c",
-            "trap '' INT QUIT; exec \"$0\" build plain interactive",
+            "umask 077; trap '' INT QUIT; exec \"$0\" build plain interactive",
             env!("CARGO_BIN_EXE_pekit"),
         ])
         .current_dir(dir.path().join("app"))
@@ -1019,7 +1019,7 @@ fn a_step_inherits_neither_ignored_signals_nor_standard_input() {
         let probe = dir.path().join(format!("pekit-out/app/{step}/probe.txt"));
         assert_eq!(
             fs::read_to_string(probe).unwrap(),
-            "SigIgn:\t0000000000000000\n/dev/null\n",
+            "SigIgn:\t0000000000000000\n/dev/null\n0022\n",
             "{step}"
         );
     }

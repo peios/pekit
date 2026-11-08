@@ -626,6 +626,7 @@ fn build_roots(
     (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
     events: &mut dyn FnMut(&Event),
 ) -> Result<Outcomes, BuildError> {
+    crate::sandbox::steady_inheritance();
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
     run.finish_uploads()?;
