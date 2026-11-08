@@ -30,6 +30,9 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2-zli
 # Walking a tree by descriptors, without `unsafe`: removing one deeper than
 # a process may open descriptors or a path may be long.
 rustix = { version = "1.1", features = ["fs"] }
+# Starting every program with default signal dispositions, without `unsafe`:
+# a signal caught, unlike one ignored, is reset by `exec`.
+signal-hook = "0.4"
 # The remote cache (`design/additive.md`, F5).
 pekit-reapi = { path = "../pekit-reapi" }
 prost = "0.14"

@@ -4,7 +4,7 @@ mod cache;
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -974,4 +974,53 @@ fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
         "{:?}",
         printed(&odd)
     );
+}
+
+#[test]
+fn a_step_inherits_neither_ignored_signals_nor_standard_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = |name: &str, interactive: &str| {
+        format!(
+            "#[hermetic] fn {name}() -> File {{\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"( grep SigIgn /proc/self/status; \
+             readlink /proc/self/fd/0 ) > probe.txt\"]{interactive})\n\
+             \x20   = working_dir().file(\"probe.txt\")\n\
+             }}\n"
+        )
+    };
+    let file = format!(
+        "{}{}def build plain() {{ = probe() }}\n\
+         def build interactive() {{ = probe_interactive() }}\n",
+        probe("probe", ""),
+        probe("probe_interactive", ", interactive = true"),
+    );
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", &file)],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    // Started as a shell's `&` starts it, ignoring `SIGINT` and `SIGQUIT`,
+    // its standard input a pipe.
+    let built = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "trap '' INT QUIT; exec \"$0\" build plain interactive",
+            env!("CARGO_BIN_EXE_pekit"),
+        ])
+        .current_dir(dir.path().join("app"))
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env_remove("PEKIT_REMOTE_CACHE")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{:?}", printed(&built));
+    for step in ["plain/probe", "interactive/probe_interactive"] {
+        let probe = dir.path().join(format!("pekit-out/app/{step}/probe.txt"));
+        assert_eq!(
+            fs::read_to_string(probe).unwrap(),
+            "SigIgn:\t0000000000000000\n/dev/null\n",
+            "{step}"
+        );
+    }
 }
