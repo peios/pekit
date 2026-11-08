@@ -8,7 +8,8 @@
 #   packed for `^platform`'s architecture, as `ppk pack` makes it in a new,
 #   empty directory: a hermetic step, so the same files and version give
 #   the same directory, and a package whose files did not change is not
-#   packed again. Copying it into an artifact store, which ppk refuses for
+#   packed again. The step is given the ppk program alone, so it packs in a
+#   strict build too, with a static ppk. Copying it into an artifact store, which ppk refuses for
 #   a version whose content changed, is publishing, which is no step.
 #   The package's `ppk` field, if it has one, is its manifest's metadata:
 #   `description`, `homepage`, `license`, `license_class` and
@@ -39,18 +40,11 @@ type PpkToolchain = {root: Dir, runtime: Dir, ppk: File}
 enum Toolchain::Ppk<PpkToolchain>
 
 #[hermetic]
-def pack(
-    pkg: Package,
-    arch: String = this_arch(),
-    tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
-) -> Dir {
-    if tool.runtime.path != "/" {
-        panic("the ppk library runs ppk on the host's runtime alone, not `{tool.runtime.path}`")
-    }
+def pack(pkg: Package, arch: String = this_arch(), ppk: File = program()) -> Dir {
     let files = fs.compose_dir(pkg.files)
     let out = working_dir().dir("artifacts")
     let ran = exec([
-        tool.ppk.path,
+        ppk.path,
         "pack",
         "{pkg.name}@{pkg.version}?arch={arch}",
         files.path,
@@ -118,6 +112,17 @@ fn field_args(name: String, field: {key: String, *: *}) -> List<String> {
 
 type PpkPackage = {name: String, version: String, arch: String, artifacts: Dir}
 
+# The ppk program of the registered `Toolchain::Ppk`, which a step is given
+# alone. The toolchain's `runtime` is `/`, the host's, which a hermetic step
+# can't be given in a strict build, and a strict step sees nothing of the
+# host's: so a strict build needs a ppk that runs on its own, a static one.
+fn program(tool: PpkToolchain = toolchain.get(Toolchain::Ppk)) -> File {
+    if tool.runtime.path != "/" {
+        panic("the ppk library runs ppk on the host's runtime alone, not `{tool.runtime.path}`")
+    }
+    = tool.ppk
+}
+
 def packager() -> packaging.Packager {
     name = "ppk"
     pack = fn(pkg: Package) -> Dir { pack_of(pkg) }
@@ -137,11 +142,11 @@ def from_repository(
     name: String,
     version: String,
     arch: String = this_arch(),
-    tool: PpkToolchain = toolchain.get(Toolchain::Ppk),
+    ppk: File = program(),
 ) -> PpkPackage {
     let out = working_dir().dir("artifacts")
     let ran = exec([
-        tool.ppk.path,
+        ppk.path,
         "fetch",
         "--from",
         repo.path,
