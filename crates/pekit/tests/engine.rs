@@ -2,6 +2,7 @@
 //! found in the store again.
 
 mod building;
+mod skipping;
 mod support;
 
 use std::fs;
@@ -10,6 +11,7 @@ use std::path::Path;
 use pekit::events::{Event, EventKind};
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -398,7 +400,7 @@ fn a_step_s_result_names_only_its_own_files_or_those_it_was_given() {
 fn steps_run_commands_in_sandboxes_of_their_own_directories() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let text = "#[hermetic] fn inside(root: Dir, word: String) -> File {\n\
@@ -481,7 +483,7 @@ fn a_step_s_compositions_link_its_inputs_and_no_program_changes_them() {
 fn a_step_s_sandbox_is_an_overlay_read_upper_over_lower() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let text = "#[hermetic] fn inside(root: Dir) -> {made: File, bin: Dir, sub: Dir} {\n\
@@ -521,7 +523,7 @@ fn a_step_s_sandbox_is_an_overlay_read_upper_over_lower() {
 fn a_sandbox_of_what_the_step_changes_is_a_copy() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let text = "#[hermetic] fn inside(bb: File) -> File {\n\
@@ -789,7 +791,7 @@ fn with_no_toolchain_registered_a_step_compiles_with_the_host_s() {
         .output()
         .is_ok();
     if !has_cc {
-        eprintln!("skipped: no cc on this host");
+        skip("no cc on this host");
         return;
     }
     let text = "import toolchain\n\

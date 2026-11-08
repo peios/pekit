@@ -1,9 +1,13 @@
 //! Tests of `pekit lock` and of the lock every command reads, with a git
 //! repository of libraries of the test's own.
 
+mod skipping;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -108,7 +112,7 @@ fn has_git() -> bool {
 #[test]
 fn lock_pins_every_library_imported_and_every_command_puts_one_back() {
     if !has_git() {
-        eprintln!("skipped: no `git`");
+        skip("no `git`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -175,7 +179,7 @@ fn lock_pins_every_library_imported_and_every_command_puts_one_back() {
 #[test]
 fn a_strict_build_fails_on_libraries_the_lock_does_not_pin() {
     if !has_git() {
-        eprintln!("skipped: no `git`");
+        skip("no `git`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

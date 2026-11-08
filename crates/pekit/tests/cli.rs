@@ -1,10 +1,13 @@
 //! Tests of the `pekit` command, run as someone runs it.
 
 mod cache;
+mod skipping;
 
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -926,7 +929,7 @@ fn a_target_lists_the_workspace_without_the_build_s_outputs() {
 #[test]
 fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
     if !Path::new("/dev/kvm").exists() {
-        eprintln!("skipped: no `/dev/kvm`");
+        skip("no `/dev/kvm`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

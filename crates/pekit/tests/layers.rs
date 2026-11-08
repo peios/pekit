@@ -1,6 +1,8 @@
 //! Tests of a step's compositions and overlay sandboxes, through its
 //! sandbox's effect context.
 
+mod skipping;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -9,6 +11,8 @@ use gcsl::eval::Effects;
 use pekit::record::Kept;
 use pekit::sandbox::{GROUP, PASSWD, StepSandbox};
 use pekit::store::Store;
+
+use skipping::skip;
 
 /// A temporary directory removed, sealed directories and all, when it is
 /// dropped, even by a test that fails: an overlay's work directory, which
@@ -35,7 +39,7 @@ fn run_in(sandbox: &StepSandbox, root: &str, script: &str) -> bool {
 fn a_sandbox_of_a_staged_directory_is_an_overlay_read_upper_over_lower() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let dir = Scratch(tempfile::tempdir().unwrap());
@@ -100,7 +104,7 @@ fn output_in(sandbox: &StepSandbox, root: &str, script: &str) -> String {
 fn a_sandbox_has_the_step_s_user_database_unless_its_root_has_its_own() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let dir = Scratch(tempfile::tempdir().unwrap());
@@ -322,7 +326,7 @@ fn a_composition_mounts_a_large_tree_and_a_sandbox_of_it_nests_an_overlay() {
     use std::os::unix::fs::MetadataExt;
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let dir = Scratch(tempfile::tempdir().unwrap());

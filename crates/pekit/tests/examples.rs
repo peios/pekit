@@ -3,6 +3,7 @@
 //! with Bootlin's pinned ones.
 
 mod building;
+mod skipping;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,10 +15,19 @@ use pekit::exposure::Exposing;
 use pekit::store::Store;
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 
 /// The repository's root.
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// The Peios workspace, whose repositories beside pekit's and whose
+/// downloads under `local` the examples take: `$PEKIT_TEST_WORKSPACE`,
+/// else the directory this repository is in, which a worktree elsewhere
+/// isn't in.
+fn workspace() -> PathBuf {
+    std::env::var_os("PEKIT_TEST_WORKSPACE").map_or_else(|| repository().join(".."), PathBuf::from)
 }
 
 /// Copies the tree at `from` to `to`, its files' contents alone, but a
@@ -48,7 +58,7 @@ const PUBLISHED: [&str; 5] = ["buildenv", "clang", "gcc", "python", "rust"];
 fn libraries(to: &Path) {
     copy_tree(&repository().join("gcslib"), to);
     let clones = std::env::var_os("PEKIT_TEST_GCSLIB")
-        .map_or_else(|| repository().join("../gcslib"), PathBuf::from);
+        .map_or_else(|| workspace().join("gcslib"), PathBuf::from);
     for name in PUBLISHED {
         let from = clones.join(name);
         assert!(
@@ -250,7 +260,7 @@ fn configure_make_gives_every_file_of_a_source_one_time() {
 #[test]
 fn example_4_builds_zlib_with_its_own_build_system_and_the_host_s_tools() {
     let Some(state) = seeded(&["zlib-1.3.1.tar.gz"]) else {
-        eprintln!("skipped: zlib's source is not on this machine");
+        skip("zlib's source is not on this machine");
         return;
     };
     let dir = example(4, HOST);
@@ -294,7 +304,7 @@ fn ppk_tool() -> Option<PathBuf> {
 #[test]
 fn example_5_packs_two_packages_and_repacks_what_a_change_reaches() {
     let Some(tool) = ppk_tool() else {
-        eprintln!("skipped: no `ppk` on PATH");
+        skip("no `ppk` on PATH");
         return;
     };
     let dir = example(5, PPK);
@@ -339,7 +349,7 @@ fn example_5_packs_two_packages_and_repacks_what_a_change_reaches() {
 #[test]
 fn example_5_s_packages_are_packed_and_published_by_their_packager() {
     let Some(tool) = ppk_tool() else {
-        eprintln!("skipped: no `ppk` on PATH");
+        skip("no `ppk` on PATH");
         return;
     };
     let dir = example(5, PPK);
@@ -392,7 +402,7 @@ fn example_5_s_packages_are_packed_and_published_by_their_packager() {
 /// its closing brace.
 fn example_5_with_ppk(ppk: &str) -> Option<tempfile::TempDir> {
     let Some(tool) = ppk_tool() else {
-        eprintln!("skipped: no `ppk` on PATH");
+        skip("no `ppk` on PATH");
         return None;
     };
     let dir = example(5, PPK);
@@ -667,7 +677,7 @@ const DOWNLOADS: [(&str, &str); 8] = [
 /// workspace's `local/pekit2-data`.
 fn downloads() -> PathBuf {
     std::env::var_os("PEKIT_TEST_DOWNLOADS")
-        .map_or_else(|| repository().join("../local/pekit2-data"), PathBuf::from)
+        .map_or_else(|| workspace().join("local/pekit2-data"), PathBuf::from)
 }
 
 /// A new state directory whose store holds the files of [`DOWNLOADS`]
@@ -769,7 +779,7 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
     // downloaded.
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) = seeded(&names) else {
-        eprintln!("skipped: what the builds fetch is not on this machine");
+        skip("what the builds fetch is not on this machine");
         return;
     };
     let bootlin = "toolchains.bootlin.com";
@@ -840,7 +850,7 @@ fn the_examples_build_with_bootlin_s_pinned_toolchains() {
 fn the_pinned_toolchains_build_strictly_with_nothing_of_the_host() {
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) = seeded(&names) else {
-        eprintln!("skipped: what the builds fetch is not on this machine");
+        skip("what the builds fetch is not on this machine");
         return;
     };
     let strict = Options {
@@ -1004,8 +1014,8 @@ fn image_host() -> bool {
 #[ignore = "opt-in, as it takes about six minutes: `tools/check --all`, or `cargo test --test \
             examples -- --ignored`"]
 fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
-    let sources = ["ppk", "peiso", "peiosutils", "prelude"]
-        .map(|name| (name, repository().join("..").join(name)));
+    let sources =
+        ["ppk", "peiso", "peiosutils", "prelude"].map(|name| (name, workspace().join(name)));
     let packages = downloads().join("peios-repository");
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
@@ -1016,9 +1026,7 @@ fn example_10_boots_an_iso_of_packages_from_a_repository_and_built_here() {
             .iter()
             .all(|(_, source)| source.join("Cargo.lock").is_file());
     let Some(state) = seeded(&names).filter(|_| ready) else {
-        eprintln!(
-            "skipped: example 10's host tools, its repository, Rust or a source are not here"
-        );
+        skip("example 10's host tools, its repository, Rust or a source are not here");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -1217,7 +1225,7 @@ fn the_rust_library_builds_with_crates_from_a_git_repository() {
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) = seeded(&names).filter(|_| rust.len() > 4) else {
-        eprintln!("skipped: Rust or the crates are not on this machine");
+        skip("Rust or the crates are not on this machine");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -1250,7 +1258,7 @@ fn a_git_crate_is_given_what_it_reads_beside_its_directory() {
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) = seeded(&names).filter(|_| rust.len() > 4) else {
-        eprintln!("skipped: Rust or the crates are not on this machine");
+        skip("Rust or the crates are not on this machine");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -1362,13 +1370,13 @@ fn committed(source: &Path, into: &Path) {
 
 #[test]
 fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
-    let source = repository().join("../ppk");
+    let source = workspace().join("ppk");
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) =
         seeded(&names).filter(|_| rust.len() > 4 && source.join("Cargo.lock").is_file())
     else {
-        eprintln!("skipped: Rust, the crates or ppk's source are not on this machine");
+        skip("Rust, the crates or ppk's source are not on this machine");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -1427,13 +1435,13 @@ fn the_rust_library_builds_ppk_from_its_source_and_its_lock() {
 
 #[test]
 fn the_rust_library_builds_ppk_one_crate_at_a_time() {
-    let source = repository().join("../ppk");
+    let source = workspace().join("ppk");
     let rust = rust_downloads();
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let Some(state) =
         seeded(&names).filter(|_| rust.len() > 4 && source.join("Cargo.lock").is_file())
     else {
-        eprintln!("skipped: Rust, the crates or ppk's source are not on this machine");
+        skip("Rust, the crates or ppk's source are not on this machine");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
@@ -1565,7 +1573,7 @@ fn the_modsig_library_signs_after_the_build_with_a_key_of_the_keychain_s() {
     let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
     let crates_here = rust.iter().any(|path| path.ends_with("ml-dsa-0.1.2.crate"));
     let Some(state) = seeded(&names).filter(|_| crates_here) else {
-        eprintln!("skipped: Rust or the crates of modsig's tool are not on this machine");
+        skip("Rust or the crates of modsig's tool are not on this machine");
         return;
     };
     let store = Store::open(&state.path().join("store")).unwrap();
