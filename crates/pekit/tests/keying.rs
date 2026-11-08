@@ -325,3 +325,48 @@ fn the_workspace_sets_only_contexts_declared_and_not_pekit_s_own() {
     let error = build_in(dir.path(), state.path(), "both").unwrap_err();
     assert!(error.contains("mismatched types"), "{error}");
 }
+
+/// A `pekitconf` that configures the keychain, without importing its
+/// module.
+const KEYCHAIN: &str =
+    "pekitconf = {keychain = [{profile = \"dev\"; name = \"signing\"; file = \"key\"}]}\n";
+
+#[test]
+fn the_workspace_sets_no_field_pekit_does_not_read() {
+    let state = tempfile::tempdir().unwrap();
+    for (conf, expected) in [
+        // A field of a pekit older or newer than this one is refused, not
+        // ignored, where it is in the record.
+        (
+            "pekitconf = {contexts = {flavour = \"sweet\"}; context = {}}\n",
+            "`pekitconf.context` in `workspace.gcsl` is no field pekit reads: it reads \
+             `toolchains`, `keychain`, `packagers`, `contexts`",
+        ),
+        (
+            "pekitconf = {mirrors = [\"https://example.org\"]}\n",
+            "`pekitconf.mirrors` in `workspace.gcsl` is no field pekit reads",
+        ),
+        (
+            "pekitconf = 1\n",
+            "`pekitconf` in `workspace.gcsl` must be a record of the fields pekit reads: \
+             `toolchains`, `keychain`, `packagers`, `contexts`",
+        ),
+        // A field pekit reads, but whose context no file declares, would be
+        // ignored as surely.
+        (
+            KEYCHAIN,
+            "`pekitconf.keychain` in `workspace.gcsl` sets `context keychain_keys`, which \
+             nothing loaded declares: `import keychain` declares it",
+        ),
+    ] {
+        let dir = library_workspace(conf);
+        let error = build_in(dir.path(), state.path(), "both").unwrap_err();
+        assert!(error.contains(expected), "{conf}: {error}");
+    }
+    // With its module imported, the same field is read.
+    let dir = library_workspace(&format!("import keychain\n{KEYCHAIN}"));
+    build_in(dir.path(), state.path(), "both").unwrap();
+    // A workspace with no `pekitconf` sets nothing.
+    let dir = library_workspace("# nothing\n");
+    build_in(dir.path(), state.path(), "both").unwrap();
+}

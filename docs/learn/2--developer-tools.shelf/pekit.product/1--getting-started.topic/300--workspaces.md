@@ -104,12 +104,17 @@ Each field is optional:
   each one for every target it builds. See [Setting a Context for the
   Whole Workspace](~pekit/setting-a-context-for-the-workspace).
 
-pekit reads `toolchains`, `keychain`, and `packagers` only when the
-workspace imports the module the setting belongs to: `toolchain` for
-`toolchains`, `keychain` for `keychain`, and `packaging` for `packagers`. A
-library's `import` of the module counts, so importing the gcc library is
-enough for `toolchains`. Each name in `contexts` must be a context that
-some file of the workspace declares.
+`toolchains`, `keychain`, and `packagers` each need the module the setting
+belongs to: `toolchain` for `toolchains`, `keychain` for `keychain`, and
+`packaging` for `packagers`. A library's `import` of the module counts, so
+importing the gcc library is enough for `toolchains`. Each name in
+`contexts` must be a context that some file of the workspace declares.
+
+pekit refuses a `pekitconf` it can't read whole, rather than build without
+part of it. It stops before building anything if `pekitconf` has a field
+not in this list, such as one that an older or newer pekit reads, or sets
+`toolchains`, `keychain`, or `packagers` without the module that declares
+it. The error names the field and the fields pekit reads.
 
 ## Files pekit adds
 
