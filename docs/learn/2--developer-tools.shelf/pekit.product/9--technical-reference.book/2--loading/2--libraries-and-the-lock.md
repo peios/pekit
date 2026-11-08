@@ -60,8 +60,12 @@ transitively:
 
 Each pin that changed is reported. Each library the lock pinned that
 nothing imports any more is dropped, and its directory under
-`.gcsl/libraries/` removed. The lock is written with its libraries sorted
-by path.
+`.gcsl/libraries/` removed. A library's directory can be inside another
+library's, as `example.org/sdk/tools` is inside `example.org/sdk`. A
+dropped library's directory that is inside a library still pinned is that
+library's, so it stays. A library still pinned whose directory was inside
+the one removed is exported again. The lock is written with its libraries
+sorted by path.
 
 A library is exported with `git archive` of the commit's directory, into
 `.gcsl/libraries/<path>/`, replacing what was there. Repositories are bare

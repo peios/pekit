@@ -227,7 +227,8 @@ pub struct Locked {
 /// lock](#the-lock)): each imported and not pinned, or each, if `update`
 /// says so, fetched and pinned at its source's revision, and each pinned and
 /// no longer imported unpinned, its directory, which the lock put there,
-/// removed.
+/// removed, unless it is in a library still pinned, whose own it then is.
+/// A library still pinned in a directory removed is put back.
 ///
 /// # Errors
 ///
@@ -282,10 +283,20 @@ pub fn lock(
         pins.push(pin);
     }
     for old in &lock.libraries {
-        if !seen.contains(&old.path) {
-            let dir = root.join(LIBRARIES_DIR).join(&old.path);
-            remove_tree(&dir).map_err(|error| io_error(&dir, &error))?;
-            locked.dropped.push(old.path.clone());
+        if seen.contains(&old.path) {
+            continue;
+        }
+        locked.dropped.push(old.path.clone());
+        // A library's directory may be in another's, as `a/b`'s is in
+        // `a`'s: then it is the other's, exported above, and stays. One in
+        // its directory goes with it, and is put back.
+        if pins.iter().any(|pin| inside(&old.path, &pin.path)) {
+            continue;
+        }
+        let dir = root.join(LIBRARIES_DIR).join(&old.path);
+        remove_tree(&dir).map_err(|error| io_error(&dir, &error))?;
+        for pin in pins.iter().filter(|pin| inside(&pin.path, &old.path)) {
+            export(root, cache, pin)?;
         }
     }
     pins.sort_by(|a, b| a.path.cmp(&b.path));
@@ -397,6 +408,13 @@ fn library_imports(dir: &Path) -> Result<Vec<String>, LockError> {
         imports.extend(gcsl::workspace::library_imports(&source));
     }
     Ok(imports)
+}
+
+/// Whether the library `path`'s directory is in the library `outer`'s, as
+/// `a/b`'s is in `a`'s.
+fn inside(path: &str, outer: &str) -> bool {
+    path.strip_prefix(outer)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// The digest of the tree of the library `path` as exported under the
