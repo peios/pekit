@@ -26,6 +26,9 @@ downloads anything.
 - **Host tools.** A static `busybox` at `/usr/bin/busybox`, `git`, `cc`,
   `ppk` on `PATH`, and `/dev/kvm`. The ISO test also needs QEMU, OVMF,
   `xorriso`, `mkfs.vfat` and mtools.
+- **Room for temporary files.** The examples unpack toolchains into
+  temporary directories, several gigabytes at once. If `/tmp` is a small
+  or shared memory-backed filesystem, set `TMPDIR` to a directory on disk.
 - **A user who can't read every file.** One test checks what happens when
   a file can't be read, which it can't arrange as root.
 - **The Peios workspace.** The examples take the gcslib libraries from
