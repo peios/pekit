@@ -13,9 +13,12 @@
 #   The package's `ppk` field, if it has one, is its manifest's metadata:
 #   `description`, `homepage`, `license`, `license_class` and
 #   `source_license`, each a string, and `dependencies`, `requires`,
-#   `provides` and `claims`, each a record of strings, given to `ppk pack`
-#   as its options of those names, `--depends` for `dependencies`. Any
-#   other field in `ppk` is an error naming it.
+#   `provides`, `claims` and `descriptors`, each a record of strings, given
+#   to `ppk pack` as its options of those names, `--depends` for
+#   `dependencies` and `--descriptor` for `descriptors`. Any other field in
+#   `ppk` is an error naming it. A file's signature is no field: it is a
+#   file beside the one it signs, `<file>.peios.sig`, placed in `files`
+#   like any other, which `ppk pack` records and does not pack.
 # - `packager()`: ppk as a `packaging.Packager`, for a workspace to list in
 #   `pekitconf.packagers`: its `pack` is `pack`, and its `publish` copies a
 #   packed package into an artifact directory with `ppk fetch`, which
@@ -68,12 +71,19 @@ let SINGLE_FIELDS = ["description", "homepage", "license", "license_class", "sou
 
 # The fields of a package's `ppk` that are tables, each entry given to
 # `ppk pack` as `table_option(field)`, the entry's key and its value.
-let TABLE_FIELDS = ["claims", "dependencies", "provides", "requires"]
+let TABLE_FIELDS = ["claims", "dependencies", "descriptors", "provides", "requires"]
 
 # The `ppk pack` option of a table field: `--depends` for `dependencies`,
-# and the field's own name for the others.
+# `--descriptor` for `descriptors`, which gives each path its security
+# descriptor in hexadecimal, and the field's own name for the others.
 fn table_option(field: String) -> String {
-    if field == "dependencies" { = "--depends" } else { = "--{field}" }
+    if field == "dependencies" {
+        = "--depends"
+    } else if field == "descriptors" {
+        = "--descriptor"
+    } else {
+        = "--{field}"
+    }
 }
 
 # The `ppk pack` options that give `pkg`'s manifest the metadata in its
