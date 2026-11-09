@@ -4,6 +4,7 @@
 mod skipping;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -82,6 +83,16 @@ fn repository_and_workspace(dir: &Path) {
 /// `pekit` run with `args` in `dir`, its cache and state in `cache`, and
 /// `$GCSL_LIBRARY_PATH` as `library_path` says.
 fn pekit(dir: &Path, cache: &Path, args: &[&str], library_path: Option<&str>) -> Output {
+    let mut command = pekit_command(dir, cache, args);
+    match library_path {
+        Some(path) => command.env("GCSL_LIBRARY_PATH", path),
+        None => command.env_remove("GCSL_LIBRARY_PATH"),
+    };
+    command.output().unwrap()
+}
+
+/// `pekit` with `args` to run in `dir`, its cache and state in `cache`.
+fn pekit_command(dir: &Path, cache: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pekit"));
     command
         .args(args)
@@ -90,11 +101,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str], library_path: Option<&str>) ->
         .env("PEKIT_STATE_DIR", cache.join("state"))
         .env("XDG_RUNTIME_DIR", cache.join("run"))
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    match library_path {
-        Some(path) => command.env("GCSL_LIBRARY_PATH", path),
-        None => command.env_remove("GCSL_LIBRARY_PATH"),
-    };
-    command.output().unwrap()
+    command
 }
 
 /// What `output` printed on its standard output and standard error.
@@ -175,6 +182,63 @@ fn lock_pins_every_library_imported_and_every_command_puts_one_back() {
          dropped example.org/libs/util, no longer imported\n"
     );
     assert!(!libraries.join("greet").exists());
+}
+
+/// A directory in `dir` holding a `git` that runs the `git` on `$PATH`,
+/// except that after an archive it writes 1 MiB more of zeroed padding:
+/// more than a pipe holds, so that it is still writing when a reader
+/// stopped at the end of the archive.
+fn padding_git(dir: &Path) -> PathBuf {
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|git| git.is_file())
+        .unwrap();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\n\
+             for arg do\n\
+             \tif [ \"$arg\" = archive ]; then\n\
+             \t\t'{0}' \"$@\" || exit\n\
+             \t\texec head -c 1048576 /dev/zero\n\
+             \tfi\n\
+             done\n\
+             exec '{0}' \"$@\"\n",
+            real.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[test]
+fn lock_reads_what_git_writes_after_the_end_of_an_archive() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    repository_and_workspace(dir.path());
+    let ws = dir.path().join("ws");
+    let cache = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(padding_git(dir.path()))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let locked = pekit_command(&ws, cache.path(), &["lock"])
+        .env("PATH", path)
+        .env_remove("GCSL_LIBRARY_PATH")
+        .output()
+        .unwrap();
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    let libraries = ws.join(".gcsl/libraries/example.org/libs");
+    assert!(libraries.join("greet/greet.gcsl").is_file());
+    assert!(libraries.join("util/util.gcsl").is_file());
 }
 
 #[test]
