@@ -15,6 +15,7 @@ pub mod evict;
 pub mod exposure;
 pub mod fetch;
 pub mod gcsl_profile;
+pub mod git_export;
 pub mod git_fetch;
 pub mod host;
 pub mod keychain;

@@ -39,10 +39,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use crate::git_export::{self, ExportError};
 use crate::layers::remove_tree;
 use crate::store::{Digest, Store};
 
@@ -521,39 +522,19 @@ fn export(root: &Path, cache: &Path, pin: &Pinned) -> Result<(), LockError> {
         remove_tree(&temp).map_err(|error| io_error(&temp, &error))?;
     }
     fs::create_dir_all(&temp).map_err(|error| io_error(&temp, &error))?;
-    let mut archive = Command::new("git");
-    archive
-        .arg("--git-dir")
-        .arg(&repo)
-        .args(["archive", "--format=tar", &tree])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = archive
-        .spawn()
-        .map_err(|error| LockError::Git(format!("cannot run `git archive`: {error}")))?;
-    let unpacked = child
-        .stdout
-        .take()
-        .ok_or_else(|| LockError::Git("`git archive` gave no output".to_owned()))
-        .and_then(|out| {
-            tar::Archive::new(out)
-                .unpack(&temp)
-                .map_err(|error| io_error(&temp, &error))
+    let exported = git_export::export(
+        Command::new("git")
+            .arg("--git-dir")
+            .arg(&repo)
+            .args(["archive", "--format=tar", &tree]),
+        &temp,
+    );
+    if let Err(error) = exported {
+        let _ = remove_tree(&temp);
+        return Err(match error {
+            ExportError::Unpack(error) => io_error(&temp, &error),
+            error => LockError::Git(format!("`git archive {tree}` of `{}` {error}", pin.git)),
         });
-    let finished = child
-        .wait_with_output()
-        .map_err(|error| LockError::Git(format!("cannot run `git archive`: {error}")))?;
-    if !finished.status.success() {
-        let _ = remove_tree(&temp);
-        return Err(LockError::Git(format!(
-            "`git archive {tree}` of `{}` failed: {}",
-            pin.git,
-            String::from_utf8_lossy(&finished.stderr).trim()
-        )));
-    }
-    if let Err(error) = unpacked {
-        let _ = remove_tree(&temp);
-        return Err(error);
     }
     if dir.exists() {
         remove_tree(&dir).map_err(|error| io_error(&dir, &error))?;
