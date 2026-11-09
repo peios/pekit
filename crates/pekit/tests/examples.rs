@@ -39,7 +39,9 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// The gcslib libraries published each in a repository of its own.
-const PUBLISHED: [&str; 6] = ["buildenv", "clang", "gcc", "modsig", "python", "rust"];
+const PUBLISHED: [&str; 7] = [
+    "buildenv", "clang", "gcc", "modsig", "pipsig", "python", "rust",
+];
 
 /// Copies every gcslib library to `to`, a directory of libraries, each at
 /// its path: those not yet published from this repository's `gcslib`, and
@@ -1641,4 +1643,129 @@ fn the_modsig_library_signs_after_the_build_with_a_key_of_the_keychain_s() {
     let failed = build_in(dir.path(), state.path(), "signed").unwrap_err();
     let printed = format!("{failed:?}");
     assert!(printed.contains("no secret `module-signing`"), "{printed}");
+}
+
+/// A workspace with the Rust toolchains, whose keychain's `tcb-signing` key
+/// is the test key, and whose `example/signed` signs the firmware of
+/// `example/tree`, the pipsig library's fixture tree.
+fn pipsig_workspace(dir: &Path) {
+    libraries(&dir.join(".gcsl/libraries"));
+    let fixtures = repository().join("tests/fixtures/pipsig");
+    fs::create_dir_all(dir.join("keys")).unwrap();
+    fs::copy(fixtures.join("test-key.pem"), dir.join("keys/test.pem")).unwrap();
+    fs::write(
+        dir.join("workspace.gcsl"),
+        RUST.replace(
+            "rust_1_98]}",
+            "rust_1_98]; keychain = [\
+             {profile = \"dev\"; name = \"tcb-signing\"; file = \"keys/test.pem\"}]}",
+        ),
+    )
+    .unwrap();
+    // copy_tree copies a link's file, so the link is made again.
+    let tree = dir.join("example/tree");
+    copy_tree(&fixtures.join("tree"), &tree);
+    let alias = tree.join("usr/lib/firmware/alias.bin.zst");
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink("vendor/a.bin.zst", &alias).unwrap();
+    fs::write(
+        dir.join("example/build.gcsl"),
+        "import \"github.com/gcslib/pipsig\"\n\
+         def build signed() { = pipsig.sign(dir(\"tree\"), take = [\"usr/lib/firmware/**\"]) }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "opt-in, as it takes about fifteen minutes: `tools/check --all`, or `cargo test \
+            --test examples -- --ignored`"]
+fn the_pipsig_library_signs_files_after_the_build_with_a_key_of_the_keychain_s() {
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let crates_here = rust.iter().any(|path| path.ends_with("sha2-0.11.1.crate"));
+    let Some(state) = seeded(&names).filter(|_| crates_here) else {
+        eprintln!("skipped: Rust or the crates of pipsig's tool are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    pipsig_workspace(dir.path());
+    let built = build_in(dir.path(), state.path(), "signed").unwrap();
+    let tree = signed_tree(dir.path(), &built.value);
+
+    // The signatures the old pekit made of the tree with the test key.
+    let old = repository().join("tests/fixtures/pipsig/old-pekit");
+    let signatures: Vec<_> = tree
+        .iter()
+        .filter(|(path, _)| path.to_string_lossy().ends_with(".peios.sig"))
+        .collect();
+    assert_eq!(signatures.len(), 4, "{tree:?}");
+    for (path, signature) in signatures {
+        assert_eq!(signature, &fs::read(old.join(path)).unwrap(), "{path:?}");
+    }
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let out = built_file(dir.path(), path);
+    let (alias, licence) = (
+        out.join("usr/lib/firmware/alias.bin.zst"),
+        out.join("usr/share/licenses/vendor/LICENCE"),
+    );
+    assert!(alias.is_symlink());
+    for unsigned in [alias, licence] {
+        let mut signature = unsigned.into_os_string();
+        signature.push(".peios.sig");
+        assert!(!Path::new(&signature).exists());
+    }
+
+    // Built again, nothing runs: it is kept under the key's identity.
+    let again = build_in(dir.path(), state.path(), "signed").unwrap();
+    assert_eq!(again.ran, 0);
+
+    // Neither the store nor what a build exposes holds the key.
+    let key = fs::read_to_string(dir.path().join("keys/test.pem")).unwrap();
+    let line = key.lines().nth(1).unwrap();
+    assert!(!anywhere(&state.path().join("store"), line));
+    assert!(!anywhere(&dir.path().join("pekit-out"), line));
+
+    // Run again, it gives what it gave; and on a machine with a keychain
+    // key of its own it runs again, and gives the same bytes.
+    let check = Options {
+        reuse: pekit::engine::Reuse::Compare,
+        ..Options::default()
+    };
+    let (checked, _) = observed_with(dir.path(), state.path(), "signed", check);
+    checked.unwrap();
+    fs::remove_file(state.path().join("state/keychain-key")).unwrap();
+    let other = build_in(dir.path(), state.path(), "signed").unwrap();
+    assert_eq!(other.ran, 1, "only the signing step");
+    assert_eq!(signed_tree(dir.path(), &other.value), tree);
+
+    // Strictly, with nothing of the host: the same bytes.
+    let strict = Options {
+        strict: true,
+        ..Options::default()
+    };
+    let (strictly, _) = observed_with(dir.path(), state.path(), "signed", strict);
+    assert_eq!(signed_tree(dir.path(), &strictly.unwrap().value), tree);
+
+    // A file that can't be signed fails with the reason, in the step.
+    let elf = dir.path().join("example/tree/usr/lib/firmware/prog");
+    fs::write(&elf, "\x7fELF program").unwrap();
+    let failed = build_in(dir.path(), state.path(), "signed").unwrap_err();
+    let printed = format!("{failed:?}");
+    assert!(
+        printed.contains("usr/lib/firmware/prog: an ELF file, which carries its signature"),
+        "{printed}"
+    );
+    fs::remove_file(elf).unwrap();
+
+    // With no key, the build says so, by the secret's name.
+    fs::write(dir.path().join("workspace.gcsl"), RUST).unwrap();
+    let failed = build_in(dir.path(), state.path(), "signed").unwrap_err();
+    let printed = format!("{failed:?}");
+    assert!(printed.contains("no secret `tcb-signing`"), "{printed}");
 }
