@@ -229,3 +229,85 @@ fn a_strict_build_fails_on_libraries_the_lock_does_not_pin() {
     let built = pekit(&ws, cache.path(), &["build", "hi"], None);
     assert!(built.status.success(), "{:?}", shown(&built));
 }
+
+#[test]
+fn a_library_dropped_leaves_the_libraries_its_directory_is_in_or_holds() {
+    if !has_git() {
+        eprintln!("skipped: no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    write(
+        &repo,
+        &[
+            ("libs/sdk/sdk.gcsl", "def name() -> String { \"sdk\" }\n"),
+            (
+                "libs/sdk/tools/tools.gcsl",
+                "def tool() -> String { \"tool\" }\n",
+            ),
+        ],
+    );
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let lock = format!(
+        "{{\"sources\": [{{\"prefix\": \"example.org/libs\", \"git\": \"{}\", \"dir\": \
+         \"libs\", \"rev\": \"main\"}}]}}\n",
+        repo.display()
+    );
+    let ws = dir.path().join("ws");
+    let both = "import \"example.org/libs/sdk\"\n\
+                import \"example.org/libs/sdk/tools\"\n\
+                def build hi() { = \"{sdk.name()} {tools.tool()}\" }\n";
+    write(
+        &ws,
+        &[
+            ("workspace.gcsl", ""),
+            ("app/build.gcsl", both),
+            ("pekit.lock", &lock),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let locked = pekit(&ws, cache.path(), &["lock"], None);
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    let sdk = ws.join(".gcsl/libraries/example.org/libs/sdk");
+    assert!(sdk.join("tools/tools.gcsl").is_file());
+    // The library inside another dropped: its directory is the other's.
+    write(
+        &ws,
+        &[(
+            "app/build.gcsl",
+            "import \"example.org/libs/sdk\"\n\
+             def build hi() { = sdk.name() }\n",
+        )],
+    );
+    let dropped = pekit(&ws, cache.path(), &["lock"], None);
+    assert_eq!(
+        shown(&dropped).0,
+        "dropped example.org/libs/sdk/tools, no longer imported\n"
+    );
+    assert!(sdk.join("tools/tools.gcsl").is_file());
+    let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(built.status.success(), "{:?}", shown(&built));
+    // The library holding another dropped: the other stays.
+    write(&ws, &[("app/build.gcsl", both)]);
+    assert!(pekit(&ws, cache.path(), &["lock"], None).status.success());
+    write(
+        &ws,
+        &[(
+            "app/build.gcsl",
+            "import \"example.org/libs/sdk/tools\"\n\
+             def build hi() { = tools.tool() }\n",
+        )],
+    );
+    let dropped = pekit(&ws, cache.path(), &["lock"], None);
+    assert_eq!(
+        shown(&dropped).0,
+        "dropped example.org/libs/sdk, no longer imported\n"
+    );
+    assert!(sdk.join("tools/tools.gcsl").is_file());
+    assert!(!sdk.join("sdk.gcsl").exists());
+    let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(built.status.success(), "{:?}", shown(&built));
+}
