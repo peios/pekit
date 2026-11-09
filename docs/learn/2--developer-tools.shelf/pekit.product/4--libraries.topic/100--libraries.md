@@ -87,11 +87,12 @@ pekit:
 | `github.com/gcslib/go` | Go programs, one package at a time. See [Building Go](~pekit/building-go). |
 | `github.com/gcslib/clang` | A pinned libclang, for tools such as bindgen. |
 | `github.com/gcslib/modsig` | Linux kernel modules signed with a key of the keychain. See [Signing Kernel Modules](~pekit/signing-kernel-modules). |
+| `github.com/gcslib/pipsig` | Firmware, and other files that aren't ELF, signed for the Peios kernel with a key of the keychain. See [Signing Firmware](~pekit/signing-firmware). |
 | `github.com/gcslib/ppk` | Peios packages. See [Packaging](~pekit/packaging). |
 | `github.com/gcslib/peiso` | Bootable Peios images. See [Building and Booting an Image](~pekit/building-an-image). |
 | `github.com/gcslib/qemu` | Programs and tests that boot an image in QEMU. |
 
-The first seven are in repositories of their own, which `pekit lock` finds
+The first eight are in repositories of their own, which `pekit lock` finds
 by their paths. ppk, peiso and qemu are in pekit's own repository, under
 `gcslib/`. To pin them, give their paths a source in `pekit.lock`, as
 [Pinning Libraries](~pekit/pinning-libraries#take-libraries-from-elsewhere)
