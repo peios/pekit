@@ -1483,6 +1483,136 @@ fn the_rust_library_plans_without_nested_checkouts_and_builds_c_plus_plus() {
     assert_eq!(changed.ran, 0);
 }
 
+#[test]
+fn the_rust_library_builds_and_tests_with_cargo_s_profiles() {
+    let Some(state) = seeded_for_rust() else {
+        eprintln!("skipped: Rust or the crates are not on this machine");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    cargo_workspace(
+        dir.path(),
+        "fn planned(profile: String, whole: Bool = false, profile_env: List<Entry<String>> = []) ->> rust.RustWorkspace {\n\
+         \x20   = rust.workspace(dir(\"ws\"), rust.vendored(file(\"ws/Cargo.lock\")), profile = profile, whole = whole, profile_env = profile_env)\n\
+         }\n\
+         def build dev() { = rust.bin(planned(\"dev\"), \"app\") }\n\
+         def build quick() { = rust.bin(planned(\"quick\"), \"app\") }\n\
+         def build release() { = rust.bin(planned(\"release\"), \"app\") }\n\
+         def build whole() { = rust.bin(planned(\"dev\", whole = true), \"app\") }\n\
+         def build no_debug() { = rust.bin(planned(\"dev\", profile_env = [{key = \"CARGO_PROFILE_DEV_DEBUG\"; value = \"false\"}]), \"app\") }\n\
+         def build tested() {\n\
+         \x20   let ws = planned(\"dev\")\n\
+         \x20   = for each in [...rust.tests(ws, \"app\"), ...rust.benches(ws, \"app\")] { = each.name }\n\
+         }\n\
+         def build ran() {\n\
+         \x20   let ws = planned(\"dev\")\n\
+         \x20   = for each in [...rust.tests(ws, \"app\"), ...rust.benches(ws, \"app\")] { = rust.run_test(each) }\n\
+         }\n",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n\n\
+                 [profile.dev]\ndebug = \"line-tables-only\"\n\n\
+                 [profile.quick]\ninherits = \"release\"\nlto = false\ncodegen-units = 16\nincremental = true\n",
+            ),
+            (
+                "Cargo.lock",
+                "version = 4\n\n\
+                 [[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\n \"shared\",\n]\n\n\
+                 [[package]]\nname = \"other\"\nversion = \"0.1.0\"\ndependencies = [\n \"shared\",\n]\n\n\
+                 [[package]]\nname = \"shared\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "crates/shared/Cargo.toml",
+                "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [features]\nextra = []\n",
+            ),
+            (
+                "crates/shared/src/lib.rs",
+                "pub fn extra() -> bool { cfg!(feature = \"extra\") }\n",
+            ),
+            // Another member turns `extra` on, which only planning the
+            // whole workspace gives `app`.
+            (
+                "crates/other/Cargo.toml",
+                "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\nshared = { path = \"../shared\", features = [\"extra\"] }\n",
+            ),
+            ("crates/other/src/lib.rs", ""),
+            (
+                "crates/app/Cargo.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\nshared = { path = \"../shared\" }\n\n\
+                 [[bench]]\nname = \"timing\"\nharness = false\n",
+            ),
+            (
+                "crates/app/build.rs",
+                "fn main() {\n\
+                 \x20   println!(\"cargo:rustc-env=SEEN_PROFILE={}\", std::env::var(\"PROFILE\").unwrap());\n\
+                 \x20   println!(\"cargo:rustc-env=SEEN_DEBUG={}\", std::env::var(\"DEBUG\").unwrap());\n\
+                 }\n",
+            ),
+            (
+                "crates/app/src/main.rs",
+                "fn main() {\n\
+                 \x20   println!(\"{} {} {} {}\", env!(\"SEEN_PROFILE\"), env!(\"SEEN_DEBUG\"), cfg!(debug_assertions), shared::extra());\n\
+                 }\n",
+            ),
+            (
+                "crates/app/examples/helper.rs",
+                "fn main() { println!(\"helper\"); }\n",
+            ),
+            // A test that runs an example, found from its own path, as in
+            // Cargo's target directory.
+            (
+                "crates/app/tests/spawn.rs",
+                "#[test]\nfn runs_its_example() {\n\
+                 \x20   let exe = std::env::current_exe().unwrap();\n\
+                 \x20   let helper = exe.parent().unwrap().parent().unwrap().join(\"examples/helper\");\n\
+                 \x20   let out = std::process::Command::new(&helper).output().unwrap();\n\
+                 \x20   assert_eq!(String::from_utf8_lossy(&out.stdout), \"helper\\n\");\n\
+                 }\n",
+            ),
+            (
+                "crates/app/benches/timing.rs",
+                "fn main() { println!(\"timed\"); }\n",
+            ),
+        ],
+    );
+    let says = |name: &str| {
+        let built = build_in(dir.path(), state.path(), name).unwrap();
+        let program = built_file(dir.path(), file_of(&built.value, None));
+        let ran = Command::new(&program).output().unwrap();
+        assert!(ran.status.success(), "{name}: {ran:?}");
+        String::from_utf8_lossy(&ran.stdout).into_owned()
+    };
+    // `dev` and its `debug = "line-tables-only"`: line tables, and `DEBUG`.
+    assert_eq!(says("dev"), "debug true true false\n");
+    // `quick` inherits from `release`, as `PROFILE` says.
+    assert_eq!(says("quick"), "release false false false\n");
+    assert_eq!(says("release"), "release false false false\n");
+    // The whole workspace's features, as `cargo build --workspace` has them.
+    assert_eq!(says("whole"), "debug true true true\n");
+    // `CARGO_PROFILE_DEV_DEBUG`, as the environment Cargo runs in sets it.
+    assert_eq!(says("no_debug"), "debug false true false\n");
+    // `cargo test`'s programs and `cargo test --benches`'s, each run with
+    // the package's examples beside it.
+    let tested = build_in(dir.path(), state.path(), "tested").unwrap();
+    let Plain::List(names) = &tested.value else {
+        panic!("not a list: {:?}", tested.value);
+    };
+    let mut names: Vec<&str> = names
+        .iter()
+        .map(|name| match name {
+            Plain::Str(name) => name.as_str(),
+            other => panic!("not a name: {other:?}"),
+        })
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["app", "spawn", "timing"]);
+    build_in(dir.path(), state.path(), "ran").unwrap();
+}
+
 const RUST: &str = "import * from \"github.com/gcslib/gcc\"\n\
                     import * from \"github.com/gcslib/rust\"\n\
                     import Toolchain from toolchain\n\
