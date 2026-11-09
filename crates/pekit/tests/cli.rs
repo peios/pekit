@@ -43,6 +43,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PEKIT_CACHE_DIR", cache)
         .env("PEKIT_STATE_DIR", cache.join("state"))
+        .env("XDG_RUNTIME_DIR", cache.join("run"))
         // A remote cache only where a test names one.
         .env_remove("PEKIT_REMOTE_CACHE")
         .env_remove("PEKIT_REMOTE_INSTANCE")
@@ -281,6 +282,7 @@ fn a_library_s_steps_key_the_same_wherever_the_library_is_found() {
         .current_dir(dir.path())
         .env("PEKIT_CACHE_DIR", cache.path())
         .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
         .env("GCSL_LIBRARY_PATH", elsewhere.path())
         .output()
         .unwrap();

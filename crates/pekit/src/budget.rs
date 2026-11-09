@@ -155,11 +155,10 @@ impl Limits {
         };
         match key {
             "jobs" => {
-                self.jobs = value
-                    .parse()
-                    .ok()
-                    .filter(|&jobs| jobs > 0)
-                    .ok_or_else(|| format!("`{value}` is no number of jobs: write one above 0"))?;
+                self.jobs =
+                    value.parse().ok().filter(|&jobs| jobs > 0).ok_or_else(|| {
+                        format!("`{value}` is no number of jobs: write one above 0")
+                    })?;
             }
             "memory" => self.memory = size()?,
             "unseen" => self.unseen = size()?,
@@ -287,7 +286,6 @@ impl Budget {
         (peaks, meter): (&Path, Option<PathBuf>),
     ) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        crate::meter::remove_stale_fifos(dir);
         Ok(Self {
             dir: dir.to_path_buf(),
             limits,

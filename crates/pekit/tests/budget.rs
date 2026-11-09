@@ -30,8 +30,8 @@ fn budget(dir: &Path, jobs: usize, units: u64) -> Budget {
 
 /// The most programs that held `budgets` at once, `programs` of them, each
 /// on a thread of its own, its budget the next of `budgets` in turn,
-/// expected to use `bytes` and holding it for `hold`.
-fn most_at_once(budgets: &[Arc<Budget>], programs: usize, bytes: u64, hold: Duration) -> usize {
+/// expected to use `bytes` and holding it for `holding`.
+fn most_at_once(budgets: &[Arc<Budget>], programs: usize, bytes: u64, holding: Duration) -> usize {
     let (now, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let start = Arc::new(Barrier::new(programs));
     let threads: Vec<_> = (0..programs)
@@ -43,7 +43,7 @@ fn most_at_once(budgets: &[Arc<Budget>], programs: usize, bytes: u64, hold: Dura
                 let held = budget.admit(bytes);
                 let running = now.fetch_add(1, Ordering::SeqCst) + 1;
                 most.fetch_max(running, Ordering::SeqCst);
-                thread::sleep(hold);
+                thread::sleep(holding);
                 now.fetch_sub(1, Ordering::SeqCst);
                 drop(held);
             })
@@ -80,7 +80,10 @@ fn the_machines_configuration_sets_limits_and_the_environment_overrides_it() {
             unseen: 2 << 30,
         }
     );
-    let vars = [("PEKIT_MACHINE_JOBS", "2"), ("PEKIT_MACHINE_MEMORY", "1GiB")];
+    let vars = [
+        ("PEKIT_MACHINE_JOBS", "2"),
+        ("PEKIT_MACHINE_MEMORY", "1GiB"),
+    ];
     let limits = Limits::of_machine(&env(&vars), Some(file), (8, 32 << 30)).unwrap();
     assert_eq!(
         limits,
@@ -96,14 +99,23 @@ fn the_machines_configuration_sets_limits_and_the_environment_overrides_it() {
 fn a_limit_that_says_nothing_is_an_error() {
     let machine = (8, 32 << 30);
     let error = Limits::of_machine(&env(&[]), Some("jobs = 0\n"), machine).unwrap_err();
-    assert!(error.contains("line 1") && error.contains("number of jobs"), "{error}");
+    assert!(
+        error.contains("line 1") && error.contains("number of jobs"),
+        "{error}"
+    );
     let error = Limits::of_machine(&env(&[]), Some("\ncores = 4\n"), machine).unwrap_err();
-    assert!(error.contains("line 2") && error.contains("`cores`"), "{error}");
+    assert!(
+        error.contains("line 2") && error.contains("`cores`"),
+        "{error}"
+    );
     let error = Limits::of_machine(&env(&[]), Some("jobs\n"), machine).unwrap_err();
     assert!(error.contains("KEY = VALUE"), "{error}");
     let vars = [("PEKIT_MACHINE_MEMORY", "lots")];
     let error = Limits::of_machine(&env(&vars), None, machine).unwrap_err();
-    assert!(error.contains("PEKIT_MACHINE_MEMORY") && error.contains("no size"), "{error}");
+    assert!(
+        error.contains("PEKIT_MACHINE_MEMORY") && error.contains("no size"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -218,7 +230,10 @@ fn a_jobserver_borrows_only_free_jobs_and_none_while_a_program_waits() {
     };
     let began = Instant::now();
     while !budget.others_wait().unwrap() {
-        assert!(began.elapsed() < Duration::from_secs(5), "it was never seen");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "it was never seen"
+        );
         thread::sleep(Duration::from_millis(5));
     }
     drop(lent);

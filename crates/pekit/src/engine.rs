@@ -65,6 +65,7 @@ use gcsl::workspace::graph::{PreparedCall, RootField, RootWrap};
 use gcsl::workspace::{Given, InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
+use crate::budget::Budget;
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, evict};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
@@ -73,6 +74,7 @@ use crate::git_fetch;
 use crate::keychain::{self, Keychain};
 use crate::layers::remove_tree;
 use crate::load::Loaded;
+use crate::meter::Metered;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::pool::{Done, Pool, Ran, Work};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
@@ -280,6 +282,10 @@ pub struct Settings {
     /// to it; both only where steps are taken from the store
     /// ([`Reuse::Store`]).
     pub remote: Option<Arc<Remote>>,
+    /// The machine's budget, if programs wait for it (see [The
+    /// budget](crate::budget#the-budget)): none if this build's pool alone
+    /// bounds them.
+    pub budget: Option<Arc<Budget>>,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -1910,11 +1916,16 @@ impl Run<'_> {
             Some(work) => Ok(Some(work)),
             None => self.own_work(&job, step, span),
         });
+        // A step's program waits for the machine's budget; the target's own,
+        // which run one at a time, do not.
+        let metered = step
+            .and_then(|of| self.steps.get(&of))
+            .and_then(|run| run.sandbox.metered().cloned());
         let work = match own {
             Ok(Some(work)) => work,
             Ok(None) => match program {
                 Some((sandbox, work)) => Work::Program(job, sandbox, work),
-                None => Work::Effect(job, effects),
+                None => Work::Effect(job, effects, metered),
             },
             Err(BuildError::Engine(message)) => {
                 self.finish_now(id, Err(Diagnostic::error(message, span)));
@@ -2772,8 +2783,13 @@ impl Run<'_> {
         if made.is_err() {
             let _ = remove_tree(&stage);
         }
+        let metered = self.settings.budget.as_ref().map(|budget| Metered {
+            budget: Arc::clone(budget),
+            step: self.step_name(id),
+        });
         Ok(Arc::new(
             made?
+                .with_metered(metered)
                 .with_host(&self.settings.host_tools)
                 .with_secrets(staging.secrets.to_vec())
                 .with_devices(staging.devices.to_vec())
@@ -3451,6 +3467,12 @@ impl Run<'_> {
     fn finished_effect(&mut self, ran: Ran) {
         let node = ran.node;
         let of = self.in_flight.get(&node).and_then(|running| running.of);
+        // A step's time waiting for the machine's budget is none of its own,
+        // as its staging is not.
+        if let Some(step) = of.and_then(|step| self.steps.get_mut(&step)) {
+            step.started += ran.queued;
+            step.deadline = step.deadline.map(|deadline| deadline + ran.queued);
+        }
         let mut fold = None;
         if let Some(mut running) = self.in_flight.remove(&node) {
             fold = running.fold.take();

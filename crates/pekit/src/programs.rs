@@ -32,14 +32,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gcsl::eval::graph::EffectJob;
 use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
+use crate::budget::Held;
 use crate::engine::Reuse;
 use crate::layers::{remove_tree, unkeepable};
+use crate::pool::admit;
 use crate::receipt::{ExecOf, exec_key};
 use crate::record::{ExecRecord, Kept, stored};
 use crate::sandbox::StepSandbox;
@@ -69,6 +71,8 @@ pub struct ProgramRan {
     /// The digests of its step's writable trees after it, or `None` if its
     /// step's programs can no longer be found or recorded.
     pub writable: Option<(Digest, Digest)>,
+    /// How long it waited for the machine's budget before it ran.
+    pub queued: Duration,
 }
 
 /// The digest a store's file or directory is kept by.
@@ -89,11 +93,20 @@ pub fn perform_program(
     work: &ProgramWork,
     deadline: Option<Instant>,
 ) -> (Result<Plain, Diagnostic>, ProgramRan) {
+    // A program that runs waits for the machine's budget first, its
+    // deadline put off by as long.
+    let run = |sandbox: &StepSandbox| {
+        let held = admit(job, sandbox.metered());
+        let queued = held.as_ref().map_or(Duration::ZERO, Held::waited);
+        let outcome = job.run(sandbox, deadline.map(|deadline| deadline + queued));
+        (outcome, queued)
+    };
     let plainly = |sandbox: &StepSandbox| {
-        let outcome = job.run(sandbox, deadline);
+        let (outcome, queued) = run(sandbox);
         let ran = ProgramRan {
             found: false,
             writable: None,
+            queued,
         };
         (outcome, ran)
     };
@@ -127,6 +140,7 @@ pub fn perform_program(
                 let ran = ProgramRan {
                     found: true,
                     writable: Some((found.own, found.tmp)),
+                    queued: Duration::ZERO,
                 };
                 return (Ok(result), ran);
             }
@@ -135,14 +149,17 @@ pub fn perform_program(
                 let ran = ProgramRan {
                     found: false,
                     writable: None,
+                    queued: Duration::ZERO,
                 };
                 return (Err(Diagnostic::error(message, work.span)), ran);
             }
         }
     }
     let began = Instant::now();
-    let outcome = job.run(sandbox, deadline);
-    let duration_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (outcome, queued) = run(sandbox);
+    // Its cost is its run's, not its wait's.
+    let duration = began.elapsed().saturating_sub(queued);
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
     // What it wrote is hashed again whether it ran well or not.
     let after = captured(sandbox, &work.store);
     if let (Ok(plain), Some((own, tmp)), false) = (&outcome, after, work.reuse == Reuse::Compare)
@@ -162,6 +179,7 @@ pub fn perform_program(
     let ran = ProgramRan {
         found: false,
         writable: after,
+        queued,
     };
     (outcome, ran)
 }

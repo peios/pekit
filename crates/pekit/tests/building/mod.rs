@@ -74,6 +74,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         profile_gcsl: false,
         exposing: Exposing::AsNeeded,
         remote: None,
+        budget: None,
     }
 }
 

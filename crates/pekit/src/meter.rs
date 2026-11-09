@@ -142,7 +142,10 @@ pub fn offer_jobserver(wrapped: &mut Command, fifo: &Path, env: &[(String, Optio
     wrapped.arg("--bind").arg(fifo).arg(JOBSERVER);
     let flags = format!("--jobserver-auth=fifo:{JOBSERVER}");
     for name in ["MAKEFLAGS", "CARGO_MAKEFLAGS"] {
-        if !env.iter().any(|(set, value)| set == name && value.is_some()) {
+        if !env
+            .iter()
+            .any(|(set, value)| set == name && value.is_some())
+        {
             wrapped.args(["--setenv", name, &flags]);
         }
     }
@@ -254,7 +257,10 @@ pub fn meter(args: impl Iterator<Item = OsString>) -> ExitCode {
         let peak = u64::try_from(usage.max_rss()).unwrap_or_default() * 1024;
         let _ = keep_peak(&told.peaks, (&told.step, &told.program), peak);
     }
-    let code = match (status.code(), std::os::unix::process::ExitStatusExt::signal(&status)) {
+    let code = match (
+        status.code(),
+        std::os::unix::process::ExitStatusExt::signal(&status),
+    ) {
         (Some(code), _) => code,
         (None, Some(signal)) => 128 + signal,
         (None, None) => 1,

@@ -48,7 +48,9 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
 
+use crate::budget::{Budget, DEFAULT_UNSEEN, Limits, budget_dir, machine_memory};
 use crate::evict::limit_of;
+use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
     target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
@@ -1479,6 +1481,13 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             return None;
         }
     };
+    let budget = match machine_budget(&cache) {
+        Ok(budget) => budget,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return None;
+        }
+    };
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
     let strict = shared.allows.strict;
@@ -1542,7 +1551,52 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         profile_gcsl: shared.gcsl_profile.is_some(),
         exposing: Exposing::AsNeeded,
         remote,
+        budget: Some(budget),
     })
+}
+
+/// The machine's budget a build's programs wait for, of the limits the
+/// environment and the machine's configuration, `machine.conf` in the
+/// configuration directory, say (see [The budget](crate::budget#the-budget)),
+/// each program of a step metered by this program.
+///
+/// # Errors
+///
+/// That the configuration cannot be read or sets what is no limit, or the
+/// budget's directory cannot be made.
+fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
+    let var = |name: &str| std::env::var(name).ok();
+    let config = config_dir().join("machine.conf");
+    let file = match std::fs::read_to_string(&config) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("cannot read `{}`: {error}", config.display())),
+    };
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    // A machine that does not say gets a program of a kind never metered
+    // for each job.
+    let ram = machine_memory().unwrap_or(cores as u64 * DEFAULT_UNSEEN / 3 * 4);
+    let limits = Limits::of_machine(&var, file.as_deref(), (cores, ram)).map_err(|message| {
+        if file.is_some() {
+            format!(
+                "{message}; the machine's configuration is `{}`",
+                config.display()
+            )
+        } else {
+            message
+        }
+    })?;
+    let dir = budget_dir(&var, cache);
+    let peaks = state_dir().join("peaks");
+    let budget =
+        Budget::open(&dir, limits, (&peaks, std::env::current_exe().ok())).map_err(|error| {
+            format!(
+                "cannot open the machine's budget in `{}`: {error}",
+                dir.display()
+            )
+        })?;
+    remove_stale_fifos(&dir);
+    Ok(Arc::new(budget))
 }
 
 /// Builds `targets` of `loaded`'s workspace with `settings`, or does with
@@ -1711,6 +1765,16 @@ fn cache_dir() -> PathBuf {
     }
     let home = var("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     home.join(".cache/pekit")
+}
+
+/// The configuration directory (see [Commands](#commands)).
+fn config_dir() -> PathBuf {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if let Some(dir) = var("XDG_CONFIG_HOME") {
+        return PathBuf::from(dir).join("pekit");
+    }
+    let home = var("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    home.join(".config/pekit")
 }
 
 /// The state directory (see [Commands](#commands)).
