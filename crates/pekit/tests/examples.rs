@@ -575,6 +575,7 @@ fn a_ppk_field_ppk_has_no_form_for_is_an_error_naming_it() {
         .current_dir(dir.path())
         .env("PEKIT_CACHE_DIR", cache.path())
         .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
         .output()
         .unwrap();
     assert!(!ran.status.success());
@@ -594,6 +595,7 @@ fn a_workspace_with_no_packager_packs_nothing() {
         .current_dir(dir.path())
         .env("PEKIT_CACHE_DIR", cache.path())
         .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
         .output()
         .unwrap();
     assert!(!ran.status.success());
@@ -1000,6 +1002,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> (String, bool) {
         .current_dir(dir)
         .env("PEKIT_CACHE_DIR", cache)
         .env("PEKIT_STATE_DIR", cache.join("state"))
+        .env("XDG_RUNTIME_DIR", cache.join("run"))
         .output()
         .unwrap();
     (String::from_utf8(ran.stdout).unwrap(), ran.status.success())

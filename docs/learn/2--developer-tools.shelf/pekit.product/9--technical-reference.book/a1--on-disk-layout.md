@@ -8,7 +8,10 @@ description: Every file and directory pekit reads or writes, in the
 This appendix collects every path pekit uses. `CACHE` is the cache
 directory, `$PEKIT_CACHE_DIR`, `$XDG_CACHE_HOME/pekit`, or
 `~/.cache/pekit`. `STATE` is the state directory, `$PEKIT_STATE_DIR`,
-`$XDG_STATE_HOME/pekit`, or `~/.local/state/pekit`.
+`$XDG_STATE_HOME/pekit`, or `~/.local/state/pekit`. `CONFIG` is the
+configuration directory: `$XDG_CONFIG_HOME/pekit`, else `~/.config/pekit`.
+`BUDGET` is the machine's budget's directory: `$XDG_RUNTIME_DIR/pekit/budget`,
+else `CACHE/budget`.
 
 ## In the workspace
 
@@ -49,6 +52,7 @@ directory, `$PEKIT_CACHE_DIR`, `$XDG_CACHE_HOME/pekit`, or
 | `seen/<digest>.json` | The stamps of a workspace's files, by a digest of its root's path. |
 | `git/` | Bare clones of the repositories `fetch_git` fetched from. |
 | `scratch/<digest>` | A step's scratch directory, with `<digest>.lock` and `<digest>.size`. |
+| `claims/<base>` | The lock file of the claim on a step, by its base receipt. |
 | `usage/` | A journal of what each build used. |
 | `eviction.json` | Each record's eviction priority, and what was evicted. |
 | `size`, `size.lock` | The ledger of the blobs' size, and its lock. |
@@ -59,6 +63,18 @@ directory, `$PEKIT_CACHE_DIR`, `$XDG_CACHE_HOME/pekit`, or
 | Path | Holds |
 |---|---|
 | `STATE/keychain-key` | The machine's 32-byte key that secrets' identities are hashed with, mode `0600`. |
+| `STATE/peaks/<digest>`, `STATE/peaks/kind-<digest>` | The last peaks of a step's program, and of its kind's. |
+
+## The machine's budget
+
+| Path | Holds |
+|---|---|
+| `CONFIG/machine.conf` | The budget's limits, `jobs`, `memory`, and `unseen`. Written by the user. |
+| `BUDGET/job-<n>`, `BUDGET/memory-<n>` | The lock files of the budget's jobs and units of memory. |
+| `BUDGET/waiting`, `BUDGET/gate` | The lock files a waiting program holds. |
+| `BUDGET/fifo-<pid>-<n>` | A running program's jobserver. |
+
+[The Machine's Budget](~pekit/the-machines-budget) says what each is.
 
 ## In a step's sandbox
 

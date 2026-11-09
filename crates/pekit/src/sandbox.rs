@@ -95,6 +95,7 @@ use crate::layers::{Layers, MOUNT_FILES, Mount, Overlay};
 use crate::record::Kept;
 use crate::keychain::{IN_A_STEP, Keychain};
 use crate::load::Libraries;
+use crate::meter::{Metered, offer_jobserver};
 use crate::scratch::SCRATCH;
 use crate::store::{Digest, Seen, Store};
 
@@ -301,10 +302,13 @@ fn name_user(wrapped: &mut Command, env: &[(String, Option<String>)]) {
 /// bubblewrap, never one inside another, which a host such as Ubuntu
 /// forbids. A hermetic one runs as the step's user, `users` the directory
 /// of its user database's `etc` (see [The step's users](#the-steps-users)).
+/// One offered a jobserver at `fifo` sees it (see
+/// [Jobservers](crate::meter#jobservers)).
 fn sandboxed(
     root: &Root,
     command: &Command,
     (isolation, devices, scratch, users): (Isolation, &[PathBuf], Option<&Path>, Option<&Path>),
+    fifo: Option<&Path>,
 ) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
     let mut wrapped = bwrap_command()?;
@@ -362,6 +366,9 @@ fn sandboxed(
     wrapped.arg("--clearenv");
     if isolation == Isolation::Hermetic {
         name_user(&mut wrapped, &env);
+    }
+    if let Some(fifo) = fifo {
+        offer_jobserver(&mut wrapped, fifo, &env);
     }
     for (name, value) in env {
         if let Some(value) = value {
@@ -494,6 +501,7 @@ impl Effects for HostView {
                 &Root::Dir(root),
                 &command,
                 (Isolation::Plain, &[], None, None),
+                None,
             )
         }))
     }
@@ -598,6 +606,9 @@ pub struct StepSandbox {
     /// Why staging a context's files failed, if it did: what its next
     /// program fails with, since a read can't.
     unstaged: Mutex<Option<String>>,
+    /// How its programs are metered, if the build has a budget (see
+    /// [Metering](crate::meter#metering)).
+    metered: Option<Metered>,
 }
 
 /// What a context gives a step once it reads it: the files and directories
@@ -652,7 +663,32 @@ impl StepSandbox {
             staged: Mutex::new(Vec::new()),
             seen: Mutex::new(Seen::default()),
             unstaged: Mutex::new(None),
+            metered: None,
         })
+    }
+
+    /// The sandbox whose programs are metered as `metered` says, if it says
+    /// anything (see [Metering](crate::meter#metering)).
+    #[must_use]
+    pub fn with_metered(mut self, metered: Option<Metered>) -> Self {
+        self.metered = metered;
+        self
+    }
+
+    /// How its programs are metered, if they are.
+    #[must_use]
+    pub fn metered(&self) -> Option<&Metered> {
+        self.metered.as_ref()
+    }
+
+    /// `wrapped`, the bubblewrap of a program whose words are `words`, run
+    /// under the meter, its jobserver at `fifo`, if it is metered (see
+    /// [Metering](crate::meter#metering)): else as it is.
+    fn metering(&self, wrapped: Command, words: &[String], fifo: Option<&Path>) -> Command {
+        match (&self.metered, fifo, words.first()) {
+            (Some(metered), Some(fifo), Some(program)) => metered.wrap(&wrapped, program, fifo),
+            _ => wrapped,
+        }
     }
 
     /// The sandbox given the secret files `secrets`, each its path as the
@@ -928,9 +964,13 @@ impl Effects for StepSandbox {
         }
         wrapped.args(["--chdir", cwd.as_deref().unwrap_or(&self.own)]);
         // Only what its `exec` sets, its user's name and the host tools'
-        // `PATH` where it sets none.
+        // `PATH` where it sets none, and a jobserver where it is metered.
         wrapped.arg("--clearenv");
         name_user(&mut wrapped, &env);
+        let fifo = self.metered.as_ref().and_then(Metered::fifo);
+        if let Some(fifo) = &fifo {
+            offer_jobserver(&mut wrapped, fifo, &env);
+        }
         let mut has_path = false;
         for (name, value) in env {
             if let Some(value) = value {
@@ -946,8 +986,9 @@ impl Effects for StepSandbox {
         if let Some(path) = std::env::var_os("PATH") {
             wrapped.env("PATH", path);
         }
+        let mut wrapped = self.metering(wrapped, &words, fifo.as_deref());
         // Nothing of how pekit was started (see [What a program
-        // inherits](#what-a-program-inherits)).
+        // inherits](#what-a-program-inherits)), the meter included.
         wrapped.stdin(Stdio::null());
         Ok(wrapped)
     }
@@ -961,16 +1002,22 @@ impl Effects for StepSandbox {
             },
         };
         let users = self.stage.join("users");
-        Some(sandboxed(
-            &root,
-            &command,
-            (
-                Isolation::Hermetic,
-                &self.devices,
-                self.scratch.as_deref(),
-                Some(&users),
-            ),
-        ))
+        let fifo = self.metered.as_ref().and_then(Metered::fifo);
+        let words = parts(&command).0;
+        Some(
+            sandboxed(
+                &root,
+                &command,
+                (
+                    Isolation::Hermetic,
+                    &self.devices,
+                    self.scratch.as_deref(),
+                    Some(&users),
+                ),
+                fifo.as_deref(),
+            )
+            .map(|wrapped| self.metering(wrapped, &words, fifo.as_deref())),
+        )
     }
 
     fn place_file(&self, source: &Path, target: &Path) -> io::Result<()> {

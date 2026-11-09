@@ -859,6 +859,7 @@ dependencies = [
  "gcsl",
  "gcsl-disk",
  "liblzma",
+ "nix",
  "pekit-reapi",
  "prost",
  "rustix",

@@ -3,9 +3,12 @@
 //! # The pool
 //!
 //! GCSL evaluates on one thread; what a build runs in parallel is its
-//! effects (see `design/engine.md`, E1). The pool has a fixed number of
-//! threads, `--jobs`, each taking the next [`Work`] from one queue: an
-//! effect of a unit to run under its effect context, until its deadline, or
+//! effects (see `design/engine.md`, E1). The pool has `--jobs` threads, each
+//! taking the next effect of a unit to run under its effect context, until
+//! its deadline, a program of a step waiting for the machine's budget first
+//! ([The budget](crate::budget#the-budget)); and as many again, each taking
+//! the next of the rest of its [`Work`], which no program waiting for the
+//! budget holds up:
 //! a `fetch` to answer from the store or the network ([Fetching](crate::fetch#fetching)),
 //! or a target's read of an output to answer from the store
 //! ([Exposure](crate::exposure#exposure)), or the engine's own work for a
@@ -21,18 +24,23 @@
 //! ([`crate::programs`]).
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use gcsl::check::Builtin;
 use gcsl::eval::Effects;
 use gcsl::eval::graph::{EffectJob, NodeId};
 use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
+use crate::budget::{Held, program_name};
+use crate::claims::claim;
 use crate::exposure::{OutputRead, read_output};
+use crate::meter::Metered;
 use crate::fetch::{fetch, fetched_path};
 use crate::git_fetch::{fetch_git, git_path};
 use crate::programs::{ProgramRan, ProgramWork, perform_program};
@@ -45,8 +53,9 @@ use crate::unpack::{unpack, unpack_key, unpacked_path};
 
 /// What a thread of the pool does (see [The pool](#the-pool)).
 pub enum Work {
-    /// Runs an effect under its effect context.
-    Effect(EffectJob, Arc<dyn Effects + Send + Sync>),
+    /// Runs an effect under its effect context, a program of a step waiting
+    /// for the machine's budget first if its step is metered.
+    Effect(EffectJob, Arc<dyn Effects + Send + Sync>, Option<Metered>),
     /// Finds or runs a program of a step in its sandbox (see [A program's
     /// work](crate::programs#a-programs-work)).
     Program(EffectJob, Arc<StepSandbox>, ProgramWork),
@@ -161,10 +170,12 @@ pub struct Ran {
     pub node: NodeId,
     /// The thread that did it, from 0.
     pub worker: usize,
-    /// When it began.
+    /// When it began, once it had waited for the machine's budget.
     pub began: Instant,
     /// When it ended.
     pub ended: Instant,
+    /// How long it waited for the machine's budget before it began.
+    pub queued: Duration,
     /// What it came to.
     pub outcome: Result<Plain, Diagnostic>,
     /// The files it kept in the store, each by its path as GCSL code names
@@ -191,6 +202,9 @@ pub enum Done {
     /// The records were written to the remote cache ([`Work::Upload`]), or
     /// why they could not be.
     Uploaded(Result<(), String>),
+    /// The claim on a step another build held, held now ([`Pool::claim`]),
+    /// or why it could not be.
+    Claimed(Result<File, String>),
 }
 
 /// One job: a node's work, until its deadline.
@@ -198,8 +212,12 @@ type Job = (NodeId, Work, Option<Instant>);
 
 /// The pool (see [The pool](#the-pool)).
 pub struct Pool {
-    /// Where jobs go.
-    jobs: Sender<Job>,
+    /// Where effects and programs go.
+    programs: Sender<Job>,
+    /// Where the engine's own work goes.
+    own: Sender<Job>,
+    /// Where what they came to is sent.
+    report: Sender<Ran>,
     /// Where what they came to comes back.
     done: Receiver<Ran>,
 }
@@ -207,14 +225,85 @@ pub struct Pool {
 /// What a job came to: its outcome, what it kept, and what else.
 type Performed = (Result<Plain, Diagnostic>, Vec<(String, Kept)>, Done);
 
-/// Does `work`, until `deadline`: what it came to.
-fn perform(work: Work, deadline: Option<Instant>) -> Performed {
+/// What the program `job` runs, by its file name, if it is one that waits
+/// for the machine's budget: a program of `exec`, or of a sandbox's, that
+/// does not have the terminal.
+fn program_of(job: &EffectJob) -> Option<&str> {
+    fn field<'a>(plain: &'a Plain, name: &str) -> Option<&'a Plain> {
+        match plain {
+            Plain::Record(fields) => fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+    let (argv, options) = match job.builtin() {
+        Builtin::Exec | Builtin::ExecLive | Builtin::ExecSecret => {
+            (job.args().first()?, job.args().get(1)?)
+        }
+        Builtin::SandboxExec => {
+            let request = job.args().get(1)?;
+            (field(request, "argv")?, request)
+        }
+        _ => return None,
+    };
+    if matches!(field(options, "interactive"), Some(Plain::Bool(true))) {
+        return None;
+    }
+    let Plain::List(words) = argv else {
+        return None;
+    };
+    // A secret program is metered under no name of its own.
+    Some(match words.first()? {
+        Plain::Str(program) => program_name(program),
+        _ => "program",
+    })
+}
+
+/// What the program `job` runs, of the step `metered` says, holds of the
+/// machine's budget once it may run, waiting for it: nothing if it is no
+/// program that waits (see [The budget](crate::budget#the-budget)).
+#[must_use]
+pub fn admit<'a>(job: &EffectJob, metered: Option<&'a Metered>) -> Option<Held<'a>> {
+    let metered = metered?;
+    let program = program_of(job)?;
+    let budget = &metered.budget;
+    Some(budget.admit(budget.estimate(&metered.step, program)))
+}
+
+/// Does `work`, until `deadline`: what it came to, and how long it waited
+/// for the machine's budget first.
+fn perform(work: Work, deadline: Option<Instant>) -> (Performed, Duration) {
     match work {
-        Work::Effect(job, effects) => (job.run(&*effects, deadline), Vec::new(), Done::Effect),
+        Work::Effect(job, effects, metered) => {
+            let held = admit(&job, metered.as_ref());
+            let queued = held.as_ref().map_or(Duration::ZERO, Held::waited);
+            let deadline = deadline.map(|deadline| deadline + queued);
+            let outcome = job.run(&*effects, deadline);
+            drop(held);
+            ((outcome, Vec::new(), Done::Effect), queued)
+        }
         Work::Program(job, sandbox, work) => {
             let (outcome, ran) = perform_program(&job, &sandbox, &work, deadline);
-            (outcome, Vec::new(), Done::Program(ran))
+            ((outcome, Vec::new(), Done::Program(ran)), ran.queued)
         }
+        own => (perform_own(own), Duration::ZERO),
+    }
+}
+
+/// Does `work`, the engine's own, or a fetch's, an unpacking's or a read's:
+/// what it came to.
+fn perform_own(work: Work) -> Performed {
+    match work {
+        Work::Effect(..) | Work::Program(..) => (
+            Err(Diagnostic::error(
+                "a program was sent as the engine's own work",
+                Span::new(0, 0),
+            )),
+            Vec::new(),
+            Done::Effect,
+        ),
         Work::Fetch {
             url,
             sha256,
@@ -402,13 +491,51 @@ fn keep(plain: Plain, sandbox: &StepSandbox, store: &Store) -> Performed {
 }
 
 impl Pool {
-    /// A pool of `size` threads.
+    /// A pool of `size` threads for effects and programs, and as many for
+    /// the engine's own work, so that programs waiting for the machine's
+    /// budget hold up none of it (see [The pool](#the-pool)).
     #[must_use]
     pub fn new(size: usize) -> Self {
-        let (jobs, queue) = channel::<Job>();
         let (report, done) = channel();
+        let programs = Self::threads(0..size, &report);
+        let own = Self::threads(size..2 * size, &report);
+        Self {
+            programs,
+            own,
+            report,
+            done,
+        }
+    }
+
+    /// Waits for the claim whose lock file is `path`, of the node `node`'s
+    /// step, which another build holds, on a thread of its own, never the
+    /// pool's (see [Claims](crate::claims#claims)): what it came to comes
+    /// back as a job's does.
+    pub fn claim(&self, node: NodeId, path: PathBuf) {
+        let report = self.report.clone();
+        thread::spawn(move || {
+            let began = Instant::now();
+            let claimed = claim(&path)
+                .map_err(|error| format!("cannot claim the step at `{}`: {error}", path.display()));
+            let _ = report.send(Ran {
+                node,
+                worker: 0,
+                began,
+                ended: Instant::now(),
+                queued: Duration::ZERO,
+                outcome: Ok(Plain::Empty),
+                kept: Vec::new(),
+                done: Done::Claimed(claimed),
+            });
+        });
+    }
+
+    /// The threads `workers`, numbered so, each taking the next job sent to
+    /// what is given and reporting to `report`.
+    fn threads(workers: std::ops::Range<usize>, report: &Sender<Ran>) -> Sender<Job> {
+        let (jobs, queue) = channel::<Job>();
         let queue = Arc::new(Mutex::new(queue));
-        for worker in 0..size {
+        for worker in workers {
             let queue = Arc::clone(&queue);
             let report = report.clone();
             thread::spawn(move || {
@@ -418,12 +545,13 @@ impl Pool {
                         return;
                     };
                     let began = Instant::now();
-                    let (outcome, kept, done) = perform(work, deadline);
+                    let ((outcome, kept, done), queued) = perform(work, deadline);
                     let ran = Ran {
                         node,
                         worker,
-                        began,
+                        began: began + queued,
                         ended: Instant::now(),
+                        queued,
                         outcome,
                         kept,
                         done,
@@ -434,12 +562,16 @@ impl Pool {
                 }
             });
         }
-        Self { jobs, done }
+        jobs
     }
 
     /// Sends the node `node`'s `work`, to do until `deadline`.
     pub fn send(&self, node: NodeId, work: Work, deadline: Option<Instant>) {
-        let _ = self.jobs.send((node, work, deadline));
+        let to = match work {
+            Work::Effect(..) | Work::Program(..) => &self.programs,
+            _ => &self.own,
+        };
+        let _ = to.send((node, work, deadline));
     }
 
     /// The next job's outcome, waiting for one: none if every thread of the

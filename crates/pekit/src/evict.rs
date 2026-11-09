@@ -36,7 +36,9 @@
 //!   nothing, which the next walk sets right.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
-//!   so it evicts nothing while another process has the store.
+//!   so it evicts nothing while another process has the store; having it,
+//!   it removes the claims' files, which no process then holds
+//!   ([Claims](crate::claims#claims)).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -75,7 +77,7 @@ pub fn limit_of(setting: Option<&str>) -> Result<Option<u64>, String> {
 }
 
 /// The number of bytes `text` says: digits, then a unit or none.
-fn size_of(text: &str) -> Option<u64> {
+pub(crate) fn size_of(text: &str) -> Option<u64> {
     let text = text.trim();
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
@@ -293,6 +295,8 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
             return Err(error);
         }
     }
+    // No process holds a claim on a step, since none has the store.
+    let _ = remove_tree(&store.root().join("claims"));
     let evicted = evict_held(store, limit);
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;

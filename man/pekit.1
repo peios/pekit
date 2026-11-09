@@ -277,6 +277,10 @@ Run at most
 .I JOBS
 programs at once.
 The default is the number of processors.
+Every build on the machine also shares one budget of programs and memory; see
+.B PEKIT_MACHINE_JOBS
+and
+.IR CONFIG/machine.conf .
 .TP
 .B \-\-no\-dynamic
 Fail a target at the point it waits for a step's result.
@@ -507,12 +511,63 @@ If set,
 does not flush a file it puts into the store to the disk before it renames the file into place.
 A crash can then leave a file in the store whose contents do not match its name.
 .TP
+.B PEKIT_MACHINE_JOBS
+How many programs of steps every
+.B pekit
+process on the machine runs at once, together, a number above 0.
+It overrides
+.B jobs
+in
+.IR CONFIG/machine.conf .
+The default is the number of processors.
+A program of a step waits until it can have a job, and as much memory as it is expected to use, which it gives back when it ends.
+Processes that read different limits share the larger.
+Each program of a step is offered a GNU make jobserver at
+.IR /dev/pekit-jobserver ,
+through
+.B MAKEFLAGS
+and
+.B CARGO_MAKEFLAGS
+unless it sets them, whose tokens are jobs of the budget lent while they are free.
+.TP
+.B PEKIT_MACHINE_MEMORY
+How much memory, a size as for
+.BR PEKIT_CACHE_LIMIT ,
+the programs of steps of every process on the machine are expected to use at once, together.
+It overrides
+.BR memory .
+The default is half the machine's memory.
+A program is expected to use a quarter more than the most it used in its last four runs in its step, else in the steps of its step's function, else
+.BR PEKIT_MACHINE_UNSEEN ;
+one expected to use more than the whole budget runs alone.
+.TP
+.B PEKIT_MACHINE_UNSEEN
+What a program never run before in a step of its step's function is expected to use, a size, and half as much again for
+.BR rustc .
+It overrides
+.BR unseen .
+The default is 1 GiB.
+.TP
 .BR XDG_CACHE_HOME ", " XDG_STATE_HOME ", " HOME
 Where the cache and state directories are, as
 .B PEKIT_CACHE_DIR
 and
 .B PEKIT_STATE_DIR
 describe.
+.TP
+.B XDG_CONFIG_HOME
+The configuration directory,
+.IR CONFIG ,
+is
+.I pekit
+under it, else
+.IR ~/.config/pekit .
+.TP
+.B XDG_RUNTIME_DIR
+The machine's budget's lock files are in
+.I pekit/budget
+under it, else, or if that cannot be used, in
+.IR CACHE/budget .
 .TP
 .B GCSL_LIBRARY_PATH
 Directories, separated by colons, searched for a library before
@@ -586,6 +641,8 @@ the scratch directories of steps marked
 .B #[scratch]
 in
 .IR scratch/ ,
+the lock file of each step a build has claimed, by its base receipt, which another build that needs the step meanwhile waits for, in
+.IR claims/ ,
 bare clones of repositories
 .B fetch_git
 fetched in
@@ -607,6 +664,27 @@ The directories steps are staged in, removed as each step ends.
 .TP
 .I STATE/keychain-key
 The machine's key, readable only by its owner, made the first time it is needed.
+.TP
+.I STATE/peaks/
+The peak memory of the last runs of each program of each step, and of each step's function, which what the program is expected to use is made from.
+.TP
+.I CONFIG/machine.conf
+The machine's budget: a line
+.IB KEY " = " VALUE
+for each of
+.BR jobs ,
+.BR memory ,
+and
+.BR unseen ,
+as
+.BR PEKIT_MACHINE_JOBS ,
+.BR PEKIT_MACHINE_MEMORY ,
+and
+.B PEKIT_MACHINE_UNSEEN
+describe, with
+.B #
+starting a comment.
+A line that sets anything else fails every command that builds.
 .SH NOTES
 Do not change the files in the store, or files under
 .I pekit-out/.steps/

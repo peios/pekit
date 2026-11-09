@@ -219,8 +219,9 @@ scheduler repeatedly:
 - for any other effect: runs it in program order, one at a time.
 
 The pool's size is `--jobs`, by default the number of CPUs. Each running
-program holds one slot; a jobserver shared with `make` (layer F) lets a
-step's `make -j` borrow slots.
+program of a step also holds a job of the machine's budget, shared by every
+pekit process, and the memory it is expected to use; a jobserver lends a
+step's `make` or Cargo the budget's free jobs (`design/additive.md`, F11).
 
 ### E7. Platforms
 

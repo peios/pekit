@@ -426,6 +426,45 @@ the lock, the toolchains, each step's receipt, and the digest of what was
 published, in the SLSA provenance format, so that anyone can check what a
 release was built from.
 
+## F11. The machine's budget
+
+Several builds at once, a worktree's each or an agent's each, share the
+machine: at most N programs of steps at once and M bytes of memory they are
+expected to use, across every pekit process, with no daemon. A step two
+builds need at once runs once.
+
+### F11, phase 1, as built
+
+- **The budget** is a directory of lock files in `$XDG_RUNTIME_DIR`, a
+  file for each job and each 256 MiB of memory, held with `flock`, so a
+  process that dies lets go of what it held. A program takes its job and
+  its memory all at once or none, in its process's order; one larger than
+  the budget takes all of it and runs alone; one starved for 2 s holds a
+  gate no other program starts through. N, M and the estimate of a
+  program never seen come from `PEKIT_MACHINE_*`, else `machine.conf` in
+  the configuration directory, else the processors, half the memory and
+  1 GiB, 1.5 GiB for `rustc`.
+- **Estimates** are a quarter over the most a program used in its step's
+  last four runs, else in its step's function's, kept in the state
+  directory. `pekit __meter` runs each program of a step and measures it,
+  as a subreaper: bubblewrap does not wait for its pid namespace's `init`,
+  so the program's peak never reached a plain wait. The peak is the
+  largest process's, not the tree's.
+- **The jobserver** is a FIFO the meter makes, bound into the sandbox and
+  named by `MAKEFLAGS` and `CARGO_MAKEFLAGS`. The meter lends free jobs one
+  at a time while nothing waits, takes them back once something does, and
+  backs off a program that leaves its tokens unread.
+- **Claims** are lock files in the store by a step's base receipt, held
+  from a miss until the step is recorded; a build that finds one waits on
+  a thread of its own, then looks in the store again.
+- None of it reaches a receipt or a record; the pool has a second set of
+  threads for the engine's own work, so programs waiting for the budget
+  hold none of it up.
+
+Phase 2, if needed: a broker with leases and fair queueing across
+processes, in the daemon (F8); the cgroup's `memory.peak` for a tree's sum;
+test binaries weighted by the threads they use.
+
 ## Decisions taken without Jack (to surface)
 
 - F1: secrets keep a program out of the per-`exec` cache; a replayed
@@ -443,3 +482,12 @@ release was built from.
   that fails a call asked nothing more by the process.
 - F6: a step runner as REAPI's command.
 - F10: SLSA provenance.
+- F11: the budget per user, in `$XDG_RUNTIME_DIR`; its configuration in
+  `~/.config/pekit/machine.conf`, not `/etc`; processes that read different
+  limits sharing the larger; M half the memory, as clackatoo's PM asked
+  for a machine shared with other builds and agents, in 256 MiB
+  units; 1 GiB for a program never seen, 1.5 GiB for `rustc`, and a
+  quarter's headroom; a
+  program's peak its largest process's; `--jobs` still one build's limit;
+  only steps' programs waiting, not a target's own; claims by base
+  receipt.

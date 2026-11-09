@@ -62,6 +62,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PEKIT_CACHE_DIR", cache)
         .env("PEKIT_STATE_DIR", cache.join("state"))
+        .env("XDG_RUNTIME_DIR", cache.join("run"))
         .output()
         .unwrap()
 }

@@ -8,15 +8,21 @@ description: The threads that run a build's effects and pekit's own work
 GCSL's values are reference-counted for one thread, so one thread evaluates
 every unit of a build. What runs in parallel is work that needs no GCSL
 value: programs, file-system effects, and pekit's own handling of whole
-trees. That work runs on the *pool* (`Pool`), a fixed number of threads
-taking work from one queue.
+trees. That work runs on the *pool* (`Pool`): two fixed sets of threads,
+each taking work from a queue of its own.
 
 ## Its size
 
-The pool has `--jobs` threads, by default as many as the machine has
-processors. A running program holds its thread until it ends, so `--jobs`
-is the most programs that run at once. A step's own `make -j` or Cargo
-starts as many processes as it chooses, inside the one program.
+The pool has `--jobs` threads for effects, by default as many as the
+machine has processors. A running program holds its thread until it ends,
+so `--jobs` is the most programs a build runs at once. A step's program
+also waits on its thread for the machine's budget, which bounds every
+build's programs together (see [The Machine's
+Budget](~pekit/the-machines-budget)). A step's own `make` or Cargo borrows
+the budget's free jobs through its jobserver.
+
+The pool has as many threads again for the rest of its work, so that
+programs waiting for the budget hold up none of it.
 
 ## Kinds of work
 
