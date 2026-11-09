@@ -4,7 +4,7 @@ mod cache;
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -974,4 +974,112 @@ fn a_step_is_given_a_device_it_asks_for_and_keyed_without_it() {
         "{:?}",
         printed(&odd)
     );
+}
+
+#[test]
+fn a_step_inherits_neither_ignored_signals_nor_standard_input_nor_the_umask() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = |name: &str, interactive: &str| {
+        format!(
+            "#[hermetic] fn {name}() -> File {{\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"( grep SigIgn /proc/self/status; \
+             readlink /proc/self/fd/0; umask ) > probe.txt\"]{interactive})\n\
+             \x20   = working_dir().file(\"probe.txt\")\n\
+             }}\n"
+        )
+    };
+    let file = format!(
+        "{}{}def build plain() {{ = probe() }}\n\
+         def build interactive() {{ = probe_interactive() }}\n",
+        probe("probe", ""),
+        probe("probe_interactive", ", interactive = true"),
+    );
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", &file)],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    // Started as a shell's `&` starts it, ignoring `SIGINT` and `SIGQUIT`,
+    // its standard input a pipe, and with a mask of its own.
+    let built = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "umask 077; trap '' INT QUIT; exec \"$0\" build plain interactive",
+            env!("CARGO_BIN_EXE_pekit"),
+        ])
+        .current_dir(dir.path().join("app"))
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env_remove("PEKIT_REMOTE_CACHE")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{:?}", printed(&built));
+    for step in ["plain/probe", "interactive/probe_interactive"] {
+        let probe = dir.path().join(format!("pekit-out/app/{step}/probe.txt"));
+        assert_eq!(
+            fs::read_to_string(probe).unwrap(),
+            "SigIgn:\t0000000000000000\n/dev/null\n0022\n",
+            "{step}"
+        );
+    }
+}
+
+#[test]
+fn a_step_s_output_deeper_than_the_descriptor_limit_is_kept_composed_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |comment: &str| {
+        format!(
+            "# {comment}\n\
+             import fs\n\
+             #[hermetic] fn deep() -> Dir {{\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"mkdir tree && cd tree || exit 1; i=0; \
+             while [ $i -lt 500 ]; do mkdir l && cd l || exit 1; i=$((i+1)); done; \
+             echo foot > foot.txt\"])\n\
+             \x20   = working_dir().dir(\"tree\")\n\
+             }}\n\
+             #[hermetic] fn composed(d: Dir) -> File {{\n\
+             \x20   let c = fs.compose_dir({{\"in\" = d}})\n\
+             \x20   let r = exec([\"sh\", \"-c\", \"echo composed > out.txt\"])\n\
+             \x20   = working_dir().file(\"out.txt\")\n\
+             }}\n\
+             def build tree() {{ = deep() }}\n\
+             def build both() {{ = composed(deep()) }}\n"
+        )
+    };
+    let cache = tempfile::tempdir().unwrap();
+    // With fewer descriptors than the tree has levels.
+    let build = |comment: &str| {
+        write(
+            dir.path(),
+            &[("workspace.gcsl", ""), ("app/build.gcsl", &file(comment))],
+        );
+        let built = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "ulimit -Sn 256; exec \"$0\" build tree both",
+                env!("CARGO_BIN_EXE_pekit"),
+            ])
+            .current_dir(dir.path().join("app"))
+            .env("PEKIT_CACHE_DIR", cache.path())
+            .env("PEKIT_STATE_DIR", cache.path().join("state"))
+            .env_remove("PEKIT_REMOTE_CACHE")
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{:?}", printed(&built));
+        let foot = dir
+            .path()
+            .join("pekit-out/app/tree/deep/tree")
+            .join(["l"; 500].join("/"))
+            .join("foot.txt");
+        assert_eq!(fs::read_to_string(foot).unwrap(), "foot\n");
+        printed(&built).0
+    };
+    // Kept in the store, composed, and copied out.
+    let first = build("First.");
+    assert!(first.contains("2 steps run"), "{first}");
+    // Its code changed but not its programs: each composition placed again
+    // and sealed, and the output copied out over the one before.
+    let again = build("Again.");
+    assert!(again.contains("2 programs found"), "{again}");
 }

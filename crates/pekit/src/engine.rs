@@ -115,6 +115,15 @@ const PACKAGERS: &str = "packagers";
 /// its fields one.
 const CONTEXTS: &str = "contexts";
 
+/// The fields of `pekitconf` that set a context of pekit's own, each the
+/// context, the field and the module that declares the context. With
+/// [`CONTEXTS`], they are every field pekit reads.
+const CONF_FIELDS: [(&str, &str, &str); 3] = [
+    (TOOLCHAINS, "toolchains", "toolchain"),
+    (KEYCHAIN_KEYS, "keychain", "keychain"),
+    (PACKAGERS, "packagers", "packaging"),
+];
+
 /// The contexts pekit sets itself, each from the build or a field of its
 /// own, so that `pekitconf.contexts` sets none of them: each is the
 /// context's name and where its value comes from.
@@ -617,6 +626,7 @@ fn build_roots(
     (wrap, contexts): (Option<RootWrap<'_>>, Vec<(String, Plain)>),
     events: &mut dyn FnMut(&Event),
 ) -> Result<Outcomes, BuildError> {
+    crate::sandbox::steady_inheritance();
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
     run.finish_uploads()?;
@@ -919,30 +929,60 @@ impl ConfField {
 /// of `pekitconf.contexts`, the context of its name, which the workspace or
 /// a library it imports declares. GCSL checks each value against its
 /// context's type, as a `with`'s, and a target's own `with` binds over it.
+/// A field pekit doesn't read is refused, not ignored, so that a setting
+/// an older or newer pekit reads is never silently dropped.
 ///
 /// # Errors
 ///
-/// That `pekitconf.contexts` is no record of named fields, or names a
-/// context no file declares or one pekit sets itself.
+/// That `pekitconf` is no record of named fields or has a field pekit
+/// doesn't read; that it sets the toolchains, the keychain or the packagers
+/// without importing the module that declares them; or that
+/// `pekitconf.contexts` is no record of named fields, or names a context no
+/// file declares or one pekit sets itself.
 fn root_fields(loaded: &Loaded) -> Result<Vec<ConfField>, BuildError> {
     let mut fields = Vec::new();
     let Some(file) = loaded.workspace.file(WORKSPACE_FILE) else {
         return Ok(fields);
     };
-    for (context, field) in [
-        (TOOLCHAINS, "toolchains"),
-        (KEYCHAIN_KEYS, "keychain"),
-        (PACKAGERS, "packagers"),
-    ] {
-        if loaded.workspace.declares_context(context)
-            && loaded.workspace.top_level_has(file, PEKITCONF, &[field])
-        {
-            fields.push(ConfField {
-                context: context.to_owned(),
-                path: vec![field.to_owned()],
-                file,
-            });
+    if !loaded.workspace.top_level_has(file, PEKITCONF, &[]) {
+        return Ok(fields);
+    }
+    let known = CONF_FIELDS
+        .iter()
+        .map(|(_, field, _)| format!("`{field}`"))
+        .chain([format!("`{CONTEXTS}`")])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let Some(names) = loaded.workspace.top_level_fields(file, PEKITCONF, &[]) else {
+        return Err(BuildError::Engine(format!(
+            "`{PEKITCONF}` in `{WORKSPACE_FILE}` must be a record of the fields pekit reads: \
+             {known}"
+        )));
+    };
+    if let Some(unknown) = names
+        .iter()
+        .find(|name| *name != CONTEXTS && !CONF_FIELDS.iter().any(|(_, field, _)| field == name))
+    {
+        return Err(BuildError::Engine(format!(
+            "`{PEKITCONF}.{unknown}` in `{WORKSPACE_FILE}` is no field pekit reads: it reads \
+             {known}"
+        )));
+    }
+    for (context, field, module) in CONF_FIELDS {
+        if !loaded.workspace.top_level_has(file, PEKITCONF, &[field]) {
+            continue;
         }
+        if !loaded.workspace.declares_context(context) {
+            return Err(BuildError::Engine(format!(
+                "`{PEKITCONF}.{field}` in `{WORKSPACE_FILE}` sets `context {context}`, which \
+                 nothing loaded declares: `import {module}` declares it"
+            )));
+        }
+        fields.push(ConfField {
+            context: context.to_owned(),
+            path: vec![field.to_owned()],
+            file,
+        });
     }
     if !loaded.workspace.top_level_has(file, PEKITCONF, &[CONTEXTS]) {
         return Ok(fields);
@@ -3527,8 +3567,7 @@ impl Run<'_> {
             let Some(kept) = self.outputs.get(path) else {
                 continue;
             };
-            let _ = std::fs::remove_file(&at);
-            let _ = std::fs::remove_dir_all(&at);
+            let _ = remove_tree(&at);
             let copied = match kept {
                 Kept::File(entry) => self.store.copy_file(entry, &at),
                 Kept::Dir(tree) => self.store.copy_tree(tree, &at),
@@ -3606,13 +3645,7 @@ pub fn target_view(target: &str, paths: &[&str]) -> Vec<(String, String)> {
 /// Makes `at` a symbolic link to `from`, by a relative path, whatever was
 /// there before.
 fn link_view(from: &Path, at: &Path) -> io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(at) {
-        if meta.is_dir() {
-            fs::remove_dir_all(at)?;
-        } else {
-            fs::remove_file(at)?;
-        }
-    }
+    remove_tree(at)?;
     let parent = at.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     std::os::unix::fs::symlink(relative_to(from, parent), at)

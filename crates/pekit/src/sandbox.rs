@@ -50,15 +50,41 @@
 //! the host's, are `nogroup`'s number, which no unprivileged sandbox can
 //! drop.
 //!
+//! # What a program inherits
+//!
+//! How pekit was started is no input of a step's, so nothing of it may
+//! reach a step's programs. Its environment and working directory don't:
+//! bubblewrap clears the one and sets the other. A step's programs read
+//! nothing from pekit's standard input, which is the terminal or whatever
+//! pekit was started with: it is `/dev/null`, even for an `exec` GCSL runs
+//! interactively. And they start with every signal's default disposition
+//! ([`default_dispositions`]): a signal pekit inherited as ignored, as a
+//! shell's `&` leaves `SIGINT` and `SIGQUIT`, stays ignored across `exec`,
+//! and so would be ignored by every program of every step, which a test
+//! suite of signals sees.
+//!
+//! And they create files with the file-creation mask [`UMASK`], `022`,
+//! whatever pekit was started with ([`fixed_umask`]): a mode a step gives a
+//! file, as an archive it makes records, is part of what it made. pekit
+//! sets its own mask, since it can't set a child's alone, so that GCSL's
+//! file work for a step, which runs in pekit's process, has it too.
+//!
+//! The process's resource limits, such as how many files it may open, are
+//! still inherited, as from pekit.
+//!
 //! Each counts its temporary directories itself, so both are `Sync`: a
 //! step's effects run on a pool's threads.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Once};
+
+use rustix::fs::Mode;
+use signal_hook::consts::{FORBIDDEN, SIGPIPE};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gcsl::check::Builtin;
@@ -113,6 +139,73 @@ pub(crate) fn under<'a>(path: &'a str, root: &str) -> Option<&'a str> {
         return Some("");
     }
     rest.strip_prefix('/')
+}
+
+/// Catches, once, each signal this process inherited as ignored, by a
+/// handler that does nothing (see [What a program
+/// inherits](#what-a-program-inherits)). `exec` keeps a signal ignored but
+/// resets a caught one to its default, so every program pekit starts after
+/// this begins with default dispositions, while pekit itself still ignores
+/// what it was told to. `SIGPIPE`, which Rust's runtime ignores, the
+/// standard library resets in each child itself. `SIGILL`, `SIGFPE` and
+/// `SIGSEGV` can't be caught safely, and stay as they are.
+pub fn default_dispositions() {
+    static ONCE: Once = Once::new();
+    static CAUGHT: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
+    ONCE.call_once(|| {
+        let ignored = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    let mask = line.strip_prefix("SigIgn:")?;
+                    u64::from_str_radix(mask.trim(), 16).ok()
+                })
+            })
+            .unwrap_or(0);
+        for signal in 1..=64 {
+            // The mask's bit n is the signal n + 1.
+            if ignored & (1_u64 << (signal - 1)) == 0
+                || signal == SIGPIPE
+                || FORBIDDEN.contains(&signal)
+            {
+                continue;
+            }
+            // A signal the platform won't let be caught stays ignored, as
+            // before.
+            let _ = signal_hook::flag::register(signal, Arc::clone(&CAUGHT));
+        }
+    });
+}
+
+/// The file-creation mask every program pekit starts has (see [What a
+/// program inherits](#what-a-program-inherits)).
+pub const UMASK: u32 = 0o022;
+
+/// Sets this process's file-creation mask to [`UMASK`], once, so that every
+/// program it starts after this, and every file it makes, has it, whatever
+/// mask pekit was started with (see [What a program
+/// inherits](#what-a-program-inherits)).
+pub fn fixed_umask() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        rustix::process::umask(Mode::from_raw_mode(UMASK));
+    });
+}
+
+/// Makes what every program pekit starts inherits of how pekit was
+/// started the same, however that was: default signal dispositions
+/// ([`default_dispositions`]) and the file-creation mask [`UMASK`]
+/// ([`fixed_umask`]). A build does this before it runs anything.
+pub fn steady_inheritance() {
+    default_dispositions();
+    fixed_umask();
+}
+
+/// A command that runs bubblewrap, which [`steady_inheritance`] has made
+/// sure starts as every program pekit starts does.
+fn bwrap_command() -> Result<Command, String> {
+    steady_inheritance();
+    Ok(Command::new(bwrap()?))
 }
 
 /// The path of the program bubblewrap is, on `PATH`.
@@ -214,7 +307,7 @@ fn sandboxed(
     (isolation, devices, scratch, users): (Isolation, &[PathBuf], Option<&Path>, Option<&Path>),
 ) -> Result<Command, String> {
     let (words, cwd, env) = parts(command);
-    let mut wrapped = Command::new(bwrap()?);
+    let mut wrapped = bwrap_command()?;
     match isolation {
         Isolation::Plain => wrapped.args(["--unshare-user", "--unshare-pid"]),
         Isolation::Hermetic => wrapped.args(["--unshare-all", "--new-session"]).args([
@@ -277,6 +370,11 @@ fn sandboxed(
     }
     wrapped.arg("--").args(&words);
     wrapped.env_clear();
+    if isolation == Isolation::Hermetic {
+        // Nothing of how pekit was started (see [What a program
+        // inherits](#what-a-program-inherits)).
+        wrapped.stdin(Stdio::null());
+    }
     Ok(wrapped)
 }
 
@@ -354,7 +452,7 @@ impl Effects for HostView {
 
     fn command(&self, command: Command) -> Result<Command, String> {
         let (words, cwd, env) = parts(&command);
-        let mut wrapped = Command::new(bwrap()?);
+        let mut wrapped = bwrap_command()?;
         // The host's own directories where they are, on a root of their own,
         // so that `/w` and `/pekit-out` can be made.
         wrapped.args(["--tmpfs", "/"]);
@@ -766,7 +864,7 @@ impl StepSandbox {
 impl Effects for StepSandbox {
     fn command(&self, command: Command) -> Result<Command, String> {
         let (words, cwd, env) = parts(&command);
-        let mut wrapped = Command::new(bwrap()?);
+        let mut wrapped = bwrap_command()?;
         wrapped.args(["--unshare-all", "--die-with-parent", "--new-session"]);
         wrapped.args([
             "--uid",
@@ -848,6 +946,9 @@ impl Effects for StepSandbox {
         if let Some(path) = std::env::var_os("PATH") {
             wrapped.env("PATH", path);
         }
+        // Nothing of how pekit was started (see [What a program
+        // inherits](#what-a-program-inherits)).
+        wrapped.stdin(Stdio::null());
         Ok(wrapped)
     }
 

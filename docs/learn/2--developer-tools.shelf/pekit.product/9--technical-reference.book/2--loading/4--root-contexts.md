@@ -27,6 +27,16 @@ without one of these fields leaves the context at its default: the
 `toolchain` module's `[Toolchain::C system_c]`, and an empty keychain and
 packager list.
 
+`toolchains`, `keychain`, `packagers`, and `contexts` are the only fields
+pekit reads. Before it prepares any target, pekit fails the build if:
+
+- `pekitconf` is not a record of named fields;
+- it has any other field, which a different pekit might read but this one
+  would ignore; or
+- it has `toolchains`, `keychain`, or `packagers` but no loaded file
+  declares the context the field sets, which `import toolchain`, `import
+  keychain`, or `import packaging` would.
+
 ## Contexts the workspace sets
 
 `pekitconf.contexts` sets any other context, each of its fields the context

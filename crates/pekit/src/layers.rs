@@ -57,11 +57,16 @@
 //!   tree's digest ([`Layers::mounted`]).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat};
+use rustix::io::Errno;
 
 use crate::store::{Digest, FileEntry, Store};
 
@@ -225,48 +230,175 @@ fn is_dir(path: &Path) -> bool {
 /// Makes every file under `path`, or it if it is one, read-only. Its
 /// directories keep their modes, which a sandbox of it shows its commands:
 /// read-only, a command could write nothing in it, even into the sandbox's
-/// own upper layer.
+/// own upper layer. However deep the tree, it holds a few descriptors at
+/// once and names no path longer than an entry's name ([`walk`]).
 fn seal(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
         return Ok(());
     }
     if meta.is_dir() {
-        for entry in fs::read_dir(path)? {
-            seal(&entry?.path())?;
-        }
-        return Ok(());
+        return walk(open_dir(CWD, path)?, Purpose::Seal);
     }
     let mode = meta.permissions().mode();
     fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o222))
 }
 
-/// Removes the tree at `path`, if there is one, its directories made
-/// writable first, since a sealed composition's are not.
+/// Removes the tree at `path`, if there is one, each directory made
+/// writable by its owner before it is emptied, since a sealed
+/// composition's are not. However deep the tree, it holds a few
+/// descriptors at once and names no path longer than an entry's name: a
+/// step can leave a tree in its `/tmp` or its outputs deeper than this
+/// process may open descriptors, and longer than a path may be ([`walk`]).
 ///
 /// # Errors
 ///
 /// That it could not be removed.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
-    if !present(path) {
-        return Ok(());
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_dir() {
+        return fs::remove_file(path);
     }
-    unseal(path)?;
-    fs::remove_dir_all(path)
+    fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() | 0o700))?;
+    walk(open_dir(CWD, path)?, Purpose::Remove)?;
+    fs::remove_dir(path)
 }
 
-/// Makes every directory under `path`, and it, writable by its owner.
-fn unseal(path: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.is_dir() {
-        return Ok(());
+/// What [`walk`] does to a tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Empties it, each directory made owner-writable first.
+    Remove,
+    /// Makes each file but a symbolic link read-only, the directories as
+    /// they are.
+    Seal,
+}
+
+/// A directory [`walk`] is in, below the one it began with.
+struct Level {
+    /// Its name in its parent.
+    name: CString,
+    /// Its parent's device and inode, which `..` must lead back to.
+    parent: (u64, u64),
+    /// What of its parent is still to be walked.
+    left: Vec<(CString, FileType)>,
+}
+
+/// Walks the tree below the directory `top`, a descriptor of it, for
+/// `purpose`: down and back up by name, one directory open at a time, and
+/// a level's entries read whole before any is changed. A directory is
+/// reached again through its child's `..`, which must be the directory
+/// left, so that a tree moved while it is walked is an error, not a walk
+/// out of it.
+fn walk(top: OwnedFd, purpose: Purpose) -> io::Result<()> {
+    let mut at = top;
+    let mut left = entries(&at)?;
+    let mut above: Vec<Level> = Vec::new();
+    loop {
+        if let Some((name, kind)) = left.pop() {
+            let stat = match (kind, purpose) {
+                (FileType::Directory | FileType::Unknown, _) | (_, Purpose::Seal) => {
+                    match statat(&at, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(stat) => Some(stat),
+                        Err(Errno::NOENT) => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                _ => None,
+            };
+            let kind = stat.map_or(kind, |stat| FileType::from_raw_mode(stat.st_mode));
+            let mode = stat.map_or(0, |stat| stat.st_mode);
+            match (kind, purpose) {
+                (FileType::Directory, _) => {}
+                (_, Purpose::Remove) => {
+                    ignore_gone(unlinkat(&at, name.as_c_str(), AtFlags::empty()))?;
+                    continue;
+                }
+                (FileType::Symlink, Purpose::Seal) => continue,
+                (_, Purpose::Seal) => {
+                    if mode & 0o222 != 0 {
+                        chmodat(
+                            &at,
+                            name.as_c_str(),
+                            Mode::from_raw_mode(mode & !0o222),
+                            AtFlags::empty(),
+                        )?;
+                    }
+                    continue;
+                }
+            }
+            if purpose == Purpose::Remove && mode & 0o700 != 0o700 {
+                chmodat(
+                    &at,
+                    name.as_c_str(),
+                    Mode::from_raw_mode(mode | 0o700),
+                    AtFlags::empty(),
+                )?;
+            }
+            let below = open_dir(&at, name.as_c_str())?;
+            let here = fstat(&at)?;
+            above.push(Level {
+                name,
+                parent: (here.st_dev, here.st_ino),
+                left: std::mem::take(&mut left),
+            });
+            at = below;
+            left = entries(&at)?;
+            continue;
+        }
+        let Some(level) = above.pop() else {
+            return Ok(());
+        };
+        let parent = open_dir(&at, c"..")?;
+        let stat = fstat(&parent)?;
+        if (stat.st_dev, stat.st_ino) != level.parent {
+            return Err(io::Error::other(format!(
+                "`{}` was moved while it was walked",
+                level.name.to_string_lossy()
+            )));
+        }
+        at = parent;
+        if purpose == Purpose::Remove {
+            ignore_gone(unlinkat(&at, level.name.as_c_str(), AtFlags::REMOVEDIR))?;
+        }
+        left = level.left;
     }
-    let mode = meta.permissions().mode();
-    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
-    for entry in fs::read_dir(path)? {
-        unseal(&entry?.path())?;
+}
+
+/// Opens the directory `name` in `dir`, not following a link.
+fn open_dir<Fd: AsFd, P: rustix::path::Arg>(dir: Fd, name: P) -> io::Result<OwnedFd> {
+    Ok(openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
+}
+
+/// The entries of the directory `dir`, but `.` and `..`, each its name and
+/// kind, read whole and the reading closed.
+fn entries(dir: &OwnedFd) -> io::Result<Vec<(CString, FileType)>> {
+    let mut found = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name != c"." && name != c".." {
+            found.push((name.to_owned(), entry.file_type()));
+        }
     }
-    Ok(())
+    Ok(found)
+}
+
+/// `removed`, but an entry already gone is no error.
+fn ignore_gone(removed: rustix::io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(Errno::NOENT) => Ok(()),
+        removed => Ok(removed?),
+    }
 }
 
 impl Layers {

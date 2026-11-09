@@ -85,6 +85,37 @@ gives no `PATH`, and the build isn't strict, `PATH` is
 `/usr/bin:/bin:/usr/sbin:/sbin`. In a strict build a program given no
 `PATH` has none.
 
+## What a program doesn't inherit from pekit
+
+How pekit was started isn't part of a step's key, so pekit keeps it from
+reaching a step's programs:
+
+- **Standard input.** A program's standard input is `/dev/null`, even when
+  its `exec` is interactive. It can't read the terminal pekit runs in, or
+  whatever else pekit's standard input is.
+- **Signal dispositions.** A program starts with every signal's default
+  disposition. A shell's `&` starts pekit with `SIGINT` and `SIGQUIT`
+  ignored, and a signal ignored stays ignored across `exec`, so without
+  this every program of the step would ignore them, which test suites of
+  signals, such as bash's, notice. pekit catches each signal it inherited
+  as ignored with a handler that does nothing (`default_dispositions`):
+  `exec` resets a caught signal to its default, and pekit itself still
+  ignores the signal. `SIGILL`, `SIGFPE` and `SIGSEGV` can't be caught
+  this way, so a pekit started with one of them ignored passes it on.
+- **The file-creation mask.** A program's `umask` is `022`
+  (`sandbox::UMASK`), whatever pekit was started with. The modes a step
+  gives its files are part of what it made, as an archive it makes
+  records them. pekit can't set a child's mask alone, so it sets its own
+  before a build runs anything (`fixed_umask`). GCSL's file work for a
+  step, which runs in pekit's process, gets the same mask, and so does
+  every other program pekit starts and every file it makes, a step's or
+  not.
+
+A program does inherit pekit's resource limits, such as `ulimit -n`, the
+number of files it can open. These can differ between a terminal and
+another launcher: an agent's shell can raise the open-file limit from
+1,024 to 524,288. They aren't part of a step's key.
+
 ## GCSL's own file work
 
 GCSL's file functions inside a step, such as `fs.write`, run in pekit's
