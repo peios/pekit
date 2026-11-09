@@ -91,6 +91,16 @@ with the same features share the one step.
 Planning reads the manifests, `Cargo.lock`, and which files exist, never
 what the sources say. Editing a source plans nothing again.
 
+It leaves out files under a hidden directory, such as `.git` or `.claude`,
+but `.cargo`, and under the paths that `workspace`'s `ignore` names,
+relative to the workspace: by default `["target", "pekit-out"]`. Add any
+other directory a build writes, such as `ignore = ["target", "pekit-out",
+"docs/dist"]`, so that what it writes there doesn't plan the workspace
+again. pekit never lists a nested checkout or a Git worktree inside the
+workspace, a directory that holds a `.git` of its own, so an agent's
+worktree under `crates/` isn't taken for a member. Planning doesn't read
+`.gitignore`, and it still walks the directories that `ignore` names.
+
 Features follow the member. A program built from a member that asks for a
 crate's feature gets it, and a program from a member that doesn't never
 does, even when you build both at once. Cargo unifies features across
@@ -287,6 +297,19 @@ static musl program needs, and the registered C toolchain for any other.
   a pinned build from PyPI. The build is given `LIBCLANG_PATH`, and
   `BINDGEN_EXTRA_CLANG_ARGS` names the target C toolchain's own headers and
   sysroot, so bindgen parses as that toolchain's compiler would.
+
+A build script finds the C compiler in `CC_<target>`, the C++ compiler
+beside it in `CXX_<target>`, such as `x86_64-linux-g++` beside
+`x86_64-linux-gcc`, and the archiver in `AR_<target>`, so a crate that
+compiles C++ through `cc` builds. That holds both one crate at a time and
+with `cargo_build`.
+
+No pkg-config is pinned, and a build script's sandbox holds only the
+toolchain, so a probe for a system library fails the same way on every
+machine. A crate that falls back without the library, or loads it at run
+time, such as `wayland-sys` with its `dlopen` feature, builds. For a crate
+that has to link a system library, give the library through `given` and
+tell its build script where it is through `env`.
 
 Everything is pinned, so a strict build gives the same program, byte for
 byte, on any machine. See [Hermetic and Strict

@@ -516,9 +516,18 @@ impl Effects for HostView {
         Ok(PathBuf::from(path))
     }
 
-    /// The output directory, which is no part of the workspace.
+    /// What is no part of the workspace: the output directory, the root's
+    /// history, `.git`, and any directory below the root that holds a
+    /// `.git` of its own, a nested checkout or a worktree, with all it
+    /// holds.
     fn hides(&self, host: &Path) -> bool {
-        host == self.outputs
+        if host == self.outputs {
+            return true;
+        }
+        if host == self.workspace || !host.starts_with(&self.workspace) {
+            return false;
+        }
+        host == self.workspace.join(".git") || host.join(".git").symlink_metadata().is_ok()
     }
 
     fn working_dir(&self) -> Result<PathBuf, String> {

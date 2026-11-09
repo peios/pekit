@@ -414,3 +414,41 @@ fn a_definition_built_for_another_reads_its_own_directory_s_files() {
     assert_eq!(through.value, Plain::Str("FROM LIB\n".to_owned()));
     assert_eq!((through.ran, through.cached), (0, 1));
 }
+
+#[test]
+fn a_listing_of_the_workspace_leaves_out_its_history_and_nested_checkouts() {
+    use std::os::unix::fs::PermissionsExt;
+    let listed = "def build listed() { = (for f in dir(\".\").files() { = f.path }).join(\"\\n\") }\n\
+                  def build nested() { = (for f in dir(\"worktree\").files() { = f.path }).join(\"\\n\") }\n";
+    let dir = workspace(&[
+        ("build.gcsl", listed),
+        ("kept/a.txt", "a\n"),
+        (".git/HEAD", "ref: refs/heads/main\n"),
+        // A worktree, whose `.git` is a file, and a checkout, whose
+        // `.git` is a directory.
+        ("worktree/.git", "gitdir: /elsewhere\n"),
+        ("worktree/b.txt", "b\n"),
+        ("deep/checkout/.git/HEAD", "ref: refs/heads/main\n"),
+        ("deep/checkout/c.txt", "c\n"),
+        // Kept from the sources pekit loads, so that only a listing could
+        // meet `locked`.
+        (".gcslignore", "deep/checkout\n"),
+    ]);
+    // Never descended into: a listing that tried would fail on it.
+    let locked = dir.path().join("deep/checkout/locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "listed");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        built.unwrap().value,
+        Plain::Str("/w/.gcslignore\n/w/build.gcsl\n/w/kept/a.txt\n/w/workspace.gcsl".to_owned())
+    );
+    // A nested checkout listed itself is listed whole.
+    let nested = build_in(dir.path(), state.path(), "nested").unwrap();
+    assert_eq!(
+        nested.value,
+        Plain::Str("/w/worktree/.git\n/w/worktree/b.txt".to_owned())
+    );
+}
