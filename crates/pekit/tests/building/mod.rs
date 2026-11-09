@@ -74,8 +74,24 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         profile_gcsl: false,
         exposing: Exposing::AsNeeded,
         remote: None,
-        budget: None,
+        budget: budget(state),
     }
+}
+
+/// A machine's budget of its own in `state`, of the limits
+/// `PEKIT_MACHINE_*` set, each program of a step metered by the `pekit`
+/// built with the tests, if `PEKIT_TEST_BUDGET` is set, so that every build
+/// runs as `pekit build` runs it: else none.
+fn budget(state: &Path) -> Option<std::sync::Arc<pekit::budget::Budget>> {
+    std::env::var_os("PEKIT_TEST_BUDGET")?;
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let ram = pekit::budget::machine_memory().unwrap_or(8 << 30);
+    let var = |name: &str| std::env::var(name).ok();
+    let limits = pekit::budget::Limits::of_machine(&var, None, (cores, ram)).unwrap();
+    let meter = Some(env!("CARGO_BIN_EXE_pekit").into());
+    let budget =
+        pekit::budget::Budget::open(&state.join("budget"), limits, (&state.join("peaks"), meter));
+    Some(std::sync::Arc::new(budget.unwrap()))
 }
 
 /// Builds `build <name>` of the workspace at `root`, its store and scratch

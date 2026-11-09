@@ -364,3 +364,31 @@ fn a_step_whose_build_died_is_run_by_the_build_that_waited() {
     assert!(output.status.success(), "{err}");
     assert!(out.contains("1 step run, 0 found"), "{out}");
 }
+
+#[test]
+fn a_build_waiting_for_a_claimed_step_runs_its_others_meanwhile() {
+    let marker = format!("pekit-claim-others-{}", std::process::id());
+    let cache = tempfile::tempdir().unwrap();
+    // Two worktrees at one commit, so that the step's code is the same: the
+    // first builds step 0; the second needs it too, and steps 1 to 3.
+    let (first, second) = (napping(&marker, 0, 4), napping(&marker, 0, 4));
+    for dir in [&first, &second] {
+        let build = dir.path().join("build.gcsl");
+        let text = fs::read_to_string(&build).unwrap();
+        fs::write(build, text + "def build first() { all = [nap(0)] }\n").unwrap();
+    }
+    let one = start(first.path(), cache.path(), &["build", "first"], &[]);
+    wait_for(&marker);
+    let two = start(second.path(), cache.path(), &["build", "naps"], &[]);
+    let (outputs, most) = watched(vec![one, two], &marker);
+    for output in &outputs {
+        assert!(output.status.success(), "{}", printed(output).1);
+    }
+    let shown = printed(&outputs[1]).0;
+    assert!(
+        shown.contains("3 steps run, 1 found in the store"),
+        "{shown}"
+    );
+    // Step 0 beside the second's others.
+    assert!(most >= 2, "{most} at once");
+}

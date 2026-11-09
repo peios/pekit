@@ -1814,6 +1814,7 @@ impl Run<'_> {
             if self.steps.contains_key(&id)
                 || self.in_flight.contains_key(&id)
                 || self.looking.contains_key(&id)
+                || self.claiming.contains_key(&id)
             {
                 continue;
             }
