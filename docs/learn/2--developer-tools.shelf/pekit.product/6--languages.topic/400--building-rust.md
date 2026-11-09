@@ -105,6 +105,10 @@ Features follow the member. A program built from a member that asks for a
 crate's feature gets it, and a program from a member that doesn't never
 does, even when you build both at once. Cargo unifies features across
 everything one `cargo build` names; pekit plans each member on its own.
+Give `workspace` `whole = true` to plan every member with the whole
+workspace's features instead, as `cargo build --workspace` and `cargo test
+--workspace` resolve them, so that a member's tests see what they see under
+Cargo.
 
 Cargo's plans leave out some of what it takes from the manifests: the
 `[lints]` table, which targets have `harness = false`, and the `--check-cfg`
@@ -114,6 +118,43 @@ crates with them, as Cargo does. Link-time optimization follows Cargo too:
 the programs a profile's `lto` names are optimized whole, and the libraries
 they link carry what that needs. A profile's `strip` applies as Cargo
 applies it, so `strip = "symbols"` gives programs without symbols.
+
+## Profiles
+
+`workspace` plans for the Cargo profile `profile`, by default `release`:
+
+```gcsl
+fn crates() -> rust.RustWorkspace {
+    = rust.workspace(dir("."), rust.vendored(file("Cargo.lock")), profile = "dev")
+}
+```
+
+A profile is chosen as Cargo chooses it. `dev` builds as `cargo build`
+does, and tests take the `test` profile, as under `cargo test`. `release`
+builds as `--release` does. Any other profile, such as a `quick` profile
+that your `Cargo.toml` defines, builds as `--profile quick` does. Each
+crate is compiled with its profile's settings, `debug = "line-tables-only"`
+and per-package overrides included.
+
+A build script is told `PROFILE` as Cargo tells it: `release` for a
+profile that inherits from `release`, and `debug` for one that inherits
+from `dev`. pekit reads the chain of `inherits` from the workspace's
+`Cargo.toml`. A profile that only `.cargo/config.toml` defines isn't
+supported.
+
+To set a profile as an environment variable would, give `profile_env`:
+
+```gcsl
+rust.workspace(
+    dir("."),
+    rust.vendored(file("Cargo.lock")),
+    profile = "dev",
+    profile_env = [{key = "CARGO_PROFILE_DEV_DEBUG"; value = "line-tables-only"}],
+)
+```
+
+Each key has to start with `CARGO_PROFILE_`. Cargo plans with them set, so
+they apply as they would to `cargo build`.
 
 ## Crates that read outside their directory
 
@@ -173,6 +214,15 @@ any file of its package changes.
 
 A test target with `harness = false` in its manifest is compiled as a
 program of its own, as Cargo compiles it.
+
+`rust.tests` builds the package's examples too, as `cargo test` does. A
+test program runs at `/work/deps/<name>`, with the examples beside it in
+`/work/examples`, as in Cargo's target directory. So a test that finds an
+example from its own path, at `../../examples/<name>`, finds it.
+
+`rust.benches(ws, package)` gives a member's benchmarks, as `cargo test
+--benches` builds them, and `rust.run_test` runs each. A benchmark with
+`harness = false` is a program of its own, which runs with no arguments.
 
 ## Documentation, its tests, and Clippy
 
