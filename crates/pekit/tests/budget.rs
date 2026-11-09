@@ -56,13 +56,13 @@ fn most_at_once(budgets: &[Arc<Budget>], programs: usize, bytes: u64, holding: D
 }
 
 #[test]
-fn a_machine_has_a_job_per_processor_and_three_quarters_of_its_memory() {
+fn a_machine_has_a_job_per_processor_and_half_its_memory() {
     let limits = Limits::of_machine(&env(&[]), None, (8, 32 << 30)).unwrap();
     assert_eq!(
         limits,
         Limits {
             jobs: 8,
-            memory: 24 << 30,
+            memory: 16 << 30,
             unseen: DEFAULT_UNSEEN,
         }
     );
@@ -247,7 +247,10 @@ fn a_program_is_expected_to_use_a_quarter_more_than_it_did() {
     let dir = tempfile::tempdir().unwrap();
     let budget = budget(dir.path(), 2, 64);
     let peaks = dir.path().join("peaks");
-    assert_eq!(budget.estimate("compile/aaaa", "rustc"), UNIT);
+    // `rustc`, never metered, is expected to use half as much again as
+    // another program.
+    assert_eq!(budget.estimate("compile/aaaa", "rustc"), UNIT + UNIT / 2);
+    assert_eq!(budget.estimate("compile/aaaa", "cc"), UNIT);
     keep_peak(&peaks, ("compile/aaaa", "rustc"), 400 << 20).unwrap();
     keep_peak(&peaks, ("compile/aaaa", "rustc"), 800 << 20).unwrap();
     assert_eq!(budget.estimate("compile/aaaa", "rustc"), 1000 << 20);

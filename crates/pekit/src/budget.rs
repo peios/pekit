@@ -44,7 +44,8 @@
 //! A program is expected to use a quarter more than the most it used in the
 //! last [`KEPT_PEAKS`] runs of it in that step; one never metered in that
 //! step, a quarter more than the most its kind used; and one of a kind never
-//! metered, [`Limits::unseen`].
+//! metered, [`Limits::unseen`], or half as much again for `rustc`, a crate
+//! of which can take 0.7 to 1.4 GB to compile ([`Budget::unseen`]).
 //!
 //! The peak is the largest single process's of the program's tree, as the
 //! kernel counts it for the processes a parent waits for, not the tree's
@@ -96,8 +97,9 @@ impl Limits {
     /// memory: each as the environment's `PEKIT_MACHINE_JOBS`,
     /// `PEKIT_MACHINE_MEMORY` and `PEKIT_MACHINE_UNSEEN` say, `var` reading
     /// it; else as the machine's configuration, `file`, says, by its keys
-    /// `jobs`, `memory` and `unseen`; else a job for each processor, three
-    /// quarters of its memory, and [`DEFAULT_UNSEEN`].
+    /// `jobs`, `memory` and `unseen`; else a job for each processor, half
+    /// its memory, since a machine builds beside its editors and other work,
+    /// and [`DEFAULT_UNSEEN`].
     ///
     /// # Errors
     ///
@@ -110,7 +112,7 @@ impl Limits {
     ) -> Result<Self, String> {
         let mut limits = Self {
             jobs: cores.max(1),
-            memory: (ram / 4 * 3).max(UNIT),
+            memory: (ram / 2).max(UNIT),
             unseen: DEFAULT_UNSEEN,
         };
         for (number, line) in file.unwrap_or_default().lines().enumerate() {
@@ -513,7 +515,24 @@ impl Budget {
             .into_iter()
             .max()
             .or_else(|| read_peaks(&kind).into_iter().max());
-        peak.map_or(self.limits.unseen, |peak| peak.saturating_add(peak / 4))
+        peak.map_or_else(
+            || self.unseen(program),
+            |peak| peak.saturating_add(peak / 4),
+        )
+    }
+
+    /// What the program `program`, a file name, of a kind never metered is
+    /// expected to use: [`Limits::unseen`], or half as much again for
+    /// `rustc`, which Cargo's larger crates take 0.7 to 1.4 GB to compile
+    /// with.
+    #[must_use]
+    pub fn unseen(&self, program: &str) -> u64 {
+        let unseen = self.limits.unseen;
+        if program == "rustc" {
+            unseen.saturating_add(unseen / 2)
+        } else {
+            unseen
+        }
     }
 }
 

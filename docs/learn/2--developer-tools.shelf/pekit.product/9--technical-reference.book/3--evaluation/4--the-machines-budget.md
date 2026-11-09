@@ -21,7 +21,7 @@ Each limit is read, in order of precedence, from:
 2. `machine.conf` in the configuration directory, `$XDG_CONFIG_HOME/pekit`
    or `~/.config/pekit`, a line `KEY = VALUE` for each of `jobs`, `memory`,
    and `unseen`, with `#` starting a comment;
-3. the machine: a job for each processor, three quarters of `MemTotal` in
+3. the machine: a job for each processor, half of `MemTotal` in
    `/proc/meminfo`, and 1 GiB.
 
 `jobs` is a count above 0. `memory` and `unseen` are sizes, written as
@@ -86,7 +86,8 @@ its kept peaks, each in bytes (`Budget::estimate`):
    program's file name;
 2. otherwise its kind's, kept under the step's function and the program's
    file name, by every step of that function;
-3. otherwise `unseen`.
+3. otherwise `unseen`, or half as much again for a program named `rustc`
+   (`Budget::unseen`).
 
 Peaks are kept in the state directory under `peaks/`: a file for each,
 named by a SHA-256 of the names it's kept under, the kind's prefixed

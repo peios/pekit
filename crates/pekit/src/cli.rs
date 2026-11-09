@@ -1575,7 +1575,7 @@ fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     // A machine that does not say gets a program of a kind never metered
     // for each job.
-    let ram = machine_memory().unwrap_or(cores as u64 * DEFAULT_UNSEEN / 3 * 4);
+    let ram = machine_memory().unwrap_or(cores as u64 * DEFAULT_UNSEEN * 2);
     let limits = Limits::of_machine(&var, file.as_deref(), (cores, ram)).map_err(|message| {
         if file.is_some() {
             format!(

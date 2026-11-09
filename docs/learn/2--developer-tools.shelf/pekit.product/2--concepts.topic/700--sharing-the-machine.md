@@ -26,7 +26,8 @@ The machine's budget has two limits:
 - **Jobs:** how many programs can run at once, by default one for each
   processor.
 - **Memory:** how many bytes those programs are expected to use at once, by
-  default three quarters of the machine's memory.
+  default half the machine's memory, leaving the rest to editors, other
+  builds, and everything else the machine runs.
 
 Before a program of a step runs, pekit takes one job from the budget, and as
 much memory as it expects the program to use. When the program ends, it
@@ -54,7 +55,9 @@ quarter more than the most it used in those runs:
 1. by the same program in the same step, if that was measured;
 2. otherwise by the same program in other steps of the same function, such
    as `rustc` in another crate's compile;
-3. otherwise 1 GiB, or what you set.
+3. otherwise 1 GiB, or what you set, and half as much again for `rustc`:
+   one `rustc` compiling a large crate, such as a GUI application's, can
+   use 0.7 to 1.4 GB.
 
 The peak pekit measures is that of the program's largest process, not the
 sum of its processes. A `make -j` that runs several compilers at once uses

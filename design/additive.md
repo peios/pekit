@@ -442,8 +442,8 @@ builds need at once runs once.
   the budget takes all of it and runs alone; one starved for 2 s holds a
   gate no other program starts through. N, M and the estimate of a
   program never seen come from `PEKIT_MACHINE_*`, else `machine.conf` in
-  the configuration directory, else the processors, three quarters of the
-  memory and 1 GiB.
+  the configuration directory, else the processors, half the memory and
+  1 GiB, 1.5 GiB for `rustc`.
 - **Estimates** are a quarter over the most a program used in its step's
   last four runs, else in its step's function's, kept in the state
   directory. `pekit __meter` runs each program of a step and measures it,
@@ -484,8 +484,10 @@ test binaries weighted by the threads they use.
 - F10: SLSA provenance.
 - F11: the budget per user, in `$XDG_RUNTIME_DIR`; its configuration in
   `~/.config/pekit/machine.conf`, not `/etc`; processes that read different
-  limits sharing the larger; M three quarters of the memory, in 256 MiB
-  units; 1 GiB for a program never seen and a quarter's headroom; a
+  limits sharing the larger; M half the memory, as clackatoo's PM asked
+  for a machine shared with other builds and agents, in 256 MiB
+  units; 1 GiB for a program never seen, 1.5 GiB for `rustc`, and a
+  quarter's headroom; a
   program's peak its largest process's; `--jobs` still one build's limit;
   only steps' programs waiting, not a target's own; claims by base
   receipt.

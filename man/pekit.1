@@ -536,13 +536,14 @@ How much memory, a size as for
 the programs of steps of every process on the machine are expected to use at once, together.
 It overrides
 .BR memory .
-The default is three quarters of the machine's memory.
+The default is half the machine's memory.
 A program is expected to use a quarter more than the most it used in its last four runs in its step, else in the steps of its step's function, else
 .BR PEKIT_MACHINE_UNSEEN ;
 one expected to use more than the whole budget runs alone.
 .TP
 .B PEKIT_MACHINE_UNSEEN
-What a program never run before in a step of its step's function is expected to use, a size.
+What a program never run before in a step of its step's function is expected to use, a size, and half as much again for
+.BR rustc .
 It overrides
 .BR unseen .
 The default is 1 GiB.
