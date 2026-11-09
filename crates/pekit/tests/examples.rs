@@ -49,7 +49,7 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 /// The gcslib libraries published each in a repository of its own.
-const PUBLISHED: [&str; 5] = ["buildenv", "clang", "gcc", "python", "rust"];
+const PUBLISHED: [&str; 6] = ["buildenv", "clang", "gcc", "modsig", "python", "rust"];
 
 /// Copies every gcslib library to `to`, a directory of libraries, each at
 /// its path: those not yet published from this repository's `gcslib`, and

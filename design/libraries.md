@@ -193,7 +193,10 @@ their own, cloned beside pekit2 at `gcslib/<name>/` in the Peios
 workspace, with their history; pekit2's tests copy them in from there, or
 from `$PEKIT_TEST_GCSLIB`. ppk, peiso and qemu stay here until ppk and
 peiso are published with pinned toolchains of their own: today they run
-the host's tools, so no strict build can use them.
+the host's tools, so no strict build can use them. modsig, written here
+later, moved to a repository of its own on 2026-11-09, at Jack's word that
+the signing libraries belong with the rest of gcslib; its tool's tests and
+their test key went with it.
 
 ### L8. Pinned toolchains are definitions in the libraries
 

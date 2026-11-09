@@ -86,13 +86,13 @@ pekit:
 | `github.com/gcslib/rust` | Rust programs, one crate at a time or with Cargo. See [Building Rust](~pekit/building-rust). |
 | `github.com/gcslib/go` | Go programs, one package at a time. See [Building Go](~pekit/building-go). |
 | `github.com/gcslib/clang` | A pinned libclang, for tools such as bindgen. |
+| `github.com/gcslib/modsig` | Linux kernel modules signed with a key of the keychain. See [Signing Kernel Modules](~pekit/signing-kernel-modules). |
 | `github.com/gcslib/ppk` | Peios packages. See [Packaging](~pekit/packaging). |
 | `github.com/gcslib/peiso` | Bootable Peios images. See [Building and Booting an Image](~pekit/building-an-image). |
 | `github.com/gcslib/qemu` | Programs and tests that boot an image in QEMU. |
-| `github.com/gcslib/modsig` | Linux kernel modules signed with a key of the keychain. See [Signing Kernel Modules](~pekit/signing-kernel-modules). |
 
-The first six are in repositories of their own, which `pekit lock` finds
-by their paths. ppk, peiso, qemu, and modsig are in pekit's own repository,
-under `gcslib/`. To pin them, give their paths a source in `pekit.lock`, as
+The first seven are in repositories of their own, which `pekit lock` finds
+by their paths. ppk, peiso and qemu are in pekit's own repository, under
+`gcslib/`. To pin them, give their paths a source in `pekit.lock`, as
 [Pinning Libraries](~pekit/pinning-libraries#take-libraries-from-elsewhere)
 shows.
