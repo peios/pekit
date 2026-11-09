@@ -26,6 +26,9 @@
 //! fails a target that waits for a step's result. On a terminal, a line
 //! shows the steps running as it goes.
 //!
+//! `pekit publish --strict` packs strictly, then publishes as a release
+//! does ([`published_strictly`]).
+//!
 //! The store and the directories steps are staged in are under the cache
 //! directory: `$PEKIT_CACHE_DIR` if it is set, else `pekit` under
 //! `$XDG_CACHE_HOME`, else `~/.cache/pekit`. What is this machine's alone,
@@ -288,7 +291,7 @@ fn build_once(
 }
 
 /// The flags every command that builds takes (see [Commands](#commands)).
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct Shared {
     /// How many programs may run at once.
     #[arg(long, short)]
@@ -319,7 +322,7 @@ struct Shared {
 
 /// The shared flags of the remote cache (see [`Shared`] and [The remote
 /// cache](crate::remote#the-remote-cache)).
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct RemoteFlags {
     /// The remote cache to find steps in, `grpc://HOST:PORT` or
     /// `grpcs://HOST:PORT`, in place of `PEKIT_REMOTE_CACHE`.
@@ -386,7 +389,7 @@ fn remote_of(flags: &RemoteFlags) -> Result<Option<Arc<Remote>>, String> {
 }
 
 /// The shared flags of what is taken from the store (see [`Shared`]).
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct ReuseFlags {
     /// Run every step, reusing nothing from the store.
     #[arg(long)]
@@ -398,7 +401,7 @@ struct ReuseFlags {
 }
 
 /// The shared flags of what a build allows (see [`Shared`]).
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct AllowFlags {
     /// Fail a target that waits for a step's result, a dynamic dependency.
     #[arg(long)]
@@ -1223,15 +1226,21 @@ fn runnable(loaded: &Loaded, name: &str) -> Result<(Target, bool), String> {
 
 /// `pekit package [PACKAGE...]` and `pekit publish PACKAGE... --to STORE`
 /// (see [Commands](#commands)): packs each package with each packager, and
-/// for `publish` publishes each, showing what each packer made.
+/// for `publish` publishes each, showing what each packer made; for
+/// `publish --strict`, once every one has packed strictly
+/// ([`published_strictly`]).
 fn package_command(
     (given, packing): (&[String], &Packing),
     shared: &Shared,
     cwd: &Path,
     terminal: &mut Terminal<'_>,
 ) -> ExitCode {
+    let (command, verb) = match packing {
+        Packing::Pack => ("package", "packed"),
+        Packing::Publish { .. } => ("publish", "published"),
+    };
     if shared.reuse.check_reproducible && matches!(packing, Packing::Publish { .. }) {
-        return changes_the_world("publish", terminal);
+        return changes_the_world(command, terminal);
     }
     let Some(mut loaded) = load_for(cwd, shared, terminal) else {
         return ExitCode::FAILURE;
@@ -1258,22 +1267,19 @@ fn package_command(
     let Some(settings) = settings_for(shared, &loaded, terminal) else {
         return ExitCode::FAILURE;
     };
-    let built = build_targets(
-        (&mut loaded, &packages, Doing::Pack(packing)),
+    let built = packed_as(
+        (&mut loaded, &packages, packing),
         &settings,
         shared,
         terminal,
     );
     let outcomes = match built {
-        Ok(outcomes) => outcomes,
+        Ok(Some(outcomes)) => outcomes,
+        Ok(None) => return ExitCode::FAILURE,
         Err(error) => {
             let _ = write!(terminal.err, "{}", error.render(&loaded));
             return ExitCode::FAILURE;
         }
-    };
-    let verb = match packing {
-        Packing::Pack => "packed",
-        Packing::Publish { .. } => "published",
     };
     let mut failed = false;
     for (package, outcome) in packages.iter().zip(&outcomes.targets) {
@@ -1325,6 +1331,111 @@ fn package_command(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `packages` of `loaded`'s workspace packed, or published, as `packing`
+/// says, with `settings` and `shared`: under `--strict`, published as
+/// [`published_strictly`] publishes them. `None` if that published none.
+///
+/// # Errors
+///
+/// What [`build_targets`] fails with.
+fn packed_as(
+    (loaded, packages, packing): (&mut Loaded, &[Target], &Packing),
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Result<Option<Outcomes>, BuildError> {
+    match packing {
+        Packing::Publish { .. } if shared.allows.strict => {
+            published_strictly((loaded, packages, packing), settings, shared, terminal)
+        }
+        _ => build_targets(
+            (loaded, packages, Doing::Pack(packing)),
+            settings,
+            shared,
+            terminal,
+        )
+        .map(Some),
+    }
+}
+
+/// `pekit publish --strict`'s build of `packages` of `loaded`'s workspace,
+/// as a release's is (see [`released`]): each packed strictly, with
+/// `settings` and `shared`; then, only if every one packed, each published
+/// as `packing` says, with the strict build's settings but allowing the
+/// targets' own effects, since publishing is one, already checked by that
+/// build, and its steps found in the store. A package that failed to pack
+/// publishes nothing, so that a family of packages, which ppk will not
+/// publish again at the same version, is published whole or not at all.
+/// The publishing's outcomes, with the packing's steps counted; `None`,
+/// each failure and the counts shown on `terminal`, if a package did not
+/// pack.
+///
+/// # Errors
+///
+/// What [`build_targets`] fails with.
+fn published_strictly(
+    (loaded, packages, packing): (&mut Loaded, &[Target], &Packing),
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Result<Option<Outcomes>, BuildError> {
+    let packed = build_targets(
+        (loaded, packages, Doing::Pack(&Packing::Pack)),
+        settings,
+        shared,
+        terminal,
+    )?;
+    let failed: Vec<&BuildError> = packed
+        .targets
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().err())
+        .collect();
+    if !failed.is_empty() {
+        for error in &failed {
+            let _ = write!(terminal.err, "{}", error.render(loaded));
+        }
+        let _ = writeln!(
+            terminal.err,
+            "error: nothing is published, since {} of {} packages did not pack strictly",
+            failed.len(),
+            packages.len()
+        );
+        let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
+        warn_of_eviction(&packed, terminal);
+        warn_of_remote(&packed, terminal);
+        return Ok(None);
+    }
+    warn_of_eviction(&packed, terminal);
+    warn_of_remote(&packed, terminal);
+    let publish = Settings {
+        strict: false,
+        reuse: Reuse::Store,
+        ..settings.clone()
+    };
+    // The trace and the profile are the strict build's, and its steps are
+    // found, not run again.
+    let publishing = Shared {
+        trace: None,
+        gcsl_profile: None,
+        reuse: ReuseFlags {
+            rebuild: false,
+            check_reproducible: false,
+        },
+        ..shared.clone()
+    };
+    let mut published = build_targets(
+        (loaded, packages, Doing::Pack(packing)),
+        &publish,
+        &publishing,
+        terminal,
+    )?;
+    published.ran += packed.ran;
+    published.cached = packed.cached;
+    published.programs_found += packed.programs_found;
+    published.found_remotely += packed.found_remotely;
+    Ok(Some(published))
 }
 
 /// The packager's name and the directory of `packed`, a `packaging.Packed`.

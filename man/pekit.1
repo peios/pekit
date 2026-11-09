@@ -208,6 +208,15 @@ as
 does, then publish it with each packager into
 .IR STORE ,
 in program order, outside any step.
+With
+.BR \-\-strict ,
+pack every
+.I PACKAGE
+strictly first, then publish them as
+.B release
+does, allowing the packagers' own effects and finding the strict build's steps; if any
+.I PACKAGE
+fails to pack strictly, publish none.
 .B \-\-check\-reproducible
 is refused.
 .TP

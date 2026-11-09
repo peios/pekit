@@ -29,6 +29,25 @@ publishing into a second store packs nothing again.
 A package that fails to publish fails alone, as any target does, and the
 packages published before it stay published.
 
+## Publishing strictly
+
+A packager's `publish` is a target's own effect, which a strict build
+refuses. So `pekit publish --strict` builds in two passes, as a release
+does (`published_strictly`):
+
+1. **Pack strictly.** Every package selected is packed, as `pekit package
+   --strict` packs it.
+2. **Gate.** If any package failed to pack, the command shows each failure
+   and fails, and publishes nothing. A packager such as ppk never publishes
+   a version twice with other contents, so a family of packages is
+   published whole or not at all.
+3. **Publish.** The packages are published with the strict pass's
+   settings: no host tools, and the same platform key. The target's own
+   effects are allowed, and every step is taken from the store, even with
+   `--rebuild`. This pass writes no trace or GCSL profile.
+
+The steps counted are those of the strict pass, and any the publishing ran.
+
 ## Releasing
 
 `pekit release PACKAGE --to STORE` works in these stages (`release`):
