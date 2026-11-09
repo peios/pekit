@@ -222,6 +222,32 @@ none, and says how many failed:
 error: nothing is published, since 1 of 12 packages did not pack strictly
 ```
 
+## Replace a published version
+
+ppk refuses to publish a version whose contents changed, because something
+might already have fetched the old contents. A repository that nothing has
+fetched from yet, such as one being bootstrapped, can need a version
+rebuilt and published again. For that, give the ppk packager
+`replace = true` in `workspace.gcsl`:
+
+```gcsl
+pekitconf = {
+    packagers = [packager(replace = true)]
+}
+```
+
+The packager then publishes with `ppk fetch --replace`, and each line pekit
+prints names it:
+
+```text
+published example/dev.example.greet with ppk --replace
+```
+
+> [!CAUTION]
+> A replaced version breaks anything that fetched the old one. Use
+> `replace = true` only on a repository nothing has fetched from, and don't
+> commit it.
+
 ## Write a packager
 
 Each packager is a `packaging.Packager`, from GCSL's standard `packaging`

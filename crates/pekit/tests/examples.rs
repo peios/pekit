@@ -401,6 +401,46 @@ fn example_5_s_packages_are_packed_and_published_by_their_packager() {
     }
 }
 
+#[test]
+fn the_ppk_packager_replaces_a_published_version_only_when_told() {
+    let Some(tool) = ppk_tool() else {
+        skip("no `ppk` on PATH");
+        return;
+    };
+    let dir = example(5, PPK);
+    fs::create_dir_all(dir.path().join("tools")).unwrap();
+    fs::copy(tool, dir.path().join("tools/ppk")).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let publish = ["publish", "dev.example.greet", &to];
+    let (out, success) = pekit(dir.path(), cache.path(), &publish);
+    assert!(success, "{out}");
+    // The same version with other content: ppk refuses it.
+    let main = dir.path().join("example/main.c");
+    let text = fs::read_to_string(&main).unwrap();
+    fs::write(&main, text.replacen("\"pekit2\"", "\"you\"", 1)).unwrap();
+    let (out, success) = pekit(dir.path(), cache.path(), &publish);
+    assert!(!success, "{out}");
+    // Told to replace it, the packager does, and says so.
+    let replacing = PPK.replacen("packager()", "packager(replace = true)", 1);
+    fs::write(dir.path().join("workspace.gcsl"), replacing).unwrap();
+    let (out, success) = pekit(dir.path(), cache.path(), &publish);
+    assert!(success, "{out}");
+    assert!(
+        out.starts_with("published example/dev.example.greet with ppk --replace\n"),
+        "{out}"
+    );
+    let packed = dir
+        .path()
+        .join("pekit-out/example/dev.example.greet/pack/artifacts/refs/dev.example.greet/1.0-1");
+    let published = store.path().join("refs/dev.example.greet/1.0-1");
+    assert_eq!(
+        fs::read(packed.join("x86_64")).unwrap(),
+        fs::read(published.join("x86_64")).unwrap()
+    );
+}
+
 /// Example 5 with `ppk` written in the developers' package's body before
 /// its closing brace.
 fn example_5_with_ppk(ppk: &str) -> Option<tempfile::TempDir> {
