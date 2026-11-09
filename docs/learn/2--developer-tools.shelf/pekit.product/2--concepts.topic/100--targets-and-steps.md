@@ -66,7 +66,9 @@ Because a target's code only records each step, pekit learns every step it
 needs before running any of them. A step that takes another step's result
 as an argument runs after that step. Steps that don't depend on each other
 run at the same time, up to the number of programs `--jobs` allows, which
-is by default the number of processors.
+is by default the number of processors. Every build on the machine also
+shares one budget of programs and memory. See [Sharing the
+Machine](~pekit/sharing-the-machine).
 
 ```gcsl
 import "github.com/gcslib/gcc"

@@ -17,6 +17,7 @@ holds:
 | `seen/` | For each workspace root, the stamps of the files a build read. |
 | `git/` | Bare clones of the repositories `fetch_git` fetched from. |
 | `scratch/` | The scratch directories of steps marked `#[scratch]`, with their lock and size files. |
+| `claims/` | A lock file for each step a build claimed. See [Claims](~pekit/claims). |
 | `usage/` | One journal for each build of what it used, for eviction. |
 | `eviction.json` | Each record's eviction priority, and what eviction removed. |
 | `size`, `size.lock` | The blobs' total size as last measured and added to, and its lock. |

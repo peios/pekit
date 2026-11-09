@@ -36,7 +36,9 @@
 //!   nothing, which the next walk sets right.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
-//!   so it evicts nothing while another process has the store.
+//!   so it evicts nothing while another process has the store; having it,
+//!   it removes the claims' files, which no process then holds
+//!   ([Claims](crate::claims#claims)).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
