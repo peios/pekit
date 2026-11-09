@@ -120,6 +120,39 @@ fn a_target_that_ends_a_shared_call_another_waits_on_is_progress() {
 }
 
 #[test]
+fn a_target_that_fails_in_a_guard_still_ends_a_shared_call_another_waits_on() {
+    // `first`'s loop splits its first iteration off inside the memoised
+    // `shared`, which waits for a slow step, and `second` waits for
+    // `first`'s unit to end that call. Then `first`'s second guard fails.
+    // `first` fails only once its first iteration has ended `shared`, so
+    // `second` finds its value, rather than waiting for a unit that will
+    // never run again.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "#[hermetic] fn made(n: Int, pause: String) -> File {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep {pause}; echo {n} > out\"])\n\
+         \x20   = working_dir().file(\"out\")\n\
+         }\n\
+         #[hermetic] fn broken() -> File {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 0.05; exit 3\"])\n\
+         \x20   = working_dir().file(\"out\")\n\
+         }\n\
+         fn shared() ->> String { = made(7, \"1\").read() }\n\
+         fn keep(n: Int) -> Bool { = if n == 2 { broken().read() != \"\" } else { true } }\n\
+         def build first() { = for n in [1, 2] if keep(n) { = shared() } }\n\
+         def build second() { = shared() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |_| {});
+    assert!(outcomes[0].is_err(), "{outcomes:?}");
+    assert_eq!(
+        outcomes[1],
+        Ok(Plain::Str("7\n".to_owned())),
+        "{outcomes:?}"
+    );
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (
