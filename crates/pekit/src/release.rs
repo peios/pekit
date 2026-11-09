@@ -14,7 +14,9 @@
 //! before anything is published ([`Repository::tagged`]).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+use crate::git_export::{self, ExportError};
 
 /// The git repository a workspace is in, at its `HEAD`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,30 +96,17 @@ impl Repository {
         } else {
             format!("{}:{}", self.head, self.prefix)
         };
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.top)
-            .args(["archive", "--format=tar", &tree])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("cannot run `git archive`: {error}"))?;
-        let unpacked = match child.stdout.take() {
-            Some(out) => tar::Archive::new(out)
-                .unpack(into)
-                .map_err(|error| format!("cannot write `{}`: {error}", into.display())),
-            None => Err("`git archive` gave no output".to_owned()),
-        };
-        let finished = child
-            .wait_with_output()
-            .map_err(|error| format!("cannot run `git archive`: {error}"))?;
-        if !finished.status.success() {
-            return Err(format!(
-                "`git archive {tree}` failed: {}",
-                String::from_utf8_lossy(&finished.stderr).trim()
-            ));
-        }
-        unpacked
+        git_export::export(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.top)
+                .args(["archive", "--format=tar", &tree]),
+            into,
+        )
+        .map_err(|error| match error {
+            ExportError::Unpack(error) => format!("cannot write `{}`: {error}", into.display()),
+            error => format!("`git archive {tree}` {error}"),
+        })
     }
 
     /// The commit the tag `tag` is on, if there is a tag of that name.
