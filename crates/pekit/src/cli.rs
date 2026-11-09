@@ -1586,15 +1586,25 @@ fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
             message
         }
     })?;
-    let dir = budget_dir(&var, cache);
     let peaks = state_dir().join("peaks");
-    let budget =
-        Budget::open(&dir, limits, (&peaks, std::env::current_exe().ok())).map_err(|error| {
+    let open = |dir: &Path| {
+        Budget::open(dir, limits, (&peaks, std::env::current_exe().ok())).map_err(|error| {
             format!(
                 "cannot open the machine's budget in `{}`: {error}",
                 dir.display()
             )
-        })?;
+        })
+    };
+    // A runtime directory that cannot be used, one of a session that has
+    // ended say, leaves the budget in the cache directory.
+    let dir = budget_dir(&var, cache);
+    let (dir, budget) = if let Ok(budget) = open(&dir) {
+        (dir, budget)
+    } else {
+        let dir = budget_dir(&|_| None, cache);
+        let budget = open(&dir)?;
+        (dir, budget)
+    };
     remove_stale_fifos(&dir);
     Ok(Arc::new(budget))
 }

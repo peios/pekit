@@ -97,8 +97,9 @@ is a job of the machine's budget that pekit lends while it's free.
 
 So a step's `make` runs its recipes one at a time on a busy machine, and as
 many at once as there are free jobs on an idle one. Run `make` without `-j`
-in a step: GNU make 4.4 or later takes its jobs from the jobserver, and
-an older make runs one recipe at a time.
+in a step: GNU make 4.4 or later takes its jobs from the jobserver. An
+older make can't read this form of jobserver and can stop with an error,
+so a step that runs make needs make 4.4 or later.
 
 pekit takes lent jobs back as soon as another program waits for the
 budget. A step that sets `MAKEFLAGS` or `CARGO_MAKEFLAGS` itself keeps its

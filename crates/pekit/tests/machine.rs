@@ -392,3 +392,24 @@ fn a_build_waiting_for_a_claimed_step_runs_its_others_meanwhile() {
     // Step 0 beside the second's others.
     assert!(most >= 2, "{most} at once");
 }
+
+#[test]
+fn a_runtime_directory_that_cannot_be_used_leaves_the_budget_in_the_cache() {
+    let marker = format!("pekit-budget-fallback-{}", std::process::id());
+    let cache = tempfile::tempdir().unwrap();
+    let dir = napping(&marker, 0, 1);
+    let child = start(
+        dir.path(),
+        cache.path(),
+        &["build", "naps"],
+        &[("XDG_RUNTIME_DIR", "/proc/no-such-session")],
+    );
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", printed(&output).1);
+    // The program took a job there, whichever it found free first.
+    let jobs = fs::read_dir(cache.path().join("budget")).unwrap();
+    assert!(
+        jobs.flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+    );
+}

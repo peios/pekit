@@ -32,7 +32,7 @@ Each limit is read, in order of precedence, from:
 
 The budget's directory is `pekit/budget` under `$XDG_RUNTIME_DIR`, which the
 system empties when the user's last session ends, or `budget` in the cache
-directory where that's unset. It holds:
+directory where that's unset or can't be used. It holds:
 
 | File | Held by |
 |---|---|
@@ -120,8 +120,9 @@ Each metered program is offered a GNU make jobserver. The meter makes a
 FIFO, `fifo-<pid>-<n>` in the budget's directory, and bubblewrap binds it
 at `/dev/pekit-jobserver`. `MAKEFLAGS` and `CARGO_MAKEFLAGS` are set to
 `--jobserver-auth=fifo:/dev/pekit-jobserver`, each unless the program's
-`exec` sets it. Neither has `-j`, which a make older than 4.4, reading no
-FIFO, would take as no limit.
+`exec` sets it. Neither has `-j`. GNU make reads the FIFO form from 4.4;
+an older make doesn't, and by its source stops with "invalid
+--jobserver-auth string" (not tested).
 
 The program holds one job, which the protocol leaves implicit. Every 10 ms,
 the meter:

@@ -136,8 +136,8 @@ impl Metered {
 /// Sets `MAKEFLAGS` and `CARGO_MAKEFLAGS` in `wrapped`, a sandbox's
 /// bubblewrap, to name the jobserver at `fifo`, bound at [`JOBSERVER`],
 /// each unless `env`, the program's environment, sets it (see
-/// [Jobservers](#jobservers)): never `-j`, which a make older than 4.4,
-/// that reads no FIFO, would take as no limit at all.
+/// [Jobservers](#jobservers)): never `-j`, which would take the program's
+/// jobs from it. A make older than 4.4 reads no FIFO, and fails on one.
 pub fn offer_jobserver(wrapped: &mut Command, fifo: &Path, env: &[(String, Option<String>)]) {
     wrapped.arg("--bind").arg(fifo).arg(JOBSERVER);
     let flags = format!("--jobserver-auth=fifo:{JOBSERVER}");
