@@ -64,10 +64,23 @@ pekit reads build files from every directory of the workspace, except:
   relative to the root, and lines that start with `#` are comments.
 
 These rules decide only which `.gcsl` files declare definitions. A build
-can read any file under the root, hidden or not, and a directory listing
-such as `dir(".").files()` includes them all. The one exception is
-`pekit-out/`, the output directory: no listing includes it, and no build
-reads it as part of the workspace.
+can read any file under the root, hidden or not. A directory listing such
+as `dir(".").files()` includes hidden files too, but it leaves out three
+kinds of directory, with everything in them:
+
+- `pekit-out/`, the output directory. No build reads it as part of the
+  workspace.
+- `.git` at the root, the workspace's history.
+- A directory below the root that holds a `.git` of its own, file or
+  directory: a nested checkout, a Git worktree, or a submodule. It's
+  another repository, so a listing doesn't descend into it. A listing of
+  that directory itself, such as `dir("other").files()`, still includes
+  everything in it.
+
+pekit still loads the `.gcsl` files of a nested checkout that isn't hidden
+and has no `workspace.gcsl` of its own. To keep pekit out of one, or out of
+a large output directory such as Cargo's `target/`, name it in
+`.gcslignore`.
 
 A step can take the whole workspace, by being given `dir(".")` at the root.
 It receives everything under the root except `.git` and `pekit-out/`, so a

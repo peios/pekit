@@ -56,4 +56,6 @@ tree, without running anything.
 
 `pekit-out/` is not part of the workspace. GCSL's directory listings of the
 workspace leave it out, and a step can't be given a file of it by its
-workspace path; outputs are named by their `/pekit-out` paths.
+workspace path; outputs are named by their `/pekit-out` paths. The listings
+leave out the root's `.git` too, and any directory below the root that
+holds a `.git` of its own (`HostView::hides`), without descending into it.
