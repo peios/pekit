@@ -6,6 +6,7 @@
 //! inputs, from a content-addressed cache where it has them (see the
 //! design, `design/engine.md`).
 
+pub mod budget;
 pub mod cli;
 pub mod engine;
 pub mod events;
@@ -19,6 +20,7 @@ pub mod keychain;
 pub mod layers;
 pub mod load;
 pub mod lock;
+pub mod meter;
 pub mod platform;
 pub mod pool;
 pub mod programs;

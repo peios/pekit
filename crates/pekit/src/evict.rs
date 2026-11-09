@@ -75,7 +75,7 @@ pub fn limit_of(setting: Option<&str>) -> Result<Option<u64>, String> {
 }
 
 /// The number of bytes `text` says: digits, then a unit or none.
-fn size_of(text: &str) -> Option<u64> {
+pub(crate) fn size_of(text: &str) -> Option<u64> {
     let text = text.trim();
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
