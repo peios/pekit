@@ -13,6 +13,7 @@ use gcsl::eval::plain::Plain;
 use pekit::events::EventKind;
 use pekit::exposure::Exposing;
 use pekit::store::Store;
+use sha2::{Digest as _, Sha256};
 
 use building::{Options, build_in, observed_with};
 use skipping::skip;
@@ -460,6 +461,79 @@ fn a_package_s_ppk_field_is_its_manifest_s_metadata() {
         .join("pekit-out/example/dev.example.greet/pack/artifacts");
     let identity = packed_by_hand(dir.path(), cache.path());
     assert!(greet.join(format!("manifests/sha256/{identity}")).is_file());
+}
+
+/// A self-relative security descriptor with an owner, a group and a DACL:
+/// gxwi's override of `usr/bin/gxwi-server` in the old repository.
+const DESCRIPTOR: &str = "010004801400000020000000000000002c000000010100000000000512000000\
+    01010000000000051200000002007c0004000000000014000000001001010000\
+    0000000512000000000018000000001001020000000000052000000020020000\
+    00001400000000a001010000000000010000000000003400000000a001090000\
+    0000000f03000000f00fd709e0ee21c068cb5e4af60ebf884e359bda5e43af72\
+    481c2cfb367febf7";
+
+#[test]
+fn a_package_s_descriptors_and_signatures_reach_its_manifest() {
+    let upper = DESCRIPTOR.to_uppercase();
+    let Some(dir) = example_5_with_ppk(&format!(
+        "    ppk = {{descriptors = {{\"include\" = \"{upper}\"; \"lib/libgreet.a\" = \"{upper}\"}}}}",
+    )) else {
+        return;
+    };
+    // A signature is a file placed beside the one it signs: 3310 bytes,
+    // starting with its version, 1. The archive isn't ELF, so it can have
+    // one.
+    let mut signature = vec![0x5a; 3310];
+    signature[0] = 1;
+    fs::write(dir.path().join("example/libgreet.a.peios.sig"), &signature).unwrap();
+    let path = dir.path().join("example/package.gcsl");
+    let text = fs::read_to_string(&path).unwrap();
+    let from = "\"lib/libgreet.a\" = g.archive}";
+    fs::write(
+        &path,
+        text.replacen(
+            from,
+            "\"lib/libgreet.a\" = g.archive; \
+             \"lib/libgreet.a.peios.sig\" = file(\"libgreet.a.peios.sig\")}",
+            1,
+        ),
+    )
+    .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (out, success) = pekit(dir.path(), cache.path(), &["package"]);
+    assert!(success, "{out}");
+    let artifacts = dir
+        .path()
+        .join("pekit-out/example/dev.example.greet-dev/pack/artifacts");
+    let manifest = fs::read_dir(artifacts.join("manifests/sha256"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<Vec<_>>();
+    let [manifest] = &manifest[..] else {
+        panic!("not one manifest: {manifest:?}");
+    };
+    let digest = Sha256::digest(&signature)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+            hex
+        });
+    // Each descriptor in its entry, in lowercase, the directory's included,
+    // and the signature as a blob the archive's entry names.
+    assert!(
+        manifest.contains(&format!(
+            "\"include\" = {{ dir = true, descriptor = \"{DESCRIPTOR}\" }}\n"
+        )),
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains(&format!(
+            "descriptor = \"{DESCRIPTOR}\", signature = \"sha256:{digest}\" }}\n"
+        )),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("peios.sig\" ="), "{manifest}");
+    assert!(artifacts.join(format!("blobs/sha256/{digest}")).is_file());
 }
 
 /// The identity of example 5's program packed by hand, as
