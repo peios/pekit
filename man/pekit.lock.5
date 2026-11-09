@@ -92,7 +92,18 @@ It exports each library it pins, with
 .BR "git archive" ,
 into
 .IR .gcsl/libraries/PATH/ ,
-and drops each pinned library that nothing imports, with its directory.
+and drops each pinned library that nothing imports, with its directory unless that is inside a library still pinned.
+.PP
+A library whose directory is inside another's, such as
+.B example.org/sdk/tools
+inside
+.BR example.org/sdk ,
+is pinned at the other's commit of the same repository, its
+.B dir
+the other's followed by the rest of its path.
+Every command that reads the file refuses two such libraries pinned otherwise, naming both, since each export would replace the other's files.
+.B pekit lock \-\-update
+pins both at one commit when one source gives both.
 .PP
 .BR build ,
 .BR test ,

@@ -205,6 +205,49 @@ into an artifact directory with `ppk fetch`, which refuses a version whose
 contents changed: publish a new version instead. If one package fails to
 publish, the packages published before it stay published.
 
+## Publish strictly
+
+A strict build refuses a target's own effects, and publishing is one. To
+publish what a strict build packs, pass `--strict` to `pekit publish`:
+
+```sh
+pekit publish 'pkgs/**' --to /srv/artifacts --strict
+```
+
+pekit packs every package strictly, then publishes them, taking every pack
+from the store. If any package fails to pack strictly, pekit publishes
+none, and says how many failed:
+
+```text
+error: nothing is published, since 1 of 12 packages did not pack strictly
+```
+
+## Replace a published version
+
+ppk refuses to publish a version whose contents changed, because something
+might already have fetched the old contents. A repository that nothing has
+fetched from yet, such as one being bootstrapped, can need a version
+rebuilt and published again. For that, give the ppk packager
+`replace = true` in `workspace.gcsl`:
+
+```gcsl
+pekitconf = {
+    packagers = [packager(replace = true)]
+}
+```
+
+The packager then publishes with `ppk fetch --replace`, and each line pekit
+prints names it:
+
+```text
+published example/dev.example.greet with ppk --replace
+```
+
+> [!CAUTION]
+> A replaced version breaks anything that fetched the old one. Use
+> `replace = true` only on a repository nothing has fetched from, and don't
+> commit it.
+
 ## Write a packager
 
 Each packager is a `packaging.Packager`, from GCSL's standard `packaging`

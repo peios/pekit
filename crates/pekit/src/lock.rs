@@ -17,6 +17,11 @@
 //! and on `$GCSL_LIBRARY_PATH`, which would find libraries elsewhere
 //! ([`check_strict`]).
 //!
+//! A library's directory can be in another's, as `example.org/sdk/tools`'s
+//! is in `example.org/sdk`'s, whose export holds it. Both are then pinned
+//! at one commit, of one repository, or neither command goes on: else each
+//! export would replace the other's files.
+//!
 //! A library's source is the first of the lock's sources ([`Source`]) whose
 //! prefix its path is under: a git repository, the directory in it that the
 //! prefix's libraries are under, and the revision to follow. A library no
@@ -104,6 +109,9 @@ pub enum LockError {
     Git(String),
     /// A strict build's libraries are not as the lock pins them.
     Strict(Vec<String>),
+    /// Two pins that cannot both be exported: one library's directory is
+    /// in the other's, and they are not of one commit (see [`nested`]).
+    Nested(String),
 }
 
 impl LockError {
@@ -111,7 +119,9 @@ impl LockError {
     #[must_use]
     pub fn render(&self) -> String {
         match self {
-            LockError::Io(message) | LockError::Git(message) => format!("error: {message}\n"),
+            LockError::Io(message) | LockError::Git(message) | LockError::Nested(message) => {
+                format!("error: {message}\n")
+            }
             LockError::Strict(problems) => {
                 let mut shown = String::from(
                     "error: a strict build uses the libraries `pekit.lock` pins, and only them:\n",
@@ -228,11 +238,15 @@ pub struct Locked {
 /// says so, fetched and pinned at its source's revision, and each pinned and
 /// no longer imported unpinned, its directory, which the lock put there,
 /// removed, unless it is in a library still pinned, whose own it then is.
-/// A library still pinned in a directory removed is put back.
+/// A library still pinned in a directory removed is put back. A library
+/// whose directory is in another's, or holds another's, is pinned at that
+/// other's commit or not at all ([`nested`]), before it is exported.
 ///
 /// # Errors
 ///
-/// That the lock or a library cannot be read or written, or git fails.
+/// That the lock or a library cannot be read or written, git fails, or a
+/// library would be pinned at another commit than one its directory is in
+/// or holds, the lock then left as it was.
 pub fn lock(
     root: &Path,
     (cache, store): (&Path, &Store),
@@ -250,6 +264,7 @@ pub fn lock(
         let pin = match lock.pinned(&path) {
             Some(pin) if !update => {
                 let pin = pin.clone();
+                nested(&pin, &pins)?;
                 export(root, cache, &pin)?;
                 pin
             }
@@ -271,6 +286,7 @@ pub fn lock(
                     commit,
                     tree: String::new(),
                 };
+                nested(&pin, &pins)?;
                 export(root, cache, &pin)?;
                 pin.tree = tree_of(root, store, &path)?.hex();
                 if lock.pinned(&path) != Some(&pin) {
@@ -314,11 +330,16 @@ pub fn lock(
 ///
 /// # Errors
 ///
-/// That the lock cannot be read, or a library cannot be put back.
+/// That the lock cannot be read, pins a library whose directory is in
+/// another's at another commit ([`nested`]), before anything is put back,
+/// or a library cannot be put back.
 pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<String>, LockError> {
     let Some(lock) = Lock::read(root)? else {
         return Ok(Vec::new());
     };
+    for (at, pin) in lock.libraries.iter().enumerate() {
+        nested(pin, &lock.libraries[..at])?;
+    }
     let mut differ = Vec::new();
     for pin in &lock.libraries {
         let dir = root.join(LIBRARIES_DIR).join(&pin.path);
@@ -415,6 +436,55 @@ fn library_imports(dir: &Path) -> Result<Vec<String>, LockError> {
 fn inside(path: &str, outer: &str) -> bool {
     path.strip_prefix(outer)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Refuses `pin` beside `others` if one's directory is in the other's, as
+/// `a/b`'s is in `a`'s, and they are not of one commit: the outer one's
+/// export holds the inner one's directory, so each would replace the
+/// other's files, and whichever was exported last would win. They are of
+/// one commit if they are of one repository and commit, the inner one's
+/// directory in it the outer one's and the rest of its path.
+///
+/// # Errors
+///
+/// [`LockError::Nested`], naming both pins and how to pin them as one.
+fn nested(pin: &Pinned, others: &[Pinned]) -> Result<(), LockError> {
+    for other in others {
+        let (outer, inner) = if inside(&pin.path, &other.path) {
+            (other, pin)
+        } else if inside(&other.path, &pin.path) {
+            (pin, other)
+        } else {
+            continue;
+        };
+        let rest = &inner.path[outer.path.len() + 1..];
+        let dir = if outer.dir.is_empty() {
+            rest.to_owned()
+        } else {
+            format!("{}/{rest}", outer.dir)
+        };
+        if inner.git == outer.git && inner.commit == outer.commit && inner.dir == dir {
+            continue;
+        }
+        let shown = |pin: &Pinned| {
+            let dir = if pin.dir.is_empty() {
+                "the root".to_owned()
+            } else {
+                format!("`{}`", pin.dir)
+            };
+            format!("`{}` is {dir} of `{}` at {}", pin.path, pin.git, pin.commit)
+        };
+        return Err(LockError::Nested(format!(
+            "`{}`'s directory is in `{}`'s, so both must be pinned at one commit, and are \
+             not:\n  {}\n  {}\npin both at one commit: give their sources in `pekit.lock` one \
+             repository and revision, and run `pekit lock --update`",
+            inner.path,
+            outer.path,
+            shown(outer),
+            shown(inner)
+        )));
+    }
+    Ok(())
 }
 
 /// The digest of the tree of the library `path` as exported under the

@@ -208,6 +208,15 @@ as
 does, then publish it with each packager into
 .IR STORE ,
 in program order, outside any step.
+With
+.BR \-\-strict ,
+pack every
+.I PACKAGE
+strictly first, then publish them as
+.B release
+does, allowing the packagers' own effects and finding the strict build's steps; if any
+.I PACKAGE
+fails to pack strictly, publish none.
 .B \-\-check\-reproducible
 is refused.
 .TP
@@ -369,6 +378,17 @@ Steps marked
 .B #[scratch]
 are given an empty directory.
 Steps are keyed apart from a build that is not strict, and not by the host's packages.
+A workspace whose
+.B pekitconf.require_strict
+is
+.B true
+refuses
+.BR build ,
+.BR test ,
+.BR package ,
+and
+.B publish
+without it.
 .TP
 .BI \-\-trace " FILE"
 Write a trace of the build to
@@ -611,6 +631,23 @@ record sets the
 and
 .B packagers
 contexts for every target, where the workspace imports the module that declares each.
+Its
+.B require_strict
+field, written
+.B true
+or
+.B false
+in that record, makes
+.BR build ,
+.BR test ,
+.BR package ,
+and
+.B publish
+fail without
+.B \-\-strict
+if it is
+.BR true .
+pekit reads it as written, before it builds.
 .TP
 .I pekit.lock
 The libraries the workspace pins, and where they come from; see
