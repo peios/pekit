@@ -17,6 +17,14 @@ tools/check
 Some tests take several minutes, such as the one that boots an ISO, and are
 ignored unless asked for. `tools/check --all` runs them too.
 
+The style check uses pinned PSC tools. Prepare them once, outside the
+repository, and point the check at them:
+
+```sh
+python3 tools/prepare-style-tools.py ~/.cache/peios/pekit-style
+export PEIOS_STYLE_BIN=~/.cache/peios/pekit-style/bin
+```
+
 ## What the tests need
 
 Many tests build something real, and need what that build needs on the
