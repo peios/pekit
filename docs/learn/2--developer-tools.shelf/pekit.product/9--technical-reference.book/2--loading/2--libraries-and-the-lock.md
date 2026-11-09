@@ -67,6 +67,18 @@ library's, so it stays. A library still pinned whose directory was inside
 the one removed is exported again. The lock is written with its libraries
 sorted by path.
 
+Two libraries whose directories nest, one's directory inside the other's,
+are pinned at one commit or not at all (`lock::nested`). The outer
+library's export holds the inner one's directory, so the two agree only if
+both have one repository and commit, and the inner library's directory in
+the repository is the outer one's followed by the rest of its path.
+Otherwise each export replaces the other's files, and whichever is exported
+last wins. Before each library is exported, its pin is compared with every
+pin made so far. A pin that disagrees fails the command, naming both pins,
+and the lock is not written. Libraries exported before the failure stay as
+exported, so the next build can find the outer library differing from its
+pin.
+
 A library is exported with `git archive` of the commit's directory, into
 `.gcsl/libraries/<path>/`, replacing what was there. Repositories are bare
 clones under the cache directory's `git/`, fetched only to resolve a
@@ -78,6 +90,8 @@ program found on `PATH`.
 Before loading, `build`, `test`, `run`, `query`, `package`, and `publish`
 restore the lock's libraries (`lock::restore`):
 
+- Every pair of pins is compared, as pinning compares them, before anything
+  is exported. Two nested libraries pinned at two commits fail the command.
 - A pinned library whose directory is missing is exported from its commit.
 - A pinned library whose directory is there is put into the store as a
   tree, and its digest compared with the pin's. A library that differs is

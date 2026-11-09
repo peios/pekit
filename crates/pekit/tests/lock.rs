@@ -4,7 +4,7 @@
 mod skipping;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use skipping::skip;
@@ -315,4 +315,212 @@ fn a_library_dropped_leaves_the_libraries_its_directory_is_in_or_holds() {
     assert!(!sdk.join("sdk.gcsl").exists());
     let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
     assert!(built.status.success(), "{:?}", shown(&built));
+}
+
+/// The commit `rev` of the repository `dir`.
+fn rev_parse(dir: &Path, rev: &str) -> String {
+    let ran = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    String::from_utf8(ran.stdout).unwrap().trim().to_owned()
+}
+
+/// What a workspace that imports both `example.org/libs/sdk` and the
+/// library in its directory, `example.org/libs/sdk/tools`, builds them to.
+const BOTH: &str = "import \"example.org/libs/sdk\"\n\
+                    import \"example.org/libs/sdk/tools\"\n\
+                    def build hi() { = \"{sdk.name()} {tools.tool()}\" }\n";
+
+/// A repository whose `libs/sdk` holds `libs/sdk/tools`, committed, and a
+/// workspace whose `app` imports `sdk` alone, locked, its lock naming the
+/// repository as the source of `example.org/libs`: each in a directory of
+/// `dir`, the workspace's cache in `cache`. The repository, the workspace
+/// and the commit pinned.
+fn nested_libraries_locked(dir: &Path, cache: &Path) -> (PathBuf, PathBuf, String) {
+    let repo = dir.join("repo");
+    write(
+        &repo,
+        &[
+            ("libs/sdk/sdk.gcsl", "def name() -> String { \"sdk\" }\n"),
+            (
+                "libs/sdk/tools/tools.gcsl",
+                "def tool() -> String { \"tool\" }\n",
+            ),
+        ],
+    );
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let lock = format!(
+        "{{\"sources\": [{{\"prefix\": \"example.org/libs\", \"git\": \"{}\", \"dir\": \
+         \"libs\", \"rev\": \"main\"}}]}}\n",
+        repo.display()
+    );
+    let ws = dir.join("ws");
+    write(
+        &ws,
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "import \"example.org/libs/sdk\"\n\
+                 def build hi() { = sdk.name() }\n",
+            ),
+            ("pekit.lock", &lock),
+        ],
+    );
+    let locked = pekit(&ws, cache, &["lock"], None);
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    let one = rev_parse(&repo, "HEAD");
+    (repo, ws, one)
+}
+
+#[test]
+fn a_library_in_another_s_directory_is_pinned_at_its_commit_or_refused() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (repo, ws, one) = nested_libraries_locked(dir.path(), cache.path());
+    // The repository moves on, and the library inside the one pinned is
+    // imported: pinned at the source's revision, it would be at another
+    // commit than the one its directory is in.
+    write(
+        &repo,
+        &[(
+            "libs/sdk/tools/tools.gcsl",
+            "def tool() -> String { \"tool two\" }\n",
+        )],
+    );
+    git(&repo, &["commit", "-qam", "two"]);
+    let two = rev_parse(&repo, "HEAD");
+    write(&ws, &[("app/build.gcsl", BOTH)]);
+    let before = fs::read_to_string(ws.join("pekit.lock")).unwrap();
+    let refused = pekit(&ws, cache.path(), &["lock"], None);
+    let (out, err) = shown(&refused);
+    assert!(!refused.status.success(), "{out}");
+    let repo = repo.display();
+    assert_eq!(
+        err,
+        format!(
+            "error: `example.org/libs/sdk/tools`'s directory is in `example.org/libs/sdk`'s, \
+             so both must be pinned at one commit, and are not:\n  \
+             `example.org/libs/sdk` is `libs/sdk` of `{repo}` at {one}\n  \
+             `example.org/libs/sdk/tools` is `libs/sdk/tools` of `{repo}` at {two}\n\
+             pin both at one commit: give their sources in `pekit.lock` one repository and \
+             revision, and run `pekit lock --update`\n"
+        )
+    );
+    assert_eq!(fs::read_to_string(ws.join("pekit.lock")).unwrap(), before);
+    // Both pinned at the repository's new commit: of one commit, the one's
+    // directory the other's, which a strict build finds as pinned.
+    let updated = pekit(&ws, cache.path(), &["lock", "--update"], None);
+    assert!(updated.status.success(), "{:?}", shown(&updated));
+    assert_eq!(
+        shown(&updated).0,
+        format!(
+            "pinned example.org/libs/sdk at {two}\n\
+             pinned example.org/libs/sdk/tools at {two}\n"
+        )
+    );
+    let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(built.status.success(), "{:?}", shown(&built));
+}
+
+#[test]
+fn a_lock_pinning_a_library_in_another_s_directory_at_another_commit_is_refused() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (repo, ws, one) = nested_libraries_locked(dir.path(), cache.path());
+    write(&ws, &[("app/build.gcsl", BOTH)]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    assert!(
+        pekit(&ws, cache.path(), &["lock", "--update"], None)
+            .status
+            .success()
+    );
+    // A lock pinning them at two commits, as one written by hand might:
+    // every command refuses it before putting either back, whichever order
+    // it would put them back in.
+    let mut written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ws.join("pekit.lock")).unwrap()).unwrap();
+    for pin in written["libraries"].as_array_mut().unwrap() {
+        if pin["path"] == "example.org/libs/sdk/tools" {
+            pin["commit"] = serde_json::Value::String(one.clone());
+        }
+    }
+    fs::write(
+        ws.join("pekit.lock"),
+        serde_json::to_string_pretty(&written).unwrap(),
+    )
+    .unwrap();
+    fs::remove_dir_all(ws.join(".gcsl")).unwrap();
+    let refused = pekit(&ws, cache.path(), &["build", "hi"], None);
+    let (_, err) = shown(&refused);
+    assert!(!refused.status.success());
+    assert!(
+        err.starts_with(
+            "error: `example.org/libs/sdk/tools`'s directory is in `example.org/libs/sdk`'s, \
+             so both must be pinned at one commit, and are not:\n"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "`libs/sdk/tools` of `{}` at {one}",
+            repo.display()
+        )),
+        "{err}"
+    );
+    assert!(!ws.join(".gcsl/libraries").exists());
+}
+
+#[test]
+fn a_library_of_another_repository_in_another_s_directory_is_refused() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (repo, ws, _) = nested_libraries_locked(dir.path(), cache.path());
+    let other = dir.path().join("other");
+    write(
+        &other,
+        &[("tools.gcsl", "def tool() -> String { \"other\" }\n")],
+    );
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "one"]);
+    let mut written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ws.join("pekit.lock")).unwrap()).unwrap();
+    written["sources"] = serde_json::json!([
+        {"prefix": "example.org/libs/sdk/tools", "git": other.display().to_string(), "rev": "main"},
+        {"prefix": "example.org/libs", "git": repo.display().to_string(), "dir": "libs", "rev": "main"},
+    ]);
+    fs::write(
+        ws.join("pekit.lock"),
+        serde_json::to_string_pretty(&written).unwrap(),
+    )
+    .unwrap();
+    write(&ws, &[("app/build.gcsl", BOTH)]);
+    let refused = pekit(&ws, cache.path(), &["lock"], None);
+    let (_, err) = shown(&refused);
+    assert!(!refused.status.success());
+    assert!(
+        err.contains(&format!(
+            "`example.org/libs/sdk/tools` is the root of `{}` at",
+            other.display()
+        )),
+        "{err}"
+    );
 }

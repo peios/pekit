@@ -62,6 +62,40 @@ imports any more is dropped from the lock, and its directory with it:
 dropped example.org/greeting, no longer imported
 ```
 
+If the dropped library's directory is inside a library that's still pinned,
+the directory belongs to that library and stays.
+
+## Pin a library inside another
+
+A library's directory can be inside another library's, as
+`github.com/peios/peios-sdk/tools` is inside `github.com/peios/peios-sdk`.
+The outer library's export holds the inner one's directory, so pekit pins
+both at one commit of one repository. It refuses to pin them at two
+commits, because each export would overwrite the other's files.
+
+The usual way to meet this is to import the inner library after the outer
+one is pinned and its repository has moved on. `pekit lock` would pin the
+inner library at the repository's new commit, so it refuses, naming both:
+
+```text
+error: `github.com/peios/peios-sdk/tools`'s directory is in `github.com/peios/peios-sdk`'s, so both must be pinned at one commit, and are not:
+  `github.com/peios/peios-sdk` is the root of `https://github.com/peios/peios-sdk` at 3f1c0a9e2b7d45c8a6e0f9b18d2c47e5a1b3c6d8
+  `github.com/peios/peios-sdk/tools` is `tools` of `https://github.com/peios/peios-sdk` at 9b2e4d71c0a85f36e1d7c9a2b4f08e6d3c5a17b9
+pin both at one commit: give their sources in `pekit.lock` one repository and revision, and run `pekit lock --update`
+```
+
+To pin both at one commit, run `pekit lock --update`. When both libraries
+come from one source, as they do by default, it pins them at the same
+commit. If you gave them sources of their own, make the sources name one
+repository and revision first.
+
+`pekit.lock` is unchanged by the refusal, but the inner library might
+already be exported at the new commit. Until you run `pekit lock --update`,
+builds then warn that the outer library differs from its pin.
+
+Every command that builds refuses a `pekit.lock` that pins two such
+libraries at two commits in the same way, before it exports either.
+
 ## When a library differs from its pin
 
 If a library under `.gcsl/libraries/` differs from the commit it's pinned
