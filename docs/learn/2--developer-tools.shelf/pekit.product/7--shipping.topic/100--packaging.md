@@ -79,12 +79,34 @@ def package dev.example.greet-dev() {
   - `provides`: the capabilities it offers, each with a version.
   - `claims`: links it owns outside its files, each an absolute path and
     the link's target, such as `"/usr/bin/sh" = "dash"`.
+  - `descriptors`: files and directories of the package that get a
+    security descriptor of their own, each a path as `files` gives it and
+    the descriptor in hexadecimal.
 
 An empty string means any version, or no version. ppk checks every value as
 `ppk pack` does, and finds an ELF program's libraries and their floors
 itself, so don't write those. A field ppk has no form for is an error
 naming it, so a misspelt field never goes missing quietly. A package
 without `ppk` is packed with no metadata, as before.
+
+A signed file, such as firmware, takes its signature from a file beside it
+named with `.peios.sig` added. Place the signature in `files` like any other
+file, or in the directory you place. `ppk pack` records it in the signed
+file's entry and doesn't pack it as a file:
+
+```gcsl
+def package dev.example.firmware() {
+    version = "1.0-1"
+    files = {
+        "lib/firmware/acme/fw.bin" = file("fw.bin")
+        "lib/firmware/acme/fw.bin.peios.sig" = file("fw.bin.peios.sig")
+    }
+    ppk = {descriptors = {"lib/firmware/acme" = "0100048014000000..."}}
+}
+```
+
+The descriptor is shortened here. What ppk requires of a descriptor or a
+signature is under SECURITY METADATA in `ppk(1)`.
 
 ## Register the packager
 
