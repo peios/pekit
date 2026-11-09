@@ -2,6 +2,7 @@
 //! `design/additive.md`, F1).
 
 mod building;
+mod skipping;
 
 use std::fs;
 use std::path::Path;
@@ -9,6 +10,7 @@ use std::path::Path;
 use building::{Options, build_in, observed_with};
 use pekit::engine::{Built, Reuse};
 use pekit::events::EventKind;
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -186,7 +188,7 @@ fn a_step_given_a_secret_has_no_program_found_or_recorded() {
 fn a_sandbox_s_program_found_leaves_its_writes_for_the_next() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let text = |word: &str| {

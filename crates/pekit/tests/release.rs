@@ -1,8 +1,12 @@
 //! Tests of `pekit release`, in a git repository of the test's own.
 
+mod skipping;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -102,7 +106,7 @@ fn has_git() -> bool {
 #[test]
 fn a_release_is_built_from_head_published_and_tagged() {
     if !has_git() {
-        eprintln!("skipped: no `git`");
+        skip("no `git`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -179,7 +183,7 @@ fn data_archive() -> Vec<u8> {
 #[test]
 fn a_release_s_checking_and_publishing_unpack_what_its_build_unpacked() {
     if !has_git() {
-        eprintln!("skipped: no `git`");
+        skip("no `git`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -218,7 +222,7 @@ fn a_release_s_checking_and_publishing_unpack_what_its_build_unpacked() {
 #[test]
 fn a_release_needs_a_commit() {
     if !has_git() {
-        eprintln!("skipped: no `git`");
+        skip("no `git`");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,7 @@
 //! Tests of the content store, receipts and records.
 
+mod skipping;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,6 +10,8 @@ use gcsl::eval::plain::Plain;
 use pekit::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use pekit::record::{Kept, StepRecord, StoreError, keep_files, stored};
 use pekit::store::{Digest, Store};
+
+use skipping::skip;
 
 /// A store in a new temporary directory, and the directory.
 fn store() -> (Store, tempfile::TempDir) {
@@ -111,7 +115,7 @@ fn a_tree_is_put_at_once_and_a_failed_put_leaves_nothing() {
     fs::write(failing.join("b"), "unreadable").unwrap();
     fs::set_permissions(failing.join("b"), fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read(failing.join("b")).is_ok() {
-        eprintln!("skipped the failing put: this user reads any file");
+        skip("the failing put, as this user reads any file");
         return;
     }
     assert!(store.put_tree(&failing).is_err());

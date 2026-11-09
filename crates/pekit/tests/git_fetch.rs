@@ -2,12 +2,14 @@
 //! I7).
 
 mod building;
+mod skipping;
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -77,7 +79,7 @@ fn workspace(url: &str, commit: &str) -> tempfile::TempDir {
 fn a_repository_s_files_at_a_commit_are_fetched_once() {
     let origin = tempfile::tempdir().unwrap();
     let Some(commit) = repository(origin.path()) else {
-        eprintln!("skipped: no `git` on this host");
+        skip("no `git` on this host");
         return;
     };
     let url = format!("file://{}", origin.path().display());
@@ -111,7 +113,7 @@ fn a_repository_s_files_at_a_commit_are_fetched_once() {
 fn a_fetch_git_is_pinned_by_a_commit_and_made_outside_steps() {
     let origin = tempfile::tempdir().unwrap();
     let Some(commit) = repository(origin.path()) else {
-        eprintln!("skipped: no `git` on this host");
+        skip("no `git` on this host");
         return;
     };
     let url = format!("file://{}", origin.path().display());

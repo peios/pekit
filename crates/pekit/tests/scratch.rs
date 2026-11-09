@@ -2,11 +2,13 @@
 //! between its runs (see `design/additive.md`, F2).
 
 mod building;
+mod skipping;
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -98,7 +100,7 @@ fn a_scratch_directory_keys_nothing() {
 fn a_strict_build_gives_a_step_an_empty_scratch_directory() {
     let busybox = Path::new("/usr/bin/busybox");
     if !busybox.exists() {
-        eprintln!("skipped: no static busybox on this host");
+        skip("no static busybox on this host");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

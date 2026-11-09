@@ -12,6 +12,9 @@ case "$*" in
 esac
 repo=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+# A test that can't find what it needs on this machine fails, rather than
+# skipping, so that a passing check is every test run.
+export PEKIT_TEST_NO_SKIP=1
 python3 tools/style-check.py
 cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
 cargo +1.98.1 test --workspace --locked -- "$@"
