@@ -3,8 +3,8 @@ title: Building Rust
 type: how-to
 description: Build Rust programs hermetically from the crates Cargo.lock
   pins with the rust library, one crate at a time or with Cargo whole,
-  including tests, git crates, C dependencies, bindgen, and the pinned
-  Rust toolchain.
+  including tests, git crates, C dependencies, bindgen, control-flow
+  protection, and the pinned Rust toolchain.
 related:
   - pekit/languages/building-c
   - pekit/testing-and-running/testing
@@ -26,8 +26,9 @@ Import it as `github.com/gcslib/rust`.
 The library asks the `toolchain` module for a `Toolchain::Rust`. Its
 `rust_1_98` is Rust 1.98.1 from static.rust-lang.org, each part pinned by
 its SHA-256, with the standard libraries for `x86_64-unknown-linux-gnu` and
-`x86_64-unknown-linux-musl`. It runs on the gcc library's Bootlin sysroot
-and links with its compiler. Register both in `workspace.gcsl`:
+`x86_64-unknown-linux-musl`, and their source, `rust-src`. It runs on the
+gcc library's Bootlin sysroot and links with its compiler. Register both in
+`workspace.gcsl`:
 
 ```gcsl
 import Toolchain::C gcc_x86_64 from "github.com/gcslib/gcc"
@@ -155,6 +156,70 @@ rust.workspace(
 
 Each key has to start with `CARGO_PROFILE_`. Cargo plans with them set, so
 they apply as they would to `cargo build`.
+
+A profile's `rustflags`, which Cargo's unstable `profile-rustflags` feature
+allows, apply as Cargo applies them, after the workspace's own flags.
+
+## Control-flow protection
+
+A program built one crate at a time for an x86-64 glibc target, such as
+`x86_64-unknown-linux-gnu`, has Intel's control-flow protection (CET)
+compiled in: indirect-branch tracking (IBT) and shadow stacks (SHSTK).
+
+The linker marks a program with IBT and SHSTK only if every object it links
+is marked. Upstream's prebuilt standard libraries aren't, so the rust
+library compiles them again from the toolchain's `rust-src`:
+
+- each crate is a step, as your own crates are, and every workspace that
+  uses the same toolchain and target shares them;
+- they have the features upstream's have, but `compiler_builtins`' C
+  intrinsics, whose source `rust-src` doesn't include;
+- they use the `dist` profile that upstream's use, so a crate compiled with
+  link-time optimization still finds their bitcode;
+- their source paths are `/rustc/COMMIT/library`, as upstream's are, so no
+  path of the step's is in them.
+
+Every crate compiled for the target is then compiled against them with
+`-Zcf-protection=full`. C that a build script compiles through the `cc`
+crate gets `-fcf-protection=full`, in `CFLAGS_<target>` and
+`CXXFLAGS_<target>`. A package's `env` in `crates` can set those itself.
+
+The first glibc build compiles the standard libraries, which takes a few
+minutes. After that the store has them.
+
+### Unstable flags on a stable Rust
+
+`-Zcf-protection` is unstable, and the pinned Rust is stable. Only rustc is
+told `RUSTC_BOOTSTRAP=1`, in the step that compiles a crate. Build scripts
+aren't told it or the flags, so a build script that probes the compiler,
+as autocfg does, finds the same stable compiler it would without them.
+Build scripts and procedural macros run on the build machine, and are
+compiled as before.
+
+`RUSTC_BOOTSTRAP` isn't supported upstream, so a flag's behavior can change
+between Rust versions. After updating the toolchain, check a program with
+`readelf -n`.
+
+### What glibc must provide
+
+The program is marked only if the C library's own objects it links are
+marked too: its start files, `Scrt1.o`, `crti.o` and `crtn.o`, and
+`libc_nonshared.a`. The gcc library's Bootlin glibc isn't built with CET.
+A program linked with `gcc_x86_64` is therefore not marked, even though
+every object Rust compiles for it is. To see what isn't marked, link with
+`-Clink-arg=-Wl,-z,cet-report=error` in `rustflags`, and the linker names
+each object.
+
+### Turning it off, and other targets
+
+To use upstream's standard libraries without the flags, give `workspace`
+`cet = false`.
+
+A musl target never has control-flow protection: musl's assembly isn't
+marked, so no static musl program can be. CET is x86-64's, so a target
+for another architecture doesn't have it either. `cet = true` with any
+target but an x86-64 glibc one is an error. `cargo_build`, which builds
+with Cargo whole, doesn't give control-flow protection either.
 
 ## Crates that read outside their directory
 
