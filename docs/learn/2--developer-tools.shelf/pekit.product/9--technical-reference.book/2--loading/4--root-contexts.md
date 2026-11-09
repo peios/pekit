@@ -27,8 +27,11 @@ without one of these fields leaves the context at its default: the
 `toolchain` module's `[Toolchain::C system_c]`, and an empty keychain and
 packager list.
 
-`toolchains`, `keychain`, `packagers`, and `contexts` are the only fields
-pekit reads. Before it prepares any target, pekit fails the build if:
+`toolchains`, `keychain`, `packagers`, `contexts`, and `require_strict` are
+the only fields pekit reads. `require_strict` sets no context, and is read
+before the build, as [Strict and Reproducible
+Builds](~pekit/strict-and-reproducible-builds) describes. Before it
+prepares any target, pekit fails the build if:
 
 - `pekitconf` is not a record of named fields;
 - it has any other field, which a different pekit might read but this one

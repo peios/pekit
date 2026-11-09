@@ -1,5 +1,6 @@
 //! Tests of `pekit publish --strict`, which builds strictly and then
-//! publishes as a release does.
+//! publishes as a release does, and of `pekitconf.require_strict`, which
+//! refuses every build, test, package and publish that is not strict.
 
 use std::fs;
 use std::path::Path;
@@ -151,4 +152,84 @@ fn publish_strict_publishes_nothing_unless_every_package_packs_strictly() {
         "{err}"
     );
     assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_workspace_that_requires_strict_refuses_what_is_not() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(
+        ws.path(),
+        "pekitconf = {packagers = [copier()]; require_strict = true}\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    for (command, args) in [
+        ("build", vec!["build", "data"]),
+        ("test", vec!["test"]),
+        ("package", vec!["package"]),
+        ("publish", vec!["publish", "dev.example.data", &to]),
+    ] {
+        let refused = pekit(ws.path(), cache.path(), &args);
+        let (_, err) = shown(&refused);
+        assert!(!refused.status.success(), "{command}");
+        assert_eq!(
+            err,
+            format!(
+                "error: this workspace requires `--strict`, as `pekitconf.require_strict` in \
+                 `workspace.gcsl` says, so that every build is keyed and checked as a strict \
+                 one: run `pekit {command} --strict`\n"
+            )
+        );
+    }
+    let built = pekit(ws.path(), cache.path(), &["build", "data", "--strict"]);
+    assert!(built.status.success(), "{:?}", shown(&built));
+    let published = pekit(
+        ws.path(),
+        cache.path(),
+        &["publish", "dev.example.data", &to, "--strict"],
+    );
+    assert!(published.status.success(), "{:?}", shown(&published));
+    // A query asks what a build would read, and builds nothing.
+    let queried = pekit(ws.path(), cache.path(), &["query", "deps", "data"]);
+    assert!(queried.status.success(), "{:?}", shown(&queried));
+}
+
+#[test]
+fn require_strict_is_read_as_written() {
+    let ws = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    // Written as a dotted field, as pekit reads no field of `pekitconf`, it
+    // is refused rather than ignored.
+    workspace_in(ws.path(), "pekitconf.require_strict = true\n");
+    let refused = pekit(ws.path(), cache.path(), &["build", "data", "--strict"]);
+    assert_eq!(
+        shown(&refused).1,
+        "error: `pekitconf.require_strict` in `workspace.gcsl` is read only in `pekitconf`'s \
+         record: write `pekitconf = {require_strict = true}`\n"
+    );
+    // `false` requires nothing.
+    workspace_in(
+        ws.path(),
+        "pekitconf = {packagers = [copier()]; require_strict = false}\n",
+    );
+    let packed = pekit(ws.path(), cache.path(), &["package"]);
+    assert!(packed.status.success(), "{:?}", shown(&packed));
+    // Anything but `true` or `false` is read only by running the file,
+    // which pekit does not do before it builds.
+    workspace_in(
+        ws.path(),
+        "let strict = true\npekitconf = {packagers = [copier()]; require_strict = strict}\n",
+    );
+    for args in [&["package"][..], &["package", "--strict"]] {
+        let refused = pekit(ws.path(), cache.path(), args);
+        let (_, err) = shown(&refused);
+        assert!(!refused.status.success());
+        assert_eq!(
+            err,
+            "error: `pekitconf.require_strict` in `workspace.gcsl` must be written `true` or \
+             `false`, as `pekitconf = {require_strict = true}`: pekit reads it as written, \
+             before it builds\n"
+        );
+    }
 }

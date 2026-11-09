@@ -378,6 +378,17 @@ Steps marked
 .B #[scratch]
 are given an empty directory.
 Steps are keyed apart from a build that is not strict, and not by the host's packages.
+A workspace whose
+.B pekitconf.require_strict
+is
+.B true
+refuses
+.BR build ,
+.BR test ,
+.BR package ,
+and
+.B publish
+without it.
 .TP
 .BI \-\-trace " FILE"
 Write a trace of the build to
@@ -620,6 +631,23 @@ record sets the
 and
 .B packagers
 contexts for every target, where the workspace imports the module that declares each.
+Its
+.B require_strict
+field, written
+.B true
+or
+.B false
+in that record, makes
+.BR build ,
+.BR test ,
+.BR package ,
+and
+.B publish
+fail without
+.B \-\-strict
+if it is
+.BR true .
+pekit reads it as written, before it builds.
 .TP
 .I pekit.lock
 The libraries the workspace pins, and where they come from; see

@@ -118,9 +118,14 @@ const PACKAGERS: &str = "packagers";
 /// its fields one.
 const CONTEXTS: &str = "contexts";
 
+/// The field of `pekitconf` that, `true`, requires every build, test,
+/// package and publish of the workspace to be strict (see
+/// [`requires_strict`]): the one field that sets no context.
+const REQUIRE_STRICT: &str = "require_strict";
+
 /// The fields of `pekitconf` that set a context of pekit's own, each the
 /// context, the field and the module that declares the context. With
-/// [`CONTEXTS`], they are every field pekit reads.
+/// [`CONTEXTS`] and [`REQUIRE_STRICT`], they are every field pekit reads.
 const CONF_FIELDS: [(&str, &str, &str); 3] = [
     (TOOLCHAINS, "toolchains", "toolchain"),
     (KEYCHAIN_KEYS, "keychain", "keychain"),
@@ -958,7 +963,7 @@ fn root_fields(loaded: &Loaded) -> Result<Vec<ConfField>, BuildError> {
     let known = CONF_FIELDS
         .iter()
         .map(|(_, field, _)| format!("`{field}`"))
-        .chain([format!("`{CONTEXTS}`")])
+        .chain([format!("`{CONTEXTS}`"), format!("`{REQUIRE_STRICT}`")])
         .collect::<Vec<_>>()
         .join(", ");
     let Some(names) = loaded.workspace.top_level_fields(file, PEKITCONF, &[]) else {
@@ -967,10 +972,11 @@ fn root_fields(loaded: &Loaded) -> Result<Vec<ConfField>, BuildError> {
              {known}"
         )));
     };
-    if let Some(unknown) = names
-        .iter()
-        .find(|name| *name != CONTEXTS && !CONF_FIELDS.iter().any(|(_, field, _)| field == name))
-    {
+    if let Some(unknown) = names.iter().find(|name| {
+        *name != CONTEXTS
+            && *name != REQUIRE_STRICT
+            && !CONF_FIELDS.iter().any(|(_, field, _)| field == name)
+    }) {
         return Err(BuildError::Engine(format!(
             "`{PEKITCONF}.{unknown}` in `{WORKSPACE_FILE}` is no field pekit reads: it reads \
              {known}"
@@ -1024,6 +1030,87 @@ fn root_fields(loaded: &Loaded) -> Result<Vec<ConfField>, BuildError> {
         });
     }
     Ok(fields)
+}
+
+/// Whether `workspace.gcsl`'s `pekitconf` of `loaded`'s workspace requires
+/// every build, test, package and publish to be strict, by
+/// `require_strict = true`. pekit must know before it builds, so it reads
+/// the field as the file writes it, running nothing: `true` or `false`, in
+/// `pekitconf`'s record, `pekitconf = {require_strict = true}`. As every
+/// field of `pekitconf`, it is read only there, but a dotted
+/// `pekitconf.require_strict` is refused, not ignored, since ignoring it
+/// would build what it says not to.
+///
+/// # Errors
+///
+/// That the field is not written so, or is written dotted.
+pub fn requires_strict(loaded: &Loaded) -> Result<bool, String> {
+    use gcsl::ast::{ExprKind, ItemKind, PathRange};
+
+    let Some(source) = loaded
+        .names
+        .iter()
+        .position(|name| name == WORKSPACE_FILE)
+        .and_then(|at| loaded.sources.get(at))
+    else {
+        return Ok(false);
+    };
+    let (ast, _) = gcsl::parser::parse_source(source);
+    let path = |range: PathRange| -> Vec<&str> {
+        ast.path(range)
+            .iter()
+            .filter_map(gcsl::ast::PathSegment::name)
+            .map(|name| ast.names().get(name))
+            .collect()
+    };
+    let mut written = None;
+    for &item in ast.items(ast.root()) {
+        let ItemKind::Field {
+            path: at, value, ..
+        } = ast.item(item).kind
+        else {
+            continue;
+        };
+        match path(at).as_slice() {
+            [PEKITCONF] => {
+                let ExprKind::Block { items, .. } = ast.get(value).kind else {
+                    continue;
+                };
+                for &field in ast.items(items) {
+                    if let ItemKind::Field {
+                        path: at, value, ..
+                    } = ast.item(field).kind
+                        && path(at).as_slice() == [REQUIRE_STRICT]
+                    {
+                        written = Some(value);
+                    }
+                }
+            }
+            [PEKITCONF, REQUIRE_STRICT] => {
+                return Err(format!(
+                    "`{PEKITCONF}.{REQUIRE_STRICT}` in `{WORKSPACE_FILE}` is read only in \
+                     `{PEKITCONF}`'s record: write `{PEKITCONF} = {{{REQUIRE_STRICT} = true}}`"
+                ));
+            }
+            _ => {}
+        }
+    }
+    let has_field = || {
+        loaded.workspace.file(WORKSPACE_FILE).is_some_and(|file| {
+            loaded
+                .workspace
+                .top_level_has(file, PEKITCONF, &[REQUIRE_STRICT])
+        })
+    };
+    match written.map(|value| &ast.get(value).kind) {
+        Some(ExprKind::Bool(strict)) => Ok(*strict),
+        None if !has_field() => Ok(false),
+        _ => Err(format!(
+            "`{PEKITCONF}.{REQUIRE_STRICT}` in `{WORKSPACE_FILE}` must be written `true` or \
+             `false`, as `{PEKITCONF} = {{{REQUIRE_STRICT} = true}}`: pekit reads it as \
+             written, before it builds"
+        )),
+    }
 }
 
 /// Where the store keeps the stamps of the workspace at `root`'s files.

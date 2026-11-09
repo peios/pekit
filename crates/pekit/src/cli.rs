@@ -27,7 +27,9 @@
 //! shows the steps running as it goes.
 //!
 //! `pekit publish --strict` packs strictly, then publishes as a release
-//! does ([`published_strictly`]).
+//! does ([`published_strictly`]). A workspace whose
+//! `pekitconf.require_strict` is `true` refuses `build`, `test`, `package`
+//! and `publish` without `--strict` ([`strict_as_required`]).
 //!
 //! The store and the directories steps are staged in are under the cache
 //! directory: `$PEKIT_CACHE_DIR` if it is set, else `pekit` under
@@ -57,7 +59,7 @@ use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
     target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
-    package_all_observed, program_command, query_all, run_script_observed,
+    package_all_observed, program_command, query_all, requires_strict, run_script_observed,
 };
 use crate::query::TargetDeps;
 use crate::events::{Event, EventKind};
@@ -495,6 +497,9 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     let Some(mut loaded) = load_for(cwd, &args.shared, terminal) else {
         return ExitCode::FAILURE;
     };
+    if !strict_as_required("build", &loaded, &args.shared, terminal) {
+        return ExitCode::FAILURE;
+    }
     let names: Vec<&str> = args.targets.iter().map(String::as_str).collect();
     let targets = match select(&loaded.workspace, "build", &names, &loaded.here) {
         Ok(targets) if targets.is_empty() => {
@@ -576,6 +581,9 @@ fn test_command(args: &TestArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> Exi
     let Some(mut loaded) = load_for(cwd, &args.shared, terminal) else {
         return ExitCode::FAILURE;
     };
+    if !strict_as_required("test", &loaded, &args.shared, terminal) {
+        return ExitCode::FAILURE;
+    }
     let mut names: Vec<&str> = args.tests.iter().map(String::as_str).collect();
     if names.is_empty() {
         names.push("**");
@@ -1173,6 +1181,35 @@ fn load_for(cwd: &Path, shared: &Shared, terminal: &mut Terminal<'_>) -> Option<
     Some(loaded)
 }
 
+/// Whether `pekit COMMAND` builds `loaded`'s workspace as `shared` says it
+/// may: not without `--strict` where `pekitconf.require_strict` requires
+/// it ([`requires_strict`]), which is said on `terminal`, as is a
+/// `require_strict` pekit cannot read. A refusal, not `--strict` implied,
+/// so that a command line says what it builds in every workspace.
+fn strict_as_required(
+    command: &str,
+    loaded: &Loaded,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> bool {
+    match requires_strict(loaded) {
+        Ok(true) if !shared.allows.strict => {
+            let _ = writeln!(
+                terminal.err,
+                "error: this workspace requires `--strict`, as `pekitconf.require_strict` in \
+                 `workspace.gcsl` says, so that every build is keyed and checked as a strict \
+                 one: run `pekit {command} --strict`"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            false
+        }
+    }
+}
+
 /// `--check-reproducible` refused for the command `pekit COMMAND`, whose
 /// effects change the world and would be done twice.
 fn changes_the_world(command: &str, terminal: &mut Terminal<'_>) -> ExitCode {
@@ -1245,6 +1282,9 @@ fn package_command(
     let Some(mut loaded) = load_for(cwd, shared, terminal) else {
         return ExitCode::FAILURE;
     };
+    if !strict_as_required(command, &loaded, shared, terminal) {
+        return ExitCode::FAILURE;
+    }
     let mut names: Vec<&str> = given.iter().map(String::as_str).collect();
     if names.is_empty() {
         names.push("**");

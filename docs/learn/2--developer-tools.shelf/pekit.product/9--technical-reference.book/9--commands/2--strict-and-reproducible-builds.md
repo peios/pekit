@@ -24,6 +24,26 @@ description: What --strict changes in loading, keying, sandboxes, and a
   Effects](~pekit/target-effects) describes. Steps marked `#[scratch]` get
   an empty directory.
 
+## Requiring strict builds
+
+A workspace whose `pekitconf` has `require_strict = true` fails `build`,
+`test`, `package`, and `publish` without `--strict`, after loading and
+before selecting targets (`strict_as_required`). `run`, `query`, `lock`,
+and `clean` don't check it, and `release` is always strict.
+
+pekit needs the value before it builds, to choose the build's settings, and
+running `workspace.gcsl` early would evaluate it outside the build. So
+`requires_strict` reads the field from the parsed file, running nothing:
+
+- `pekitconf = {require_strict = true}` or `false`, a `Bool` literal in the
+  record written at the top level, is read as written.
+- A dotted `pekitconf.require_strict = ...` fails the command. pekit reads
+  no dotted field of `pekitconf`, and ignoring this one would build what it
+  forbids.
+- Any other expression, or a `pekitconf` whose type has the field but whose
+  record isn't written at the top level, fails the command.
+- No such field requires nothing.
+
 ## Checking reproducibility
 
 `--check-reproducible` builds twice (`Settings::compare`):

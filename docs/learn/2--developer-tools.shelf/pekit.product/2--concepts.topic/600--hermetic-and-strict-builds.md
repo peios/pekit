@@ -73,6 +73,38 @@ A strict build's steps aren't keyed by the host's fingerprint. Their keys
 are the same on any machine of the platform, so a strict build's results
 can be shared between machines.
 
+## Requiring strict builds
+
+A strict build and one that isn't are keyed apart, so a workspace that
+mixes them builds everything twice. A workspace that should only ever be
+built strictly, such as one that builds packages for a repository, can say
+so in `workspace.gcsl`:
+
+```gcsl
+pekitconf = {
+    packagers = [packager()]
+    require_strict = true
+}
+```
+
+Then `pekit build`, `pekit test`, `pekit package`, and `pekit publish`
+refuse to run without `--strict`:
+
+```text
+error: this workspace requires `--strict`, as `pekitconf.require_strict` in `workspace.gcsl` says, so that every build is keyed and checked as a strict one: run `pekit build --strict`
+```
+
+The setting refuses rather than adding `--strict` for you. A command line
+then means the same in every workspace, so a command in a script, a README,
+or a CI job says whether it's strict. The cost is typing `--strict` each
+time.
+
+pekit reads `require_strict` before it builds, without running
+`workspace.gcsl`. So write it as `true` or `false`, inside the `pekitconf`
+record. `pekit run` and `pekit query` don't check it, but a build that
+`pekit run` makes isn't strict unless you pass `--strict`. `pekit release`
+is always strict.
+
 ## Reproducible builds
 
 A step is reproducible if it gives the same outputs, byte for byte, every
