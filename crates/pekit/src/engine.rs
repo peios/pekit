@@ -48,7 +48,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -66,6 +66,7 @@ use gcsl::workspace::{Given, InvokeError, Progress, StepInputs};
 use gcsl::{Diagnostic, Span, Value};
 
 use crate::budget::Budget;
+use crate::claims::{Claimed, try_claim};
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, evict};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
@@ -772,6 +773,7 @@ fn new_run<'a>(
         mismatches: Vec::new(),
         background: 0,
         looking: HashMap::new(),
+        claiming: HashMap::new(),
         found_remotely: 0,
         remote_failed: None,
         uploads: 0,
@@ -1169,6 +1171,9 @@ struct StepRun {
     /// What its attempt's programs are keyed by (see `design/additive.md`,
     /// F1).
     programs: Programs,
+    /// Its claim, held until it is recorded or has failed, if it has one
+    /// (see [Claims](crate::claims#claims)).
+    claim: Option<File>,
 }
 
 /// What a step is keyed by but the contexts it reads (see
@@ -1275,6 +1280,9 @@ struct Run<'a> {
     background: usize,
     /// The steps being looked for in the remote cache, by node.
     looking: HashMap<NodeId, Looking>,
+    /// The steps waiting for a claim another build holds, by node (see
+    /// [Claims](crate::claims#claims)).
+    claiming: HashMap<NodeId, Looking>,
     /// How many steps were found in the remote cache.
     found_remotely: usize,
     /// Why the remote cache could not be used, as first found.
@@ -1321,6 +1329,8 @@ struct Looking {
     devices: Vec<PathBuf>,
     /// Whether its records, not its manifest, were asked for.
     records: bool,
+    /// Its claim, once it holds it (see [Claims](crate::claims#claims)).
+    claim: Option<File>,
 }
 
 /// A file or directory `plain`, the result of `step`, names that is
@@ -2466,13 +2476,55 @@ impl Run<'_> {
             self.found_step(id, &record, keys);
             return Ok(true);
         }
-        let looking = Looking {
+        let mut looking = Looking {
             keyed,
             base,
             given,
             devices,
             records: false,
+            claim: None,
         };
+        // Missed here, it is claimed, or waited for while another build
+        // runs it. A claim that cannot be had at all is no reason to fail:
+        // the step runs, as it would have.
+        if self.settings.reuse == Reuse::Store {
+            match try_claim(self.store.root(), &looking.base) {
+                Ok(Claimed::Held(claim)) => looking.claim = Some(claim),
+                Ok(Claimed::Busy(path)) => {
+                    self.pool.claim(id, path);
+                    self.background += 1;
+                    self.claiming.insert(id, looking);
+                    return Ok(true);
+                }
+                Err(_) => {}
+            }
+        }
+        self.look_further(id, looking)?;
+        Ok(true)
+    }
+
+    /// The claim on the step `id` that another build held is held now, or
+    /// could not be had, `claimed`: it is looked for in the store again,
+    /// where that build recorded it if it ran it, and further if it is not
+    /// there (see [Claims](crate::claims#claims)).
+    fn claimed(&mut self, id: NodeId, claimed: Result<File, String>) -> Result<(), BuildError> {
+        let Some(mut looking) = self.claiming.remove(&id) else {
+            return Ok(());
+        };
+        let found = self
+            .looked_up(&looking.keyed, &looking.base)?
+            .filter(|(record, _)| self.holds_all(&record.result));
+        if let Some((record, keys)) = found {
+            self.found_step(id, &record, keys);
+            return Ok(());
+        }
+        looking.claim = claimed.ok();
+        self.look_further(id, looking)
+    }
+
+    /// Looks for the step `id`, missed in the store, `looking` as
+    /// [`Run::start_step`] found it, in the remote cache, or runs it.
+    fn look_further(&mut self, id: NodeId, looking: Looking) -> Result<(), BuildError> {
         // Missed here, it is looked for in the remote cache, its manifest
         // first, on the pool.
         if self.settings.reuse == Reuse::Store
@@ -2487,10 +2539,9 @@ impl Run<'_> {
             self.pool.send(id, work, None);
             self.background += 1;
             self.looking.insert(id, looking);
-            return Ok(true);
+            return Ok(());
         }
-        self.run_step(id, looking)?;
-        Ok(true)
+        self.run_step(id, looking)
     }
 
     /// Whether the step `id` waits for another of its identity, which holds
@@ -2665,6 +2716,7 @@ impl Run<'_> {
             base,
             given,
             devices,
+            claim,
             ..
         } = looking;
         let name = self.step_name(id);
@@ -2710,6 +2762,7 @@ impl Run<'_> {
                 failed_once: false,
                 waiting: Vec::new(),
                 waiting_unit: None,
+                claim,
             },
         );
         self.emit(EventKind::Started {
@@ -3057,6 +3110,9 @@ impl Run<'_> {
         };
         let value = step.result.take().unwrap_or(Value::Empty);
         let outcome = self.record(id, &step, (&value, plain), kept);
+        // Recorded, it is found by a build that waited for its claim; a step
+        // that fails lets go of its claim as it is dropped.
+        drop(step.claim.take());
         self.unstage(id, &step)?;
         outcome
     }
@@ -3453,6 +3509,10 @@ impl Run<'_> {
                 (self.events)(&event);
                 self.uploaded(uploaded);
                 Ok(())
+            }
+            Done::Claimed(claimed) => {
+                self.background -= 1;
+                self.claimed(ran.node, claimed)
             }
             done => {
                 ran.done = done;

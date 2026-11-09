@@ -293,6 +293,8 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
             return Err(error);
         }
     }
+    // No process holds a claim on a step, since none has the store.
+    let _ = remove_tree(&store.root().join("claims"));
     let evicted = evict_held(store, limit);
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;

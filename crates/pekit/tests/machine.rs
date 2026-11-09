@@ -313,3 +313,54 @@ fn a_program_is_offered_the_jobserver_unless_it_names_its_own() {
         format!("-j1|{auth}\n")
     );
 }
+
+/// Waits until a process [`running`] counts for `marker` runs, for ten
+/// seconds at most.
+fn wait_for(marker: &str) {
+    for _ in 0..2000 {
+        if running(marker) > 0 {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("nothing ran");
+}
+
+#[test]
+fn a_step_two_builds_want_at_once_runs_once() {
+    let marker = format!("pekit-claim-once-{}", std::process::id());
+    let cache = tempfile::tempdir().unwrap();
+    // Two worktrees at one commit.
+    let (first, second) = (napping(&marker, 0, 1), napping(&marker, 0, 1));
+    let one = start(first.path(), cache.path(), &["build", "naps"], &[]);
+    wait_for(&marker);
+    let two = start(second.path(), cache.path(), &["build", "naps"], &[]);
+    let (outputs, most) = watched(vec![one, two], &marker);
+    let shown: Vec<String> = outputs.iter().map(|output| printed(output).0).collect();
+    for output in &outputs {
+        assert!(output.status.success(), "{}", printed(output).1);
+    }
+    assert!(shown[0].contains("1 step run, 0 found"), "{shown:?}");
+    assert!(
+        shown[1].contains("0 steps run, 1 found in the store"),
+        "{shown:?}"
+    );
+    assert_eq!(most, 1);
+}
+
+#[test]
+fn a_step_whose_build_died_is_run_by_the_build_that_waited() {
+    let marker = format!("pekit-claim-died-{}", std::process::id());
+    let cache = tempfile::tempdir().unwrap();
+    let (first, second) = (napping(&marker, 0, 1), napping(&marker, 0, 1));
+    let mut one = start(first.path(), cache.path(), &["build", "naps"], &[]);
+    wait_for(&marker);
+    let two = start(second.path(), cache.path(), &["build", "naps"], &[]);
+    thread::sleep(Duration::from_millis(200));
+    one.kill().unwrap();
+    one.wait().unwrap();
+    let output = two.wait_with_output().unwrap();
+    let (out, err) = printed(&output);
+    assert!(output.status.success(), "{err}");
+    assert!(out.contains("1 step run, 0 found"), "{out}");
+}

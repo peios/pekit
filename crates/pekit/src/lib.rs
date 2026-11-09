@@ -7,6 +7,7 @@
 //! design, `design/engine.md`).
 
 pub mod budget;
+pub mod claims;
 pub mod cli;
 pub mod engine;
 pub mod events;

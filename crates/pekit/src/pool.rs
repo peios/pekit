@@ -24,6 +24,7 @@
 //! ([`crate::programs`]).
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::{Diagnostic, Span};
 
 use crate::budget::{Held, program_name};
+use crate::claims::claim;
 use crate::exposure::{OutputRead, read_output};
 use crate::meter::Metered;
 use crate::fetch::{fetch, fetched_path};
@@ -200,6 +202,9 @@ pub enum Done {
     /// The records were written to the remote cache ([`Work::Upload`]), or
     /// why they could not be.
     Uploaded(Result<(), String>),
+    /// The claim on a step another build held, held now ([`Pool::claim`]),
+    /// or why it could not be.
+    Claimed(Result<File, String>),
 }
 
 /// One job: a node's work, until its deadline.
@@ -211,6 +216,8 @@ pub struct Pool {
     programs: Sender<Job>,
     /// Where the engine's own work goes.
     own: Sender<Job>,
+    /// Where what they came to is sent.
+    report: Sender<Ran>,
     /// Where what they came to comes back.
     done: Receiver<Ran>,
 }
@@ -495,8 +502,32 @@ impl Pool {
         Self {
             programs,
             own,
+            report,
             done,
         }
+    }
+
+    /// Waits for the claim whose lock file is `path`, of the node `node`'s
+    /// step, which another build holds, on a thread of its own, never the
+    /// pool's (see [Claims](crate::claims#claims)): what it came to comes
+    /// back as a job's does.
+    pub fn claim(&self, node: NodeId, path: PathBuf) {
+        let report = self.report.clone();
+        thread::spawn(move || {
+            let began = Instant::now();
+            let claimed = claim(&path)
+                .map_err(|error| format!("cannot claim the step at `{}`: {error}", path.display()));
+            let _ = report.send(Ran {
+                node,
+                worker: 0,
+                began,
+                ended: Instant::now(),
+                queued: Duration::ZERO,
+                outcome: Ok(Plain::Empty),
+                kept: Vec::new(),
+                done: Done::Claimed(claimed),
+            });
+        });
     }
 
     /// The threads `workers`, numbered so, each taking the next job sent to
