@@ -279,6 +279,40 @@ fn a_strict_build_judges_a_path_once_its_dots_are_taken() {
     assert_eq!(inside, [text("ab"), text("ab+b")]);
 }
 
+/// Two memoised calls, `outer` calling `inner`, whose programs the targets
+/// run themselves, as effects pekit does not isolate. `second`'s arguments
+/// are pieces: its first waits for `first`'s run of `outer`, and its
+/// second begins `inner`, whose program waits its turn behind the first.
+const CROSSED: &str = "fn said(word: String) -> String {\n\
+                       \x20   = exec([\"/bin/sh\", \"-c\", \"echo {word}\"]).stdout.trim()\n\
+                       }\n\
+                       fn inner() ->> String { = said(\"b\") }\n\
+                       fn outer() ->> String {\n\
+                       \x20   let a = said(\"a\")\n\
+                       \x20   = \"{a}{inner()}\"\n\
+                       }\n\
+                       fn both(first: String, second: String) -> String { = \"{first}+{second}\" }\n\
+                       def build first() { = outer() }\n\
+                       def build second() { = both(outer(), inner()) }\n";
+
+#[test]
+fn targets_that_cross_over_shared_calls_both_finish() {
+    // `first` begins `outer`; `second` waits for it, its later piece
+    // having begun `inner`; then `first` needs `inner`. `second`'s run of
+    // `inner`, which `first` waits for, no longer waits for `second`'s
+    // earlier piece, rather than the two waiting for each other.
+    let dir = workspace(&[("app/build.gcsl", CROSSED)]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |_| {});
+    assert_eq!(
+        outcomes,
+        [
+            Ok(Plain::Str("ab".to_owned())),
+            Ok(Plain::Str("ab+b".to_owned()))
+        ]
+    );
+}
+
 #[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
