@@ -248,6 +248,38 @@ fn fs_read_outside_a_strict_build_sees_the_target_s_earlier_writes() {
 }
 
 #[test]
+fn a_strict_build_leaves_a_relative_fs_path_to_gcsl() {
+    // GCSL's `fs` built-ins take only absolute paths, and say so.
+    let outcomes = crossed_strictly("= if fs.exists(word) { word } else { \"-\" }");
+    let Err(error) = &outcomes[0] else {
+        panic!("{outcomes:?}");
+    };
+    assert!(
+        error.contains("needs an absolute path, found `a`"),
+        "{error}"
+    );
+    assert!(!error.contains("a strict build"), "{error}");
+}
+
+#[test]
+fn a_strict_build_judges_a_path_once_its_dots_are_taken() {
+    // `..` out of the workspace is outside it; `..` that stays in is in.
+    let outside = crossed_strictly("= if fs.exists(\"/w/../etc\") { word } else { \"-\" }");
+    let Err(error) = &outside[0] else {
+        panic!("{outside:?}");
+    };
+    assert!(
+        error.contains(
+            "a strict build reads only the workspace and the build's outputs, and this reads `/etc`"
+        ),
+        "{error}"
+    );
+    let inside = crossed_strictly("= fs.read(\"/w/app/../app/./{word}\")");
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(inside, [text("ab"), text("ab+b")]);
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (

@@ -14,8 +14,10 @@ Fetches, unpacks and some reads are isolated and run out of order, as
 The host view maps the logical layout onto the host. GCSL's own file-system
 work, such as `fs.read` or `dir.files()`, maps `/w` to the workspace's root
 and `/pekit-out` to its output directory, and any other absolute path to
-itself. A relative path resolves against the directory of the file it is
-written in, never the working directory.
+itself. A relative path given to `file` or `dir` resolves against the
+directory of the file it is written in, never the working directory. The
+`fs` built-ins, such as `fs.exists` and `fs.read`, take only absolute
+paths: GCSL refuses a relative one.
 
 A program a target runs runs under bubblewrap, with the host's own
 directories bound where they are and the workspace and outputs bound at
@@ -57,8 +59,13 @@ these:
 - A read, `fs.exists`, `fs.read`, `file`, `file.read`, `dir`, or
   `dir.files`, of a path at or under `/w` or `/pekit-out`
 
-A read elsewhere fails with "a strict build reads only the workspace and
-the build's outputs, and this reads `PATH`". Any other effect fails with "a
+pekit judges a path once each `.` is left out and each `..` has taken the
+component before it, so `/w/../etc` is `/etc`. It follows no symbolic
+link, so a link in the workspace to a directory outside it, such as a
+package repository, can be read. A read elsewhere fails with
+"a strict build reads only the workspace and the build's outputs, and this
+reads `PATH`", `PATH` as judged. A relative path is left to GCSL, which
+refuses it. Any other effect fails with "a
 strict build refuses a target's own `NAME`: a release's targets run
 programs and write files only in steps". Each failure is reported where the
 target's code made the effect.

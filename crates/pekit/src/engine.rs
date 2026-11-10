@@ -179,6 +179,13 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
                 }
                 _ => "",
             };
+            // GCSL refuses a relative path itself, saying why.
+            if !path.starts_with('/') {
+                return None;
+            }
+            // What the path names once `.` and `..` are taken, as the host
+            // takes them, so that `/w/..` is not the workspace.
+            let path = &lexical(path);
             let inside = |root: &str| {
                 path == root
                     || path
@@ -198,6 +205,23 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
             builtin.name()
         )),
     }
+}
+
+/// The absolute path `path` with each `.` left out and each `..` taking the
+/// component before it, as the host resolves them where no symbolic link
+/// is on the way: `/w/a/../b` is `/w/b`, and `/w/..` is `/`.
+fn lexical(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    format!("/{}", components.join("/"))
 }
 
 /// The context only a run of a script binds (see the prelude's `script`).
