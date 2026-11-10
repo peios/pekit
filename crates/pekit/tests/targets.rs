@@ -153,6 +153,61 @@ fn a_target_that_fails_in_a_guard_still_ends_a_shared_call_another_waits_on() {
 }
 
 #[test]
+fn a_strict_build_s_fs_exists_does_not_wait_for_program_order() {
+    // `second`'s arguments are evaluated at once: its later `inner()`
+    // runs while its earlier `outer()` waits for `first`, which is in
+    // `outer()` and needs `inner()`. Held to program order, `inner()`'s
+    // `fs.exists` would wait for `outer()`, and the targets would wait for
+    // each other (PEI-1671). A strict target writes nothing, so its
+    // `fs.exists` need not wait.
+    let dir = workspace(&[
+        ("app/a", ""),
+        ("app/b", ""),
+        (
+            "app/build.gcsl",
+            "import fs\n\
+             fn said(word: String) -> String {\n\
+             \x20   = if fs.exists(\"/w/app/{word}\") { word } else { \"-\" }\n\
+             }\n\
+             fn inner() ->> String { = said(\"b\") }\n\
+             fn outer() ->> String {\n\
+             \x20   let a = said(\"a\")\n\
+             \x20   = \"{a}{inner()}\"\n\
+             }\n\
+             fn both(first: String, second: String) -> String { = \"{first}+{second}\" }\n\
+             def build first() { = outer() }\n\
+             def build second() { = both(outer(), inner()) }\n",
+        ),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |settings| {
+        settings.strict = true;
+    });
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(outcomes, [text("ab"), text("ab+b")]);
+}
+
+#[test]
+fn fs_exists_outside_a_strict_build_sees_the_target_s_earlier_writes() {
+    // A call's arguments are evaluated at once, so only program order
+    // makes the second's `fs.exists` wait for the file the first's program
+    // makes.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "import fs\n\
+         fn wrote() -> String {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 1; touch /w/app/made\"])\n\
+         \x20   = \"wrote\"\n\
+         }\n\
+         fn seen(wrote: String, exists: Bool) -> Bool { = exists }\n\
+         def build made() { = seen(wrote(), fs.exists(\"/w/app/made\")) }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["made"], |_| {});
+    assert_eq!(outcomes, [Ok(Plain::Bool(true))]);
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (
