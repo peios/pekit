@@ -85,8 +85,12 @@ order. They still run one at a time. GCSL's [Running Steps for a
 Host](~gcsl/graph-mode#units-that-share-work) page explains why.
 
 If no unit can progress and no work is running, the units wait for each
-other, and the build fails with "the build's targets and steps wait for
-each other's shared results".
+other. When they wait in a circle through memoized calls or `lazy` values,
+some call needs its own result, and the build fails with "this call
+depends on its own result". Each call in the circle is labeled with the
+target or step that needs it and the one computing it. Any other such
+build fails with "the build's targets and steps wait for each other's
+shared results".
 
 ## Naming steps under definitions
 

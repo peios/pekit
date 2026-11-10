@@ -32,7 +32,8 @@ happen.
 | A fetch in a step | "`fetch` runs outside hermetic steps". | Fetch in a parameter default or the caller. The same holds for `fetch_git` and the keychain. |
 | A strict refusal | "a strict build refuses a target's own `NAME`", or "reads only the workspace and the build's outputs". | Move the effect into a step, or out of the release. |
 | A dynamic dependency under `--no-dynamic` | An error where the target waits for a step's result. | Remove `--no-dynamic`, or restructure the target. |
-| Units waiting for each other | "the build's targets and steps wait for each other's shared results". | Two units each need a memoized result the other is computing. Restructure the shared code. |
+| Shared calls that need their own results | "this call depends on its own result", each call in the circle labeled with the target or step that needs it and the one computing it. | Memoized calls or `lazy` values that targets share call each other in a circle. A run of either target alone would fail the same way. Break the circle. |
+| Units waiting for each other | "the build's targets and steps wait for each other's shared results". | Two units each need a result the other is computing, through a step's result. Restructure the shared code. |
 | No toolchain | An error naming the kind and both platforms, and saying that registering replaces the default. | Register a toolchain of the kind for the platforms. |
 
 ## While running a step

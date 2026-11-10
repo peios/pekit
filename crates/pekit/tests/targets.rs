@@ -314,6 +314,56 @@ fn targets_that_cross_over_shared_calls_both_finish() {
 }
 
 #[test]
+fn targets_whose_shared_calls_need_each_other_report_the_call_that_needs_its_own_result() {
+    // Each target runs one of two memoised calls that need each other.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "fn said(word: String) -> String {\n\
+         \x20   = exec([\"/bin/sh\", \"-c\", \"echo {word}\"]).stdout.trim()\n\
+         }\n\
+         fn e() ->> String {\n\
+         \x20   let a = said(\"e\")\n\
+         \x20   = \"{a}{f()}\"\n\
+         }\n\
+         fn f() ->> String {\n\
+         \x20   let b = said(\"f\")\n\
+         \x20   = \"{b}{e()}\"\n\
+         }\n\
+         def build first() { = e() }\n\
+         def build second() { = f() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let state = state.path().to_path_buf();
+    let shown = std::thread::Builder::new()
+        .stack_size(gcsl::STACK_SIZE)
+        .spawn(move || {
+            let mut loaded = load(&root).unwrap();
+            let targets = select(&loaded.workspace, "build", &["first", "second"], "").unwrap();
+            let settings = settings(&root, &state, ("x86_64", "dev"));
+            match build_all_observed(&mut loaded, &targets, &settings, &mut |_| {}) {
+                Ok(outcomes) => panic!("{:?}", outcomes.targets),
+                Err(error) => error.render(&loaded),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        shown.contains("this call depends on its own result"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("`app/first` needs `f` here, which `app/second` is running"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("`app/second` needs `e` here, which `app/first` is running"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (
