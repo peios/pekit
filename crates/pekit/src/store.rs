@@ -70,6 +70,23 @@
 //! that one commit serves many, and only then renamed into place, in the
 //! order they were written, a tree's entries before it. A put that fails
 //! removes what it wrote.
+//!
+//! # Trees read while they change
+//!
+//! A walk reads a tree one entry at a time, so a tree another process
+//! changes as it is walked, as a package repository is while a package is
+//! published into it, can be read in part before the change and in part
+//! after: an entry listed and gone before it is read, or a file that names
+//! another the walk passed before it was written. [`Store::put_tree_steady`]
+//! and [`Store::put_file_steady`] keep what the walk saw, the stamp of the
+//! root and of each entry and the names each directory listed, and look
+//! again once it is over. If anything differs, or is gone, the tree changed
+//! as it was read, and what was read is not given, even if the walk failed
+//! because of it: [`Steady::Changed`] says where, for the caller to read it
+//! again. A walk that failed while nothing changed fails. A file changed in
+//! place, keeping its size, in the same tick of the file system's clock as
+//! it was stamped, and so keeping its stamp, is not seen; a writer that
+//! renames each file into place, as ppk does, is always seen.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -199,6 +216,68 @@ struct Walk<'a> {
     now: (i64, i64),
     /// What is no part of the tree, by where it is.
     left_out: &'a [PathBuf],
+    /// What the walk saw, if it is to be looked at again (see [Trees read
+    /// while they change](#trees-read-while-they-change)).
+    watch: Option<Watch>,
+}
+
+/// What a read of a tree, or a file, that another process may be changing
+/// came to (see [Trees read while they change](#trees-read-while-they-change)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Steady<T> {
+    /// What was read, which nothing changed as it was read.
+    Read(T),
+    /// The first path found changed, or gone, since it was read.
+    Changed(PathBuf),
+}
+
+/// What a walk saw, to be looked at again once it is over (see [Trees
+/// read while they change](#trees-read-while-they-change)): each
+/// directory's names, which an entry made, removed or renamed changes, and
+/// each other entry's stamp, which a file written or renamed over changes.
+/// A directory's own stamp is not kept, since it changes as much when an
+/// entry left out of the tree is made.
+#[derive(Debug, Default)]
+struct Watch {
+    /// Each directory's names but those left out, sorted, by its path.
+    listings: Vec<(PathBuf, Vec<std::ffi::OsString>)>,
+    /// Each file's and link's stamp, by its path.
+    stamps: Vec<(PathBuf, Stamp)>,
+}
+
+impl Watch {
+    /// The first path whose names or stamp differ from what the walk saw,
+    /// or that is gone, if any, what is at `left_out` no part of a
+    /// directory's names.
+    fn changed(&self, left_out: &[PathBuf]) -> Option<PathBuf> {
+        let listed = self
+            .listings
+            .iter()
+            .find(|(path, names)| names_in(path, left_out).ok().as_ref() != Some(names));
+        if let Some((path, _)) = listed {
+            return Some(path.clone());
+        }
+        self.stamps
+            .iter()
+            .find(|(path, stamp)| {
+                fs::symlink_metadata(path).map(|meta| Stamp::of(&meta)).ok() != Some(*stamp)
+            })
+            .map(|(path, _)| path.clone())
+    }
+}
+
+/// The names of the entries of the directory at `path`, sorted, but those
+/// at `left_out`.
+fn names_in(path: &Path, left_out: &[PathBuf]) -> io::Result<Vec<std::ffi::OsString>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if !left_out.contains(&entry.path()) {
+            names.push(entry.file_name());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// A SHA-256 digest, of a file's contents, a tree or a receipt.
@@ -1151,6 +1230,7 @@ impl Store {
             refuse,
             now,
             left_out,
+            watch: None,
         };
         let meta = fs::symlink_metadata(path)?;
         if refuse(path, &meta) {
@@ -1159,10 +1239,54 @@ impl Store {
         self.at_once(|| self.tree_seen(path, &mut walk))
     }
 
+    /// [`Store::put_tree_seen_without`] of a tree another process may be
+    /// changing as it is read: [`Steady::Changed`] if it changed, whether
+    /// or not the walk failed because of it (see [Trees read while they
+    /// change](#trees-read-while-they-change)).
+    ///
+    /// # Errors
+    ///
+    /// That `path` is not there, or that something under it cannot be read
+    /// though nothing changed, or that the store cannot be written.
+    pub fn put_tree_steady(
+        &self,
+        path: &Path,
+        (seen, now): (&mut Seen, (i64, i64)),
+        refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
+        left_out: &[PathBuf],
+    ) -> io::Result<Steady<Option<Digest>>> {
+        let meta = fs::symlink_metadata(path)?;
+        if refuse(path, &meta) {
+            return Ok(Steady::Read(None));
+        }
+        let mut walk = Walk {
+            seen,
+            refuse,
+            now,
+            left_out,
+            watch: Some(Watch::default()),
+        };
+        let put = self.at_once(|| self.tree_seen(path, &mut walk));
+        match walk.watch.and_then(|watch| watch.changed(left_out)) {
+            Some(changed) => Ok(Steady::Changed(changed)),
+            None => put.map(Steady::Read),
+        }
+    }
+
     /// [`Store::put_tree_seen`] of `path`, as `walk` has it.
     fn tree_seen(&self, path: &Path, walk: &mut Walk<'_>) -> io::Result<Option<Digest>> {
         let mut entries = Vec::new();
-        for (name, _, at) in listing(path)? {
+        let listed = listing(path)?;
+        if let Some(watch) = &mut walk.watch {
+            let mut names: Vec<_> = listed
+                .iter()
+                .filter(|(_, _, at)| !walk.left_out.contains(at))
+                .map(|(name, _, _)| name.clone())
+                .collect();
+            names.sort();
+            watch.listings.push((path.to_path_buf(), names));
+        }
+        for (name, _, at) in listed {
             let name = name.into_string().map_err(|name| {
                 io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
             })?;
@@ -1171,6 +1295,11 @@ impl Store {
             }
             let meta = fs::symlink_metadata(&at)?;
             let kind = meta.file_type();
+            if let Some(watch) = &mut walk.watch
+                && !kind.is_dir()
+            {
+                watch.stamps.push((at.clone(), Stamp::of(&meta)));
+            }
             entries.push(if kind.is_symlink() {
                 if (walk.refuse)(&at, &meta) {
                     return Ok(None);
@@ -1223,9 +1352,33 @@ impl Store {
             refuse: &never,
             now,
             left_out: &[],
+            watch: None,
         };
         self.file_seen(path, &meta, &mut walk)?
             .ok_or_else(|| io::Error::other("refused"))
+    }
+
+    /// [`Store::put_file_seen_at`] of a file another process may be
+    /// changing as it is read: [`Steady::Changed`] if its stamp, taken
+    /// through any symbolic link, differs once it is read, or it is gone,
+    /// whether or not the read failed because of it (see [Trees read while
+    /// they change](#trees-read-while-they-change)).
+    ///
+    /// # Errors
+    ///
+    /// That `path` is not there, or cannot be read though it did not
+    /// change, or that the store cannot be written.
+    pub fn put_file_steady(
+        &self,
+        path: &Path,
+        (seen, now): (&mut Seen, (i64, i64)),
+    ) -> io::Result<Steady<FileEntry>> {
+        let before = Stamp::of(&fs::metadata(path)?);
+        let put = self.put_file_seen_at(path, (seen, now));
+        if fs::metadata(path).map(|meta| Stamp::of(&meta)).ok() != Some(before) {
+            return Ok(Steady::Changed(path.to_path_buf()));
+        }
+        put.map(Steady::Read)
     }
 
     /// The file at `path`, of metadata `meta`, put into the store, unread if

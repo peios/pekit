@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use gcsl::eval::plain::Plain;
 use pekit::receipt::{IdentityOf, ReceiptOf, identity, receipt};
 use pekit::record::{Kept, StepRecord, StoreError, keep_files, stored};
-use pekit::store::{Digest, Store};
+use pekit::store::{Digest, Seen, Steady, Store};
 
 use skipping::skip;
 
@@ -125,6 +125,119 @@ fn a_tree_is_put_at_once_and_a_failed_put_leaves_nothing() {
     fs::set_permissions(failing.join("b"), fs::Permissions::from_mode(0o644)).unwrap();
     let file = store.put_file(&failing.join("a")).unwrap();
     assert!(store.has(&file.digest));
+}
+
+/// A tree in `dir`'s `tree`, of the files `a`, `b`, `c` and `sub/d`.
+fn small_tree(dir: &Path) -> PathBuf {
+    let tree = dir.join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    for name in ["a", "b", "c", "sub/d"] {
+        fs::write(tree.join(name), name).unwrap();
+    }
+    tree
+}
+
+/// What [`Store::put_tree_steady`] makes of `tree`, `walked` called with
+/// each entry the walk comes to and how many it came to before, as it
+/// comes to it: what another process may do as the tree is walked.
+fn walked_steadily(
+    store: &Store,
+    tree: &Path,
+    walked: &dyn Fn(&Path, u32),
+) -> std::io::Result<Steady<Option<Digest>>> {
+    let count = std::cell::Cell::new(0);
+    let refuse = |at: &Path, _: &fs::Metadata| {
+        // The root is asked of before the walk begins.
+        if at != tree {
+            walked(at, count.get());
+            count.set(count.get() + 1);
+        }
+        false
+    };
+    store.put_tree_steady(tree, (&mut Seen::default(), (0, 0)), &refuse, &[])
+}
+
+#[test]
+fn a_tree_that_holds_still_is_read_steadily_as_it_is_put() {
+    let (store, dir) = store();
+    let tree = small_tree(dir.path());
+    let steady = walked_steadily(&store, &tree, &|_, _| {}).unwrap();
+    assert_eq!(steady, Steady::Read(Some(store.put_tree(&tree).unwrap())));
+}
+
+#[test]
+fn an_entry_gone_before_the_walk_reads_it_is_a_change_not_an_error() {
+    // As ppk's `.tmp-` files are renamed into place: listed, then gone.
+    let (store, dir) = store();
+    let tree = small_tree(dir.path());
+    let gone = |at: &Path, before: u32| {
+        if before == 0 {
+            for name in ["a", "b", "c", "sub"] {
+                let other = tree.join(name);
+                if other != at {
+                    let _ = fs::remove_file(&other).or_else(|_| fs::remove_dir_all(&other));
+                }
+            }
+        }
+    };
+    let steady = walked_steadily(&store, &tree, &gone).unwrap();
+    assert_eq!(steady, Steady::Changed(tree.clone()));
+    // Once it holds still, it is read.
+    let steady = walked_steadily(&store, &tree, &|_, _| {}).unwrap();
+    assert_eq!(steady, Steady::Read(Some(store.put_tree(&tree).unwrap())));
+}
+
+#[test]
+fn an_entry_made_where_the_walk_has_listed_is_a_change() {
+    // As a ref is published after the walk has listed the refs: the tree
+    // read would name what it doesn't hold.
+    let (store, dir) = store();
+    let tree = small_tree(dir.path());
+    // The root is listed before the walk comes to any entry of it.
+    let made = |_: &Path, before: u32| {
+        if before == 0 {
+            fs::write(tree.join("new"), "new").unwrap();
+        }
+    };
+    let steady = walked_steadily(&store, &tree, &made).unwrap();
+    assert_eq!(steady, Steady::Changed(tree.clone()));
+}
+
+#[test]
+fn a_file_written_after_the_walk_reads_it_is_a_change() {
+    // Files alone, so that the walk reads the first it comes to before it
+    // comes to the second.
+    let (store, dir) = store();
+    let tree = small_tree(dir.path());
+    fs::remove_dir_all(tree.join("sub")).unwrap();
+    let first = std::cell::RefCell::new(PathBuf::new());
+    let written = |at: &Path, before: u32| match before {
+        0 => *first.borrow_mut() = at.to_path_buf(),
+        1 => fs::write(&*first.borrow(), "written again").unwrap(),
+        _ => {}
+    };
+    let steady = walked_steadily(&store, &tree, &written).unwrap();
+    assert_eq!(steady, Steady::Changed(first.into_inner()));
+}
+
+#[test]
+fn a_walk_that_fails_while_nothing_changes_fails() {
+    let (store, dir) = store();
+    let tree = small_tree(dir.path());
+    fs::set_permissions(tree.join("b"), fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(tree.join("b")).is_ok() {
+        skip("the failing walk, as this user reads any file");
+        return;
+    }
+    assert!(walked_steadily(&store, &tree, &|_, _| {}).is_err());
+    let file = store.put_file_steady(&tree.join("b"), (&mut Seen::default(), (0, 0)));
+    assert!(file.is_err());
+    // A file that holds still is read.
+    let file = store.put_file_steady(&tree.join("a"), (&mut Seen::default(), (0, 0)));
+    assert_eq!(
+        file.unwrap(),
+        Steady::Read(store.put_file(&tree.join("a")).unwrap())
+    );
 }
 
 #[test]

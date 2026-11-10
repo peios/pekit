@@ -74,3 +74,31 @@ in the same tick of the file system's clock as the build began, or later,
 isn't trusted: a file changed again within that tick would keep the same
 times. The next build reads such a file again. Stamps of files that are
 gone are dropped as the build ends.
+
+## Files that change as they are read
+
+A workspace file or directory that a step is given can be changing as
+pekit reads it, as a package repository is while a package is published
+into it. pekit reads a directory one entry at a time, so it could read
+part of it before a change and part after. It could fail on an entry that
+was listed and is gone, or read a ref without the manifest it names.
+
+So pekit keeps what it saw: the names each directory listed, and the
+stamp of each file and link. Once it has read the directory, it looks
+again. If anything differs, or is gone, the directory changed as it was
+read. pekit discards what it read, even if the read failed because of
+the change, and reads it again after a pause. The pause starts at 50
+milliseconds and doubles each time, up to 2 seconds. A file is read the
+same way, by its stamp. A read that fails while nothing changed fails the
+build.
+
+A directory still changing after 30 seconds, and after at least five
+reads, fails the build with "`PATH`
+kept changing while it was read, `HOST-PATH` last: wait for whatever is
+writing there to finish, then build again". pekit never gives a step a mix
+of before and after.
+
+A file changed in place within one tick of the file system's clock, to
+the same size, after pekit read it, keeps its stamp, so pekit cannot see
+that change. A writer that renames each file into place, as ppk does, is
+always seen.
