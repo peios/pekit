@@ -43,7 +43,9 @@ through any number of ordinary functions, becomes a step.
 Every effect, a built-in that touches the world, is a node too, carrying
 its position in program order. pekit runs a step's effects in the step's
 sandbox, in the step's program order, and a target's own effects on the
-host view, one at a time, in the target's program order.
+host view, one at a time, in the target's program order. A target's
+effects whose order cannot matter run out of order, as
+[Order](~pekit/the-pool#order) describes.
 
 ## Stopping and resuming
 

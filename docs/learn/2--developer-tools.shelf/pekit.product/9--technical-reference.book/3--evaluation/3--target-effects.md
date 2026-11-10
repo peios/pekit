@@ -6,7 +6,8 @@ description: How pekit runs the effects of a target's code outside any
 
 A target's own code is not hermetic. Its effects run on the *host view*
 (`HostView`), one at a time in program order, every time the code runs.
-None of them is cached.
+Fetches, unpacks and some reads are isolated and run out of order, as
+[Order](~pekit/the-pool#order) describes. None of them is cached.
 
 ## The host view
 

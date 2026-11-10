@@ -21,7 +21,9 @@ description: What --strict changes in loading, keying, sandboxes, and a
   of the platform, and apart from a build's that borrowed host tools.
 - **Effects.** A target's own effects are limited to fetches, unpacks, the
   keychain, and reads under `/w` and `/pekit-out`, as [A Target's Own
-  Effects](~pekit/target-effects) describes. Steps marked `#[scratch]` get
+  Effects](~pekit/target-effects) describes. Since a target then cannot
+  write, its `fs.exists` runs out of order, as
+  [Order](~pekit/the-pool#order) describes. Steps marked `#[scratch]` get
   an empty directory.
 
 ## Requiring strict builds
