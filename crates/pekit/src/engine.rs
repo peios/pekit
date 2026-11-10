@@ -16,7 +16,9 @@
 //! - each effect of a unit as a job on the pool, which has `jobs` threads:
 //!   a step's effects in its sandbox, the target's own, which are not
 //!   hermetic, under the host's view of the logical layout, one at a time,
-//!   in program order, since the target's unit stops at each.
+//!   in program order, but for those the view isolates
+//!   ([`HostView::isolates`](crate::sandbox::HostView)), such as fetches
+//!   and reads, which run when they are reached.
 //!
 //! A unit runs again only once what it stopped for is given, carrying on
 //! from where it stopped. A target or a step that stopped for another
@@ -177,6 +179,13 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
                 }
                 _ => "",
             };
+            // GCSL refuses a relative path itself, saying why.
+            if !path.starts_with('/') {
+                return None;
+            }
+            // What the path names once `.` and `..` are taken, as the host
+            // takes them, so that `/w/..` is not the workspace.
+            let path = &lexical(path);
             let inside = |root: &str| {
                 path == root
                     || path
@@ -196,6 +205,23 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
             builtin.name()
         )),
     }
+}
+
+/// The absolute path `path` with each `.` left out and each `..` taking the
+/// component before it, as the host resolves them where no symbolic link
+/// is on the way: `/w/a/../b` is `/w/b`, and `/w/..` is `/`.
+fn lexical(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    format!("/{}", components.join("/"))
 }
 
 /// The context only a run of a script binds (see the prelude's `script`).
@@ -843,7 +869,8 @@ fn prepare_roots(
                     &settings.scratch,
                 )
                 .with_keychain(Arc::clone(keychain))
-                .with_libraries(loaded.libraries.clone()),
+                .with_libraries(loaded.libraries.clone())
+                .with_strict(settings.strict),
             );
             let call = loaded.workspace.prepare_call_wrapped(
                 (&target.def_type, &target.qualified()),

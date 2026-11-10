@@ -404,6 +404,9 @@ pub struct HostView {
     /// Where the libraries the workspace imports were found (see
     /// [Libraries](crate::load#libraries)).
     libraries: Libraries,
+    /// Whether the build is strict (see
+    /// [`Settings::strict`](crate::engine::Settings::strict)).
+    strict: bool,
 }
 
 impl HostView {
@@ -420,6 +423,7 @@ impl HostView {
             temps: AtomicU32::new(0),
             keychain: None,
             libraries: Libraries::default(),
+            strict: false,
         }
     }
 
@@ -438,23 +442,38 @@ impl HostView {
         self.keychain = Some(keychain);
         self
     }
+
+    /// The view of a strict build if `strict` is true, which isolates
+    /// `fs.exists` and `fs.read` too (see [`HostView::isolates`]).
+    #[must_use]
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
 }
 
 impl Effects for HostView {
     /// The effects pekit isolates in a target's own code: fetches, which
     /// are pinned by their digests or commits and kept in the store, the
-    /// unpacking of archives into the store, and the reads of a target's
-    /// files and directories. Every other effect a target makes is met in
-    /// program order (see GCSL's graph mode).
+    /// unpacking of archives into the store, and `file.read` and
+    /// `dir.files`. A read waits only for what gave its `File` or `Dir`:
+    /// `file` and `dir` are no effects in graph mode, so outside a strict
+    /// build a read of one can run before a write or program of the
+    /// target's that is earlier in program order. In a strict build,
+    /// `fs.exists` and `fs.read` too, which are given only a path: outside
+    /// one they wait in program order for the target's earlier writes and
+    /// programs, which a strict build refuses. Every other effect a target
+    /// makes is met in program order (see GCSL's graph mode).
     fn isolates(&self, builtin: Builtin) -> bool {
-        matches!(
-            builtin,
+        match builtin {
             Builtin::Fetch
-                | Builtin::FetchGit
-                | Builtin::ArchiveUnpack
-                | Builtin::FileRead
-                | Builtin::DirFiles
-        )
+            | Builtin::FetchGit
+            | Builtin::ArchiveUnpack
+            | Builtin::FileRead
+            | Builtin::DirFiles => true,
+            Builtin::FsExists | Builtin::FsRead => self.strict,
+            _ => false,
+        }
     }
 
     fn command(&self, command: Command) -> Result<Command, String> {

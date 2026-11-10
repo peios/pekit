@@ -152,6 +152,133 @@ fn a_target_that_fails_in_a_guard_still_ends_a_shared_call_another_waits_on() {
     );
 }
 
+/// Two targets, `first` and `second`, that wait for each other if `said`,
+/// the body of a function of `word` that reads `/w/app/{word}`, is held to
+/// program order (PEI-1671). `second`'s arguments are evaluated at once:
+/// its later `inner()` runs while its earlier `outer()` waits for `first`,
+/// which is in `outer()` and needs `inner()`. `a` holds `a`, and `b` `b`.
+fn crossed(said: &str) -> tempfile::TempDir {
+    workspace(&[
+        ("app/a", "a"),
+        ("app/b", "b"),
+        (
+            "app/build.gcsl",
+            &format!(
+                "import fs\n\
+                 fn said(word: String) -> String {{ {said} }}\n\
+                 fn inner() ->> String {{ = said(\"b\") }}\n\
+                 fn outer() ->> String {{\n\
+                 \x20   let a = said(\"a\")\n\
+                 \x20   = \"{{a}}{{inner()}}\"\n\
+                 }}\n\
+                 fn both(first: String, second: String) -> String {{ = \"{{first}}+{{second}}\" }}\n\
+                 def build first() {{ = outer() }}\n\
+                 def build second() {{ = both(outer(), inner()) }}\n"
+            ),
+        ),
+    ])
+}
+
+/// What `first` and `second` of [`crossed`] come to in a strict build.
+fn crossed_strictly(said: &str) -> Vec<Result<Plain, String>> {
+    let dir = crossed(said);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |settings| {
+        settings.strict = true;
+    });
+    outcomes
+}
+
+#[test]
+fn a_strict_build_s_fs_exists_does_not_wait_for_program_order() {
+    // A strict target writes nothing, so its `fs.exists` need not wait.
+    let outcomes = crossed_strictly("= if fs.exists(\"/w/app/{word}\") { word } else { \"-\" }");
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(outcomes, [text("ab"), text("ab+b")]);
+}
+
+#[test]
+fn a_strict_build_s_fs_read_does_not_wait_for_program_order() {
+    // A strict target writes nothing, so its `fs.read` need not wait.
+    let outcomes = crossed_strictly("= fs.read(\"/w/app/{word}\")");
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(outcomes, [text("ab"), text("ab+b")]);
+}
+
+#[test]
+fn fs_exists_outside_a_strict_build_sees_the_target_s_earlier_writes() {
+    // A call's arguments are evaluated at once, so only program order
+    // makes the second's `fs.exists` wait for the file the first's program
+    // makes.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "import fs\n\
+         fn wrote() -> String {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 1; touch /w/app/made\"])\n\
+         \x20   = \"wrote\"\n\
+         }\n\
+         fn seen(wrote: String, exists: Bool) -> Bool { = exists }\n\
+         def build made() { = seen(wrote(), fs.exists(\"/w/app/made\")) }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["made"], |_| {});
+    assert_eq!(outcomes, [Ok(Plain::Bool(true))]);
+}
+
+#[test]
+fn fs_read_outside_a_strict_build_sees_the_target_s_earlier_writes() {
+    // As for `fs.exists`: only program order makes the second argument's
+    // `fs.read` wait for what the first's program writes.
+    let dir = workspace(&[
+        ("app/made", "old"),
+        (
+            "app/build.gcsl",
+            "import fs\n\
+             fn wrote() -> String {\n\
+             \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 1; printf new > /w/app/made\"])\n\
+             \x20   = \"wrote\"\n\
+             }\n\
+             fn seen(wrote: String, text: String) -> String { = text }\n\
+             def build made() { = seen(wrote(), fs.read(\"/w/app/made\")) }\n",
+        ),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["made"], |_| {});
+    assert_eq!(outcomes, [Ok(Plain::Str("new".to_owned()))]);
+}
+
+#[test]
+fn a_strict_build_leaves_a_relative_fs_path_to_gcsl() {
+    // GCSL's `fs` built-ins take only absolute paths, and say so.
+    let outcomes = crossed_strictly("= if fs.exists(word) { word } else { \"-\" }");
+    let Err(error) = &outcomes[0] else {
+        panic!("{outcomes:?}");
+    };
+    assert!(
+        error.contains("needs an absolute path, found `a`"),
+        "{error}"
+    );
+    assert!(!error.contains("a strict build"), "{error}");
+}
+
+#[test]
+fn a_strict_build_judges_a_path_once_its_dots_are_taken() {
+    // `..` out of the workspace is outside it; `..` that stays in is in.
+    let outside = crossed_strictly("= if fs.exists(\"/w/../etc\") { word } else { \"-\" }");
+    let Err(error) = &outside[0] else {
+        panic!("{outside:?}");
+    };
+    assert!(
+        error.contains(
+            "a strict build reads only the workspace and the build's outputs, and this reads `/etc`"
+        ),
+        "{error}"
+    );
+    let inside = crossed_strictly("= fs.read(\"/w/app/../app/./{word}\")");
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(inside, [text("ab"), text("ab+b")]);
+}
+
 #[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[

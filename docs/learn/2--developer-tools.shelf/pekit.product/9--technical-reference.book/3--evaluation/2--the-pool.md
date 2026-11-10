@@ -55,5 +55,23 @@ used, for eviction.
 Effects of different steps run in any order and at the same time. A step's
 own effects run in its program order, one after another, since they share
 the step's sandbox. A target's own effects run one at a time in the
-target's program order, since they share the host. Effects that pekit
-answers by content, a fetch or an unpacking, run in any order.
+target's program order, since they share the host.
+
+The host view isolates some of the target's effects
+(`HostView::isolates`). GCSL makes an isolated effect as soon as the code
+reaches it and has its arguments, without waiting for earlier effects in
+program order (see [Code that waits](~gcsl/graph-mode#code-that-waits)).
+The isolated effects are:
+
+- A fetch or an unpacking, which pekit answers by content.
+- `file.read` and `dir.files`. Each waits only for the `File` or `Dir` it
+  reads. `file` and `dir` are not effects in graph mode, so outside a
+  strict build such a read can run before a program or write of the
+  target's that is earlier in program order, and find what was there
+  before it.
+- In a strict build, `fs.exists` and `fs.read`. Each is given only a path,
+  so outside a strict build it waits for the target's earlier programs and
+  writes, which can change what is at that path.
+
+A strict build refuses a target's programs and writes, so nothing the
+target does changes what any of these reads finds.
