@@ -152,37 +152,55 @@ fn a_target_that_fails_in_a_guard_still_ends_a_shared_call_another_waits_on() {
     );
 }
 
-#[test]
-fn a_strict_build_s_fs_exists_does_not_wait_for_program_order() {
-    // `second`'s arguments are evaluated at once: its later `inner()`
-    // runs while its earlier `outer()` waits for `first`, which is in
-    // `outer()` and needs `inner()`. Held to program order, `inner()`'s
-    // `fs.exists` would wait for `outer()`, and the targets would wait for
-    // each other (PEI-1671). A strict target writes nothing, so its
-    // `fs.exists` need not wait.
-    let dir = workspace(&[
-        ("app/a", ""),
-        ("app/b", ""),
+/// Two targets, `first` and `second`, that wait for each other if `said`,
+/// the body of a function of `word` that reads `/w/app/{word}`, is held to
+/// program order (PEI-1671). `second`'s arguments are evaluated at once:
+/// its later `inner()` runs while its earlier `outer()` waits for `first`,
+/// which is in `outer()` and needs `inner()`. `a` holds `a`, and `b` `b`.
+fn crossed(said: &str) -> tempfile::TempDir {
+    workspace(&[
+        ("app/a", "a"),
+        ("app/b", "b"),
         (
             "app/build.gcsl",
-            "import fs\n\
-             fn said(word: String) -> String {\n\
-             \x20   = if fs.exists(\"/w/app/{word}\") { word } else { \"-\" }\n\
-             }\n\
-             fn inner() ->> String { = said(\"b\") }\n\
-             fn outer() ->> String {\n\
-             \x20   let a = said(\"a\")\n\
-             \x20   = \"{a}{inner()}\"\n\
-             }\n\
-             fn both(first: String, second: String) -> String { = \"{first}+{second}\" }\n\
-             def build first() { = outer() }\n\
-             def build second() { = both(outer(), inner()) }\n",
+            &format!(
+                "import fs\n\
+                 fn said(word: String) -> String {{ {said} }}\n\
+                 fn inner() ->> String {{ = said(\"b\") }}\n\
+                 fn outer() ->> String {{\n\
+                 \x20   let a = said(\"a\")\n\
+                 \x20   = \"{{a}}{{inner()}}\"\n\
+                 }}\n\
+                 fn both(first: String, second: String) -> String {{ = \"{{first}}+{{second}}\" }}\n\
+                 def build first() {{ = outer() }}\n\
+                 def build second() {{ = both(outer(), inner()) }}\n"
+            ),
         ),
-    ]);
+    ])
+}
+
+/// What `first` and `second` of [`crossed`] come to in a strict build.
+fn crossed_strictly(said: &str) -> Vec<Result<Plain, String>> {
+    let dir = crossed(said);
     let state = tempfile::tempdir().unwrap();
     let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |settings| {
         settings.strict = true;
     });
+    outcomes
+}
+
+#[test]
+fn a_strict_build_s_fs_exists_does_not_wait_for_program_order() {
+    // A strict target writes nothing, so its `fs.exists` need not wait.
+    let outcomes = crossed_strictly("= if fs.exists(\"/w/app/{word}\") { word } else { \"-\" }");
+    let text = |text: &str| Ok(Plain::Str(text.to_owned()));
+    assert_eq!(outcomes, [text("ab"), text("ab+b")]);
+}
+
+#[test]
+fn a_strict_build_s_fs_read_does_not_wait_for_program_order() {
+    // A strict target writes nothing, so its `fs.read` need not wait.
+    let outcomes = crossed_strictly("= fs.read(\"/w/app/{word}\")");
     let text = |text: &str| Ok(Plain::Str(text.to_owned()));
     assert_eq!(outcomes, [text("ab"), text("ab+b")]);
 }
@@ -205,6 +223,28 @@ fn fs_exists_outside_a_strict_build_sees_the_target_s_earlier_writes() {
     let state = tempfile::tempdir().unwrap();
     let (outcomes, _) = build_all(dir.path(), state.path(), &["made"], |_| {});
     assert_eq!(outcomes, [Ok(Plain::Bool(true))]);
+}
+
+#[test]
+fn fs_read_outside_a_strict_build_sees_the_target_s_earlier_writes() {
+    // As for `fs.exists`: only program order makes the second argument's
+    // `fs.read` wait for what the first's program writes.
+    let dir = workspace(&[
+        ("app/made", "old"),
+        (
+            "app/build.gcsl",
+            "import fs\n\
+             fn wrote() -> String {\n\
+             \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 1; printf new > /w/app/made\"])\n\
+             \x20   = \"wrote\"\n\
+             }\n\
+             fn seen(wrote: String, text: String) -> String { = text }\n\
+             def build made() { = seen(wrote(), fs.read(\"/w/app/made\")) }\n",
+        ),
+    ]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["made"], |_| {});
+    assert_eq!(outcomes, [Ok(Plain::Str("new".to_owned()))]);
 }
 
 #[test]

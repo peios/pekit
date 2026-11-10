@@ -444,7 +444,7 @@ impl HostView {
     }
 
     /// The view of a strict build if `strict` is true, which isolates
-    /// `fs.exists` too (see [`HostView::isolates`]).
+    /// `fs.exists` and `fs.read` too (see [`HostView::isolates`]).
     #[must_use]
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
@@ -455,13 +455,15 @@ impl HostView {
 impl Effects for HostView {
     /// The effects pekit isolates in a target's own code: fetches, which
     /// are pinned by their digests or commits and kept in the store, the
-    /// unpacking of archives into the store, and the reads of a target's
-    /// files and directories, which read a `File` or `Dir` and so wait for
-    /// whatever gave it. In a strict build, `fs.exists` too: it is given
-    /// only a path, so outside one it must wait in program order for the
-    /// target's earlier writes and programs, which a strict build refuses.
-    /// Every other effect a target makes is met in program order (see
-    /// GCSL's graph mode).
+    /// unpacking of archives into the store, and `file.read` and
+    /// `dir.files`. A read waits only for what gave its `File` or `Dir`:
+    /// `file` and `dir` are no effects in graph mode, so outside a strict
+    /// build a read of one can run before a write or program of the
+    /// target's that is earlier in program order. In a strict build,
+    /// `fs.exists` and `fs.read` too, which are given only a path: outside
+    /// one they wait in program order for the target's earlier writes and
+    /// programs, which a strict build refuses. Every other effect a target
+    /// makes is met in program order (see GCSL's graph mode).
     fn isolates(&self, builtin: Builtin) -> bool {
         match builtin {
             Builtin::Fetch
@@ -469,7 +471,7 @@ impl Effects for HostView {
             | Builtin::ArchiveUnpack
             | Builtin::FileRead
             | Builtin::DirFiles => true,
-            Builtin::FsExists => self.strict,
+            Builtin::FsExists | Builtin::FsRead => self.strict,
             _ => false,
         }
     }

@@ -57,16 +57,21 @@ own effects run in its program order, one after another, since they share
 the step's sandbox. A target's own effects run one at a time in the
 target's program order, since they share the host.
 
-The host view isolates the target's effects whose order cannot matter
+The host view isolates some of the target's effects
 (`HostView::isolates`). GCSL makes an isolated effect as soon as the code
-reaches it, without waiting for earlier effects in program order (see
-[Code that waits](~gcsl/graph-mode#code-that-waits)). The isolated effects
-are:
+reaches it and has its arguments, without waiting for earlier effects in
+program order (see [Code that waits](~gcsl/graph-mode#code-that-waits)).
+The isolated effects are:
 
 - A fetch or an unpacking, which pekit answers by content.
-- `file.read` and `dir.files`. Each reads a `File` or `Dir`, so it comes
-  after whatever gave that value.
-- In a strict build, `fs.exists`. It is given only a path, so outside a
-  strict build it waits for the target's earlier programs and writes, which
-  can make that path. A strict build refuses those effects, so nothing the
-  target does changes what `fs.exists` finds.
+- `file.read` and `dir.files`. Each waits only for the `File` or `Dir` it
+  reads. `file` and `dir` are not effects in graph mode, so outside a
+  strict build such a read can run before a program or write of the
+  target's that is earlier in program order, and find what was there
+  before it.
+- In a strict build, `fs.exists` and `fs.read`. Each is given only a path,
+  so outside a strict build it waits for the target's earlier programs and
+  writes, which can change what is at that path.
+
+A strict build refuses a target's programs and writes, so nothing the
+target does changes what any of these reads finds.

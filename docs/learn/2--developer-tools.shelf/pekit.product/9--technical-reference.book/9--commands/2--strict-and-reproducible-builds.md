@@ -22,7 +22,7 @@ description: What --strict changes in loading, keying, sandboxes, and a
 - **Effects.** A target's own effects are limited to fetches, unpacks, the
   keychain, and reads under `/w` and `/pekit-out`, as [A Target's Own
   Effects](~pekit/target-effects) describes. Since a target then cannot
-  write, its `fs.exists` runs out of order, as
+  write, its `fs.exists` and `fs.read` run out of order, as
   [Order](~pekit/the-pool#order) describes. Steps marked `#[scratch]` get
   an empty directory.
 
