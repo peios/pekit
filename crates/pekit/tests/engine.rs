@@ -7,7 +7,9 @@ mod support;
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use gcsl::eval::plain::Plain;
 use pekit::events::{Event, EventKind};
 
 use building::{Options, build_in, observed_with};
@@ -96,6 +98,65 @@ fn a_step_runs_once_and_is_then_found_in_the_store() {
         })
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_directory_published_into_as_it_is_read_is_read_whole() {
+    // For a second, a writer publishes into `repo` as ppk does: each file
+    // written beside its place under a `.tmp-` name, then renamed into
+    // place, a blob before the ref that names it. Read once, a walk could
+    // find a `.tmp-` file gone ("cannot read"), or a ref without its blob.
+    // It is read again until it holds still. Read once, this failed in
+    // each of five runs, three times "cannot read" and twice a ref alone;
+    // it is a race, so it can pass so only by chance.
+    let text = "#[hermetic] fn listed(repo: Dir) -> String {\n\
+                \x20   = exec([\"/bin/sh\", \"-c\", \"ls -A {repo.path}\"]).stdout\n\
+                }\n\
+                def build out() { = listed(dir(\"repo\")) }\n";
+    let dir = workspace(text, &[]);
+    let repo = dir.path().join("app/repo");
+    let publish = move |n: u32| {
+        for (name, text) in [
+            (format!("blob-{n}"), n.to_string()),
+            (format!("ref-{n}"), format!("blob-{n}")),
+        ] {
+            let temporary = repo.join(format!(".tmp-{n}"));
+            fs::write(&temporary, text).unwrap();
+            fs::rename(&temporary, repo.join(name)).unwrap();
+        }
+    };
+    // Enough already there that a walk takes long enough to be caught.
+    fs::create_dir_all(dir.path().join("app/repo")).unwrap();
+    for n in 0..2000 {
+        publish(n);
+    }
+    let until = Instant::now() + Duration::from_secs(1);
+    let writer = std::thread::spawn(move || {
+        let mut n = 2000;
+        while Instant::now() < until && n < 7000 {
+            publish(n);
+            n += 1;
+        }
+    });
+    let state = tempfile::tempdir().unwrap();
+    let built = build_in(dir.path(), state.path(), "out");
+    writer.join().unwrap();
+    let Plain::Str(listing) = built.unwrap().value else {
+        panic!("a listing that is no string");
+    };
+    let names: Vec<&str> = listing.lines().collect();
+    assert!(
+        !names.iter().any(|name| name.starts_with(".tmp-")),
+        "{names:?}"
+    );
+    for name in &names {
+        if let Some(n) = name.strip_prefix("ref-") {
+            assert!(
+                names.contains(&format!("blob-{n}").as_str()),
+                "{name} alone"
+            );
+        }
+    }
 }
 
 #[test]

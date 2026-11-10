@@ -53,7 +53,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gcsl::check::{Attribute, Builtin, Constant, retry_of, timeout_of};
 use gcsl::eval::Effects;
@@ -84,7 +84,7 @@ use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences,
 use crate::remote::Remote;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::scratch::Scratch;
-use crate::store::{Digest, Seen, Store, TreeEntry, clock_beside};
+use crate::store::{Digest, Seen, Steady, Store, TreeEntry, clock_beside};
 use crate::sweep::Sweeper;
 use crate::target::Target;
 
@@ -207,6 +207,23 @@ const PACKAGING_FILE: &str = "<stdlib>/packaging.gcsl";
 /// How many symbolic links a path is followed through, as Linux follows
 /// them, before it is refused.
 const MAX_LINKS: u32 = 40;
+
+/// How long a workspace input that keeps changing as it is read is read
+/// again before the build fails, if it has been read [`STEADY_READS`]
+/// times (see [`Run::input`]).
+const STEADY_WAIT: Duration = Duration::from_secs(30);
+
+/// How many times, at least, a workspace input that keeps changing is
+/// read before the build fails: a read that is slow, as on a loaded
+/// machine, must not spend the whole of [`STEADY_WAIT`] alone.
+const STEADY_READS: u32 = 5;
+
+/// The pause before a workspace input that changed as it was read is read
+/// again, doubled each time it changes again.
+const STEADY_PAUSE: Duration = Duration::from_millis(50);
+
+/// The longest pause before a workspace input is read again.
+const STEADY_PAUSE_MOST: Duration = Duration::from_secs(2);
 
 /// What a path inside an output directory is (see [`Run::inside_output`]).
 enum Inside {
@@ -3035,7 +3052,10 @@ impl Run<'_> {
     /// What the store keeps of the input at `path`, a file or, if `dir`, a
     /// directory: an output of a step of this build, or a workspace file's,
     /// put into the store. Never what an earlier build left in the output
-    /// directory, which might be stale.
+    /// directory, which might be stale. A workspace file or directory that
+    /// changes as it is read is read again, after a pause, until it holds
+    /// still, for up to [`STEADY_WAIT`] and [`STEADY_READS`] reads: never a
+    /// mix of before and after.
     fn input(&mut self, path: &str, dir: bool) -> Result<Kept, String> {
         self.input_through(path, dir, 0)
     }
@@ -3086,26 +3106,57 @@ impl Run<'_> {
         }
         let (seen, now) = &mut self.workspace_seen;
         let unreadable = |error: io::Error| format!("cannot read `{path}`: {error}");
-        let kept = if dir {
-            let never = |_: &Path, _: &fs::Metadata| false;
-            // The workspace's root but its history and the build's outputs,
-            // which change with every commit and build, and no step reads.
-            let left_out = if rest.is_empty() {
-                vec![self.loaded.root.join(".git"), outputs.to_path_buf()]
-            } else {
-                Vec::new()
-            };
-            let tree = self
-                .store
-                .put_tree_seen_without(&host, (seen, *now), &never, &left_out)
-                .map_err(unreadable)?;
-            Kept::Dir(tree.ok_or_else(|| format!("cannot read `{path}`"))?)
+        let never = |_: &Path, _: &fs::Metadata| false;
+        // The workspace's root but its history and the build's outputs,
+        // which change with every commit and build, and no step reads.
+        let left_out = if dir && rest.is_empty() {
+            vec![self.loaded.root.join(".git"), outputs.to_path_buf()]
         } else {
-            Kept::File(
-                self.store
-                    .put_file_seen_at(&host, (seen, *now))
-                    .map_err(unreadable)?,
-            )
+            Vec::new()
+        };
+        // Another process may be writing there, as a package is published
+        // into a repository: what changed as it was read is read again,
+        // until it holds still (see [Trees read while they
+        // change](crate::store#trees-read-while-they-change)).
+        let given_up = Instant::now() + STEADY_WAIT;
+        let mut pause = STEADY_PAUSE;
+        let mut reads = 0;
+        let kept = loop {
+            reads += 1;
+            let read = if dir {
+                match self
+                    .store
+                    .put_tree_steady(&host, (seen, *now), &never, &left_out)
+                    .map_err(unreadable)?
+                {
+                    Steady::Read(Some(tree)) => Steady::Read(Kept::Dir(tree)),
+                    Steady::Read(None) => return Err(format!("cannot read `{path}`")),
+                    Steady::Changed(at) => Steady::Changed(at),
+                }
+            } else {
+                match self
+                    .store
+                    .put_file_steady(&host, (seen, *now))
+                    .map_err(unreadable)?
+                {
+                    Steady::Read(file) => Steady::Read(Kept::File(file)),
+                    Steady::Changed(at) => Steady::Changed(at),
+                }
+            };
+            match read {
+                Steady::Read(kept) => break kept,
+                Steady::Changed(_) if reads < STEADY_READS || Instant::now() < given_up => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(STEADY_PAUSE_MOST);
+                }
+                Steady::Changed(at) => {
+                    return Err(format!(
+                        "`{path}` kept changing while it was read, `{}` last: wait for \
+                         whatever is writing there to finish, then build again",
+                        at.display()
+                    ));
+                }
+            }
         };
         self.outputs.insert(path.to_owned(), kept);
         Ok(kept)
