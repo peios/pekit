@@ -1758,6 +1758,12 @@ impl Run<'_> {
                             .filter(|found| found.kind() == NodeKind::Deferred)
                             .map(|found| (node, found))
                     });
+                    // A target done while its unit waits is never run
+                    // again: what the unit was running is released, for any
+                    // other that waits for it.
+                    if step.is_some() && (query || no_dynamic) {
+                        self.loaded.workspace.give_up(call.unit());
+                    }
                     match step {
                         Some((node, _)) if query => {
                             root.stopped_at.clone_from(&nodes);

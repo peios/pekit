@@ -82,7 +82,10 @@ to reach it, and the other waits for it. Once another unit waits for it,
 the target's own effects inside it don't wait for the target's earlier
 work outside it, so they can reach the system out of the target's program
 order. They still run one at a time. GCSL's [Running Steps for a
-Host](~gcsl/graph-mode#units-that-share-work) page explains why.
+Host](~gcsl/graph-mode#units-that-share-work) page explains why. A target
+that `--no-dynamic` fails, or that a query stops, while its unit waits
+gives up the shared work it was computing, and a target waiting for that
+work computes it itself.
 
 If no unit can progress and no work is running, the units wait for each
 other. When they wait in a circle through memoized calls or `lazy` values,

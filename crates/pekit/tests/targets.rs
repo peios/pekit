@@ -364,6 +364,34 @@ fn targets_whose_shared_calls_need_each_other_report_the_call_that_needs_its_own
 }
 
 #[test]
+fn a_target_failed_for_a_dynamic_dependency_lets_go_of_the_call_another_waits_for() {
+    // `first`'s run of `shared` waits for a step's result, which
+    // `--no-dynamic` fails it for, and `second` waits for that run. Rather
+    // than waiting for ever, `second` runs `shared` itself, and fails the
+    // same way.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "#[hermetic] fn made(n: Int) -> File {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo {n} > out\"])\n\
+         \x20   = working_dir().file(\"out\")\n\
+         }\n\
+         fn shared() ->> String { = made(7).read() }\n\
+         def build first() { = shared() }\n\
+         def build second() { = shared() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |settings| {
+        settings.no_dynamic = true;
+    });
+    for outcome in &outcomes {
+        let Err(error) = outcome else {
+            panic!("{outcomes:?}");
+        };
+        assert!(error.contains("a dynamic dependency"), "{error}");
+    }
+}
+
+#[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
         (
