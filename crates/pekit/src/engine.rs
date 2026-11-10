@@ -24,9 +24,11 @@
 //! from where it stopped. A target or a step that stopped for another
 //! unit's run, which computes a memoised call or a `lazy` it needs, runs
 //! again once anything else in the build has run, a step, an effect, or a
-//! unit that ended a memoised call (`Workspace::memo_ended`), as the other
-//! may have; if nothing else can, the units wait for each other, and the
-//! build fails. A step that
+//! unit that ended a memoised call or `lazy`, or found one another unit
+//! runs, which lets that unit go on (`Workspace::memo_progress`), as the
+//! other may have; if nothing else can, the units wait for each other, and
+//! the build fails, with the call that needs its own result if they wait
+//! in a circle through one (`Workspace::stuck`). A step that
 //! fails, by its code's own failure, is run again from its start in a fresh
 //! sandbox as its `#[retry]` allows, and one that passes only then is
 //! *flaky*; its `#[timeout]` spans every attempt. A step that succeeds is
@@ -1606,10 +1608,11 @@ impl Run<'_> {
     /// to is its root's.
     fn drive(&mut self) -> Result<(), BuildError> {
         loop {
-            // The memoised calls ended before this round's runs: a round
-            // that ends one has moved on what a waiting unit waits for,
-            // though no step or effect ran.
-            let ended = self.loaded.workspace.memo_ended();
+            // The memoised calls ended, and runs another unit waits for,
+            // before this round's runs: a round that ends one, or finds one,
+            // has moved on what a waiting unit waits for, though no step or
+            // effect ran.
+            let ended = self.loaded.workspace.memo_progress();
             self.run_roots();
             self.name_new_steps();
             let demands = self.root_demands();
@@ -1633,16 +1636,14 @@ impl Run<'_> {
                 }
                 progressed = true;
             }
-            progressed |= self.loaded.workspace.memo_ended() != ended;
+            progressed |= self.loaded.workspace.memo_progress() != ended;
             // A unit waiting for another's shared result runs again once
             // anything else has run, the other unit perhaps; if nothing else
-            // can, and no shared result was finished, the units wait for
-            // each other.
+            // can, and no shared result was finished or found, the units
+            // wait for each other.
             let waiting = self.wake_waiting(progressed);
             if waiting && !progressed {
-                return Err(BuildError::Engine(
-                    "the build's targets and steps wait for each other's shared results".to_owned(),
-                ));
+                return Err(self.stuck());
             }
             for index in 0..self.roots.len() {
                 let given = match self.roots.get(index) {
@@ -1666,6 +1667,31 @@ impl Run<'_> {
                         .to_owned(),
                 ));
             }
+        }
+    }
+
+    /// The error of a build whose targets and steps wait for each other's
+    /// shared results: the call that needs its own result, if they wait in
+    /// a circle through one, each unit named as its target or step.
+    fn stuck(&self) -> BuildError {
+        let name = |unit: u32| {
+            if let Some(number) = unit.checked_sub(STEP_UNITS) {
+                let step = self.step_names.get(&number).cloned();
+                return format!(
+                    "step `{}`",
+                    step.unwrap_or_else(|| format!("step-{number}"))
+                );
+            }
+            self.roots
+                .iter()
+                .find(|root| root.call.as_ref().is_some_and(|call| call.unit() == unit))
+                .map_or_else(|| format!("unit {unit}"), |root| format!("`{}`", root.dir))
+        };
+        match self.loaded.workspace.stuck(&name) {
+            Some(error) => BuildError::Invoke(InvokeError::Diagnostics(vec![error])),
+            None => BuildError::Engine(
+                "the build's targets and steps wait for each other's shared results".to_owned(),
+            ),
         }
     }
 
@@ -1732,6 +1758,12 @@ impl Run<'_> {
                             .filter(|found| found.kind() == NodeKind::Deferred)
                             .map(|found| (node, found))
                     });
+                    // A target done while its unit waits is never run
+                    // again: what the unit was running is released, for any
+                    // other that waits for it.
+                    if step.is_some() && (query || no_dynamic) {
+                        self.loaded.workspace.give_up(call.unit());
+                    }
                     match step {
                         Some((node, _)) if query => {
                             root.stopped_at.clone_from(&nodes);

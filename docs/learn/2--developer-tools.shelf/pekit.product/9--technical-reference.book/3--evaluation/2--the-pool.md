@@ -75,3 +75,12 @@ The isolated effects are:
 
 A strict build refuses a target's programs and writes, so nothing the
 target does changes what any of these reads finds.
+
+One more exception holds for effects that are not isolated: those inside
+a memoised call or `lazy` that another target or step is waiting for. GCSL
+then orders them only after earlier work inside that call, not after the
+target's other earlier work, still one at a time per target, so that two
+targets that need each other's shared calls don't wait for each other (see
+[Code that waits](~gcsl/graph-mode#code-that-waits)). Such a call's effects
+already reach the host only once, in whichever target got to the call
+first, so the other targets never saw them in their own order anyway.

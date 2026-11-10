@@ -279,6 +279,118 @@ fn a_strict_build_judges_a_path_once_its_dots_are_taken() {
     assert_eq!(inside, [text("ab"), text("ab+b")]);
 }
 
+/// Two memoised calls, `outer` calling `inner`, whose programs the targets
+/// run themselves, as effects pekit does not isolate. `second`'s arguments
+/// are pieces: its first waits for `first`'s run of `outer`, and its
+/// second begins `inner`, whose program waits its turn behind the first.
+const CROSSED: &str = "fn said(word: String) -> String {\n\
+                       \x20   = exec([\"/bin/sh\", \"-c\", \"echo {word}\"]).stdout.trim()\n\
+                       }\n\
+                       fn inner() ->> String { = said(\"b\") }\n\
+                       fn outer() ->> String {\n\
+                       \x20   let a = said(\"a\")\n\
+                       \x20   = \"{a}{inner()}\"\n\
+                       }\n\
+                       fn both(first: String, second: String) -> String { = \"{first}+{second}\" }\n\
+                       def build first() { = outer() }\n\
+                       def build second() { = both(outer(), inner()) }\n";
+
+#[test]
+fn targets_that_cross_over_shared_calls_both_finish() {
+    // `first` begins `outer`; `second` waits for it, its later piece
+    // having begun `inner`; then `first` needs `inner`. `second`'s run of
+    // `inner`, which `first` waits for, no longer waits for `second`'s
+    // earlier piece, rather than the two waiting for each other.
+    let dir = workspace(&[("app/build.gcsl", CROSSED)]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |_| {});
+    assert_eq!(
+        outcomes,
+        [
+            Ok(Plain::Str("ab".to_owned())),
+            Ok(Plain::Str("ab+b".to_owned()))
+        ]
+    );
+}
+
+#[test]
+fn targets_whose_shared_calls_need_each_other_report_the_call_that_needs_its_own_result() {
+    // Each target runs one of two memoised calls that need each other.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "fn said(word: String) -> String {\n\
+         \x20   = exec([\"/bin/sh\", \"-c\", \"echo {word}\"]).stdout.trim()\n\
+         }\n\
+         fn e() ->> String {\n\
+         \x20   let a = said(\"e\")\n\
+         \x20   = \"{a}{f()}\"\n\
+         }\n\
+         fn f() ->> String {\n\
+         \x20   let b = said(\"f\")\n\
+         \x20   = \"{b}{e()}\"\n\
+         }\n\
+         def build first() { = e() }\n\
+         def build second() { = f() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let state = state.path().to_path_buf();
+    let shown = std::thread::Builder::new()
+        .stack_size(gcsl::STACK_SIZE)
+        .spawn(move || {
+            let mut loaded = load(&root).unwrap();
+            let targets = select(&loaded.workspace, "build", &["first", "second"], "").unwrap();
+            let settings = settings(&root, &state, ("x86_64", "dev"));
+            match build_all_observed(&mut loaded, &targets, &settings, &mut |_| {}) {
+                Ok(outcomes) => panic!("{:?}", outcomes.targets),
+                Err(error) => error.render(&loaded),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        shown.contains("this call depends on its own result"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("`app/first` needs `f` here, which `app/second` is running"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("`app/second` needs `e` here, which `app/first` is running"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_target_failed_for_a_dynamic_dependency_lets_go_of_the_call_another_waits_for() {
+    // `first`'s run of `shared` waits for a step's result, which
+    // `--no-dynamic` fails it for, and `second` waits for that run. Rather
+    // than waiting for ever, `second` runs `shared` itself, and fails the
+    // same way.
+    let dir = workspace(&[(
+        "app/build.gcsl",
+        "#[hermetic] fn made(n: Int) -> File {\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"echo {n} > out\"])\n\
+         \x20   = working_dir().file(\"out\")\n\
+         }\n\
+         fn shared() ->> String { = made(7).read() }\n\
+         def build first() { = shared() }\n\
+         def build second() { = shared() }\n",
+    )]);
+    let state = tempfile::tempdir().unwrap();
+    let (outcomes, _) = build_all(dir.path(), state.path(), &["first", "second"], |settings| {
+        settings.no_dynamic = true;
+    });
+    for outcome in &outcomes {
+        let Err(error) = outcome else {
+            panic!("{outcomes:?}");
+        };
+        assert!(error.contains("a dynamic dependency"), "{error}");
+    }
+}
+
 #[test]
 fn names_and_globs_select_targets_once_each_sorted() {
     let dir = workspace(&[
