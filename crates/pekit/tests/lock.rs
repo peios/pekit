@@ -117,6 +117,228 @@ fn has_git() -> bool {
     Command::new("git").arg("--version").output().is_ok()
 }
 
+/// Checks the records of a workspace whose libraries have just been exported.
+fn assert_export_records(ws: &Path) {
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(ws.join("pekit.lock")).unwrap()).unwrap();
+    let exports: serde_json::Value =
+        serde_json::from_slice(&fs::read(ws.join(".gcsl/pekit-exports.json")).unwrap()).unwrap();
+    for pin in lock["libraries"].as_array().unwrap() {
+        let exported = &exports[pin["path"].as_str().unwrap()];
+        assert_eq!(exported["commit"], pin["commit"]);
+        assert_eq!(exported["tree"], pin["tree"]);
+    }
+}
+
+/// Moves only `ws`'s lock to the commit now in its libraries' repository,
+/// as pulling a changed lock does, leaving its exports and records alone.
+fn move_lock(ws: &Path, cache: &Path) {
+    let next = ws.with_file_name("next");
+    write(
+        &next,
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                &fs::read_to_string(ws.join("app/build.gcsl")).unwrap(),
+            ),
+            (
+                "pekit.lock",
+                &fs::read_to_string(ws.join("pekit.lock")).unwrap(),
+            ),
+        ],
+    );
+    let locked = pekit(&next, cache, &["lock", "--update"], None);
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    fs::copy(next.join("pekit.lock"), ws.join("pekit.lock")).unwrap();
+}
+
+/// A workspace exported at one commit, with its lock moved to another.
+fn workspace_with_moved_pin(dir: &Path, cache: &Path) -> PathBuf {
+    repository_and_workspace(dir);
+    let ws = dir.join("ws");
+    let locked = pekit(&ws, cache, &["lock"], None);
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    assert_export_records(&ws);
+    let repo = dir.join("repo");
+    write(
+        &repo,
+        &[
+            (
+                "libs/greet/greet.gcsl",
+                "import \"example.org/libs/util\"\n\
+                 def hello(name: String) -> String { \"hi {util.loud(name)}\" }\n",
+            ),
+            ("libs/util/more.gcsl", "def more() -> String { \"more\" }\n"),
+        ],
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "two"]);
+    move_lock(&ws, cache);
+    ws
+}
+
+#[test]
+fn every_build_refreshes_untouched_exports_when_the_lock_moves() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    for args in [&["build", "hi"][..], &["build", "hi", "--strict"][..]] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let ws = workspace_with_moved_pin(dir.path(), cache.path());
+        let built = pekit(&ws, cache.path(), args, None);
+        assert!(built.status.success(), "{:?}", shown(&built));
+        assert!(!shown(&built).1.contains("differs from the commit"));
+        assert!(
+            ws.join(".gcsl/libraries/example.org/libs/util/more.gcsl")
+                .is_file()
+        );
+        assert_export_records(&ws);
+        let strict = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+        assert!(strict.status.success(), "{:?}", shown(&strict));
+    }
+}
+
+#[test]
+fn an_unrecorded_export_as_its_pin_has_it_is_recorded_and_then_refreshed() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    repository_and_workspace(dir.path());
+    let ws = dir.path().join("ws");
+    let locked = pekit(&ws, cache.path(), &["lock"], None);
+    assert!(locked.status.success(), "{:?}", shown(&locked));
+    // As an older pekit, which kept no record, leaves a workspace.
+    fs::remove_file(ws.join(".gcsl/pekit-exports.json")).unwrap();
+    let built = pekit(&ws, cache.path(), &["build", "hi"], None);
+    assert!(built.status.success(), "{:?}", shown(&built));
+    assert_export_records(&ws);
+    let repo = dir.path().join("repo");
+    write(
+        &repo,
+        &[("libs/util/more.gcsl", "def more() -> String { \"more\" }\n")],
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "two"]);
+    move_lock(&ws, cache.path());
+    let strict = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(strict.status.success(), "{:?}", shown(&strict));
+    assert!(
+        ws.join(".gcsl/libraries/example.org/libs/util/more.gcsl")
+            .is_file()
+    );
+    assert_export_records(&ws);
+}
+
+#[test]
+fn a_moved_pin_leaves_an_edited_export_alone_with_a_recovery_hint() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let ws = workspace_with_moved_pin(dir.path(), cache.path());
+    let library = ws.join(".gcsl/libraries/example.org/libs/util");
+    let file = library.join("util.gcsl");
+    let text = format!("{}# edited by hand\n", fs::read_to_string(&file).unwrap());
+    fs::write(&file, &text).unwrap();
+    for args in [&["build", "hi"][..], &["build", "hi", "--strict"][..]] {
+        let built = pekit(&ws, cache.path(), args, None);
+        assert_eq!(built.status.success(), !args.contains(&"--strict"));
+        assert!(
+            shown(&built).1.contains(
+                "remove `.gcsl/libraries/example.org/libs/util` and pekit will restore it from the pin"
+            ),
+            "{:?}",
+            shown(&built)
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), text);
+        assert!(!library.join("more.gcsl").exists());
+    }
+    fs::remove_dir_all(&library).unwrap();
+    let recovered = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(recovered.status.success(), "{:?}", shown(&recovered));
+    assert_export_records(&ws);
+}
+
+#[test]
+fn a_moved_pin_leaves_an_unrecorded_export_alone_with_a_recovery_hint() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let ws = workspace_with_moved_pin(dir.path(), cache.path());
+    let record = ws.join(".gcsl/pekit-exports.json");
+    fs::remove_file(&record).unwrap();
+    let libraries = ws.join(".gcsl/libraries/example.org/libs");
+    let greet = fs::read(libraries.join("greet/greet.gcsl")).unwrap();
+    let util = fs::read(libraries.join("util/util.gcsl")).unwrap();
+    for args in [&["build", "hi"][..], &["build", "hi", "--strict"][..]] {
+        let built = pekit(&ws, cache.path(), args, None);
+        assert_eq!(built.status.success(), !args.contains(&"--strict"));
+        let error = shown(&built).1;
+        for path in ["greet", "util"] {
+            assert!(
+                error.contains(&format!(
+                    "remove `.gcsl/libraries/example.org/libs/{path}` and pekit will restore it from the pin"
+                )),
+                "{error}"
+            );
+        }
+        assert_eq!(fs::read(libraries.join("greet/greet.gcsl")).unwrap(), greet);
+        assert_eq!(fs::read(libraries.join("util/util.gcsl")).unwrap(), util);
+        assert!(!libraries.join("util/more.gcsl").exists());
+        assert!(!record.exists());
+    }
+    fs::remove_dir_all(&libraries).unwrap();
+    let recovered = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(recovered.status.success(), "{:?}", shown(&recovered));
+    assert_export_records(&ws);
+}
+
+#[test]
+fn a_refresh_with_the_wrong_tree_digest_leaves_the_old_export_and_record() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let ws = workspace_with_moved_pin(dir.path(), cache.path());
+    let path = ws.join("pekit.lock");
+    let mut lock: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    lock["libraries"][1]["tree"] = "0".repeat(64).into();
+    fs::write(&path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    let record = ws.join(".gcsl/pekit-exports.json");
+    let before: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let library = ws.join(".gcsl/libraries/example.org/libs/util");
+    let text = fs::read(library.join("util.gcsl")).unwrap();
+    let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(!built.status.success());
+    assert!(
+        shown(&built)
+            .1
+            .contains("does not match the tree digest `pekit.lock` pins"),
+        "{:?}",
+        shown(&built)
+    );
+    assert_eq!(fs::read(library.join("util.gcsl")).unwrap(), text);
+    assert!(!library.join("more.gcsl").exists());
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert_eq!(
+        before["example.org/libs/util"],
+        after["example.org/libs/util"]
+    );
+}
+
 #[test]
 fn lock_pins_every_library_imported_and_every_command_puts_one_back() {
     if !has_git() {
@@ -143,6 +365,7 @@ fn lock_pins_every_library_imported_and_every_command_puts_one_back() {
     );
     let libraries = ws.join(".gcsl/libraries/example.org/libs");
     assert!(libraries.join("greet/greet.gcsl").is_file());
+    assert_export_records(&ws);
     assert!(libraries.join("util/util.gcsl").is_file());
     // Locked again, nothing changes; a library gone is put back, and a
     // strict build finds what the lock pins.
@@ -440,6 +663,75 @@ fn nested_libraries_locked(dir: &Path, cache: &Path) -> (PathBuf, PathBuf, Strin
     assert!(locked.status.success(), "{:?}", shown(&locked));
     let one = rev_parse(&repo, "HEAD");
     (repo, ws, one)
+}
+
+#[test]
+fn nested_exports_refresh_outer_first_and_preserve_edits_inside() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    for edited in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (repo, ws, _) = nested_libraries_locked(dir.path(), cache.path());
+        write(&ws, &[("app/build.gcsl", BOTH)]);
+        let locked = pekit(&ws, cache.path(), &["lock"], None);
+        assert!(locked.status.success(), "{:?}", shown(&locked));
+        write(
+            &repo,
+            &[
+                (
+                    "libs/sdk/sdk.gcsl",
+                    "def name() -> String { \"new sdk\" }\n",
+                ),
+                (
+                    "libs/sdk/tools/tools.gcsl",
+                    "def tool() -> String { \"new tool\" }\n",
+                ),
+            ],
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "two"]);
+        move_lock(&ws, cache.path());
+        let path = ws.join("pekit.lock");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        lock["libraries"].as_array_mut().unwrap().reverse();
+        fs::write(&path, serde_json::to_vec(&lock).unwrap()).unwrap();
+        let sdk = ws.join(".gcsl/libraries/example.org/libs/sdk");
+        let file = sdk.join("tools/tools.gcsl");
+        if edited {
+            let text = format!("{}# edited by hand\n", fs::read_to_string(&file).unwrap());
+            fs::write(&file, text).unwrap();
+        }
+        let outer = fs::read(sdk.join("sdk.gcsl")).unwrap();
+        let inner = fs::read(&file).unwrap();
+        let record = ws.join(".gcsl/pekit-exports.json");
+        let before = fs::read(&record).unwrap();
+        let built = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+        assert_eq!(built.status.success(), !edited, "{:?}", shown(&built));
+        if edited {
+            assert!(
+                shown(&built)
+                    .1
+                    .contains("and pekit will restore it from the pin")
+            );
+            assert_eq!(fs::read(sdk.join("sdk.gcsl")).unwrap(), outer);
+            assert_eq!(fs::read(&file).unwrap(), inner);
+            assert_eq!(fs::read(&record).unwrap(), before);
+        } else {
+            assert_export_records(&ws);
+            assert_eq!(
+                fs::read(sdk.join("sdk.gcsl")).unwrap(),
+                fs::read(repo.join("libs/sdk/sdk.gcsl")).unwrap()
+            );
+            assert_eq!(
+                fs::read(&file).unwrap(),
+                fs::read(repo.join("libs/sdk/tools/tools.gcsl")).unwrap()
+            );
+        }
+    }
 }
 
 #[test]
