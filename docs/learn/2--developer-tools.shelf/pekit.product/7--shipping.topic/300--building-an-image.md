@@ -97,7 +97,9 @@ here from an artifact directory in the workspace, by its name and version,
 for the platform being built for. It's a step keyed by the repository's
 contents, so what it gives is exactly what the repository holds. The
 repository has to be a directory of the workspace; the ppk library doesn't
-fetch one over the network.
+fetch one over the network. It uses `ppk fetch --no-deps` to take only the
+named package. Callers that need its dependencies resolve the closure
+themselves.
 
 ## Boot the image in a test
 

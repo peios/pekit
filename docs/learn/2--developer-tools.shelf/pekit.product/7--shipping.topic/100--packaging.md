@@ -201,9 +201,10 @@ published example/dev.example.greet with ppk
 
 Packing doesn't depend on the store, so publishing what you've packed, or
 the same package into a second store, packs nothing again. ppk publishes
-into an artifact directory with `ppk fetch`, which refuses a version whose
-contents changed: publish a new version instead. If one package fails to
-publish, the packages published before it stay published.
+into an artifact directory with `ppk fetch --no-deps`, which copies only the
+named package and refuses a version whose contents changed: publish a new
+version instead. If one package fails to publish, the packages published
+before it stay published.
 
 ## Publish strictly
 
@@ -236,8 +237,8 @@ pekitconf = {
 }
 ```
 
-The packager then publishes with `ppk fetch --replace`, and each line pekit
-prints names it:
+The packager then publishes with `ppk fetch --no-deps --replace`, and each
+line pekit prints names it:
 
 ```text
 published example/dev.example.greet with ppk --replace

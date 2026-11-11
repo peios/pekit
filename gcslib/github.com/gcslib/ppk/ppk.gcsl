@@ -23,9 +23,10 @@
 # - `packager(replace = false)`: ppk as a `packaging.Packager`, for a
 #   workspace to list in `pekitconf.packagers`: its `pack` is `pack`, and
 #   its `publish` copies a packed package into an artifact directory with
-#   `ppk fetch`, which refuses a version whose content changed. With
-#   `replace = true`, it publishes with `ppk fetch --replace`, which
-#   replaces such a version: only for a repository nothing has fetched from
+#   `ppk fetch --no-deps`, which copies only that package and refuses a
+#   version whose content changed. With `replace = true`, it publishes with
+#   `ppk fetch --no-deps --replace`, which replaces such a version: only
+#   for a repository nothing has fetched from
 #   yet, as a bootstrap's is. Its name is then `ppk --replace`, so that each
 #   package it publishes is said to be published with it.
 # - `PpkPackage`: a package as ppk packed it: its name, version and
@@ -33,10 +34,11 @@
 # - `packed(pkg)`: the `PpkPackage` of `pkg`, packed as `pack` packs it.
 # - `from_repository(repo, name, version)`: the `PpkPackage` of the version
 #   `version` of the package `name`, for `^platform`'s architecture, taken
-#   from the artifact directory `repo` with `ppk fetch`: a hermetic step,
-#   keyed by the repository's contents, so what it gives is what the
+#   from the artifact directory `repo` with `ppk fetch --no-deps`: a hermetic
+#   step, keyed by the repository's contents, so what it gives is what the
 #   repository holds. A repository is a directory of the workspace, until
-#   Peios serves packages over the network.
+#   Peios serves packages over the network. This takes only that package;
+#   callers that need its closure resolve it themselves.
 import fs
 import packaging
 import toolchain
@@ -164,6 +166,7 @@ def from_repository(
     let ran = exec([
         ppk.path,
         "fetch",
+        "--no-deps",
         "--from",
         repo.path,
         "{name}@{version}?arch={arch}",
@@ -181,8 +184,8 @@ def from_repository(
 fn pack_of(pkg: Package) -> Dir { pack(pkg) }
 
 # `pkg`, packed into `packed`, copied into the artifact directory `store` by
-# `ppk fetch`, outside any step: with `--replace` if `replace`, in place of
-# the same version with other content.
+# `ppk fetch --no-deps`, outside any step: with `--replace` if `replace`,
+# in place of the same version with other content.
 fn published(
     pkg: Package,
     packed: Dir,
@@ -195,6 +198,7 @@ fn published(
     let ran = exec([
         tool.ppk.path,
         "fetch",
+        "--no-deps",
         ...replacing,
         "--from",
         packed.path,
