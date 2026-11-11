@@ -67,7 +67,10 @@ same failure, and every target that needs it. Other targets carry on.
 These restore a known state, from least to most drastic:
 
 1. **Remove a changed library.** Remove its directory under
-   `.gcsl/libraries/`; the next build puts back the pinned one.
+   `.gcsl/libraries/`, preserving any edits first; the next build puts back
+   the pinned one. Untouched exports with pekit's record refresh
+   automatically when the lock moves. An export made by an older pekit
+   that already differs has no record and needs this one-time removal too.
 2. **`pekit clean`.** Removes `pekit-out/`. The next build puts every
    target's results back from the store, running nothing.
 3. **`--rebuild`.** Runs every step and program again, and records each. It

@@ -1,4 +1,4 @@
-.TH PEKIT.LOCK 5 2026-10-28 "Peios pekit 0.1.0"
+.TH PEKIT.LOCK 5 2026-11-11 "Peios pekit 0.1.0"
 .SH NAME
 pekit.lock \- the libraries a pekit workspace pins, and where they come from
 .SH SYNOPSIS
@@ -114,7 +114,20 @@ and
 .B publish
 put back each pinned library missing from
 .IR .gcsl/libraries/ ,
-from the commit it is pinned at, and warn of each one there that differs from its pin.
+from the commit it is pinned at.
+Each export's commit and tree digest are recorded, by import path, in
+.IR .gcsl/pekit-exports.json ,
+outside the exported trees.
+If an existing library differs from its pin but still matches this record, it is an untouched older export and is replaced from the pinned commit, and its record updated.
+This refresh happens for non-strict builds too.
+The replacement is unpacked into a temporary directory and renamed into place before its record is written through a temporary file.
+.PP
+A differing library whose tree does not match its record, or has no record, is left alone and reported with a recovery hint.
+Preserve any edits, then remove
+.IR .gcsl/libraries/PATH/ ;
+the next build puts back the pin.
+A library matching its pin whose record is missing or stale, such as an export made by an older pekit, is recorded, so that it is refreshed when the pin moves.
+An unrecorded library that already differs needs removing once.
 A build with
 .B \-\-strict
 fails if the workspace has no
@@ -135,6 +148,10 @@ Commit it.
 .TP
 .I WORKSPACE/.gcsl/libraries/
 The pinned libraries, exported.
+Do not commit it.
+.TP
+.I WORKSPACE/.gcsl/pekit-exports.json
+The last commit and tree digest pekit exported for each recorded library.
 Do not commit it.
 .TP
 .I CACHE/git/

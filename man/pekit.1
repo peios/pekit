@@ -1,4 +1,4 @@
-.TH PEKIT 1 2026-10-28 "Peios pekit 0.1.0"
+.TH PEKIT 1 2026-11-11 "Peios pekit 0.1.0"
 .SH NAME
 pekit \- build, test, run, and package GCSL build files as cached, sandboxed steps
 .SH SYNOPSIS
@@ -77,7 +77,12 @@ first put back each library
 .I pekit.lock
 pins that is missing from
 .IR .gcsl/libraries/ ,
-and warn of each one there that differs from its pin.
+and refresh an untouched older export whose tree still matches pekit's record in
+.IR .gcsl/pekit-exports.json .
+This refresh happens with or without
+.BR \-\-strict .
+An edited or unrecorded library that differs from its pin is left alone, with a hint to remove its directory so pekit can put back the pin.
+Non-strict builds warn of that difference; strict builds refuse it.
 .PP
 A target is a definition of the command's definition type: a
 .B build

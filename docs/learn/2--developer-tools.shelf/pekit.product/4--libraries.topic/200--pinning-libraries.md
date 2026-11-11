@@ -34,10 +34,13 @@ checkout builds with exactly the same libraries.
    pinned github.com/gcslib/gcc at 72dae8c75eabc34c63615380a9197e1021a39952
    ```
 
-   It exports each library into `.gcsl/libraries/<path>/`.
+   It exports each library into `.gcsl/libraries/<path>/`, and records its
+   commit and tree digest in `.gcsl/pekit-exports.json`, outside the
+   exported tree.
 
 2. Commit `pekit.lock`. Don't commit `.gcsl/`: any command that builds puts
    back a pinned library that's missing, from the commit it's pinned at.
+   It also refreshes an untouched recorded export when the lock moves.
 
 ## Check the result
 
@@ -98,12 +101,24 @@ libraries at two commits in the same way, before it exports either.
 
 ## When a library differs from its pin
 
+After pulling a changed `pekit.lock`, the next command that builds refreshes
+an older export automatically, before checking strictness. This applies to
+non-strict builds too. pekit replaces it only if its tree still matches the
+digest it recorded when exporting it.
+
 If a library under `.gcsl/libraries/` differs from the commit it's pinned
-at, because you edited it there, every build warns:
+at, and you edited it there or it has no export record from pekit, it is
+left alone. A non-strict build warns, and a strict build fails:
 
 ```text
-warning: `.gcsl/libraries/github.com/gcslib/gcc` differs from the commit `pekit.lock` pins, 72dae8c75eabc34c63615380a9197e1021a39952: remove it to have the pinned one put back, or commit the change to its repository and run `pekit lock --update`
+warning: `.gcsl/libraries/github.com/gcslib/gcc` differs from the commit `pekit.lock` pins, 72dae8c75eabc34c63615380a9197e1021a39952; remove `.gcsl/libraries/github.com/gcslib/gcc` and pekit will restore it from the pin
 ```
+
+Preserve any edits you need, then remove the named library directory. The
+next command that builds exports the pinned commit and records it. Exports
+made by an older pekit have no record. One that still matches its pin is
+recorded the next time pekit runs, and refreshes like any other from then
+on. One that already differs needs this one-time recovery.
 
 To work on a library, use `$GCSL_LIBRARY_PATH` instead of editing the
 exported copy. See [Writing a Library](~pekit/writing-a-library).

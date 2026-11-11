@@ -11,9 +11,14 @@
 //! `--update`, from its *source*, and exports it at the commit its source's
 //! revision names into `.gcsl/libraries/<path>/`, the library root the
 //! workspace's own libraries are found in. Every other command puts back,
-//! from the commits pinned, a pinned library that is not there
-//! ([`restore`]), and says where one there differs from its pin; a strict
-//! build fails on that, on a library imported that the lock does not pin,
+//! from the commits pinned, a pinned library that is not there, and
+//! refreshes an untouched export of an older pin ([`restore`]). Each
+//! export's commit and tree digest are recorded in
+//! `.gcsl/pekit-exports.json`, outside the libraries' trees. A differing
+//! library is replaced only if its tree still matches that record; an
+//! edited or unrecorded library is left alone, with a hint to remove its
+//! directory to restore the pin. A strict build fails on such a difference,
+//! on a library imported that the lock does not pin,
 //! and on `$GCSL_LIBRARY_PATH`, which would find libraries elsewhere
 //! ([`check_strict`]).
 //!
@@ -35,7 +40,7 @@
 //! workspace whose libraries are pinned and cached builds offline. Git is
 //! run as the `git` program.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,6 +58,53 @@ pub const LOCK_FILE: &str = "pekit.lock";
 /// The library root under the workspace's root that locked libraries are
 /// exported into.
 pub const LIBRARIES_DIR: &str = ".gcsl/libraries";
+
+const EXPORTS_FILE: &str = ".gcsl/pekit-exports.json";
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(transparent)]
+struct Exports(BTreeMap<String, Exported>);
+
+#[derive(Deserialize, Serialize)]
+struct Exported {
+    commit: String,
+    tree: String,
+}
+
+impl Exports {
+    fn read(root: &Path) -> Result<Self, LockError> {
+        let path = root.join(EXPORTS_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(io_error(&path, &error)),
+        };
+        serde_json::from_str(&text).map_err(|error| {
+            LockError::Io(format!("`{}` is no export record: {error}", path.display()))
+        })
+    }
+
+    /// Records that `pin` is exported with `tree`, in the record as it is
+    /// on disk, so that one held since it was read loses no other export's
+    /// entry.
+    fn record(&mut self, root: &Path, pin: &Pinned, tree: &Digest) -> Result<(), LockError> {
+        *self = Self::read(root)?;
+        self.0.insert(
+            pin.path.clone(),
+            Exported {
+                commit: pin.commit.clone(),
+                tree: tree.hex(),
+            },
+        );
+        let path = root.join(EXPORTS_FILE);
+        let mut text =
+            serde_json::to_string_pretty(self).map_err(|error| LockError::Io(error.to_string()))?;
+        text.push('\n');
+        let temp = root.join(format!("{EXPORTS_FILE}.{}", crate::sweep::token()));
+        fs::write(&temp, text).map_err(|error| io_error(&temp, &error))?;
+        fs::rename(&temp, &path).map_err(|error| io_error(&path, &error))
+    }
+}
 
 /// The lock (see [The lock](#the-lock)).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +318,7 @@ pub fn lock(
             Some(pin) if !update => {
                 let pin = pin.clone();
                 nested(&pin, &pins)?;
-                export(root, cache, &pin)?;
+                export(root, (cache, store), &pin)?;
                 pin
             }
             _ => {
@@ -288,8 +340,7 @@ pub fn lock(
                     tree: String::new(),
                 };
                 nested(&pin, &pins)?;
-                export(root, cache, &pin)?;
-                pin.tree = tree_of(root, store, &path)?.hex();
+                pin.tree = export(root, (cache, store), &pin)?.hex();
                 if lock.pinned(&path) != Some(&pin) {
                     locked.pinned.push((path.clone(), pin.commit.clone()));
                 }
@@ -313,7 +364,7 @@ pub fn lock(
         let dir = root.join(LIBRARIES_DIR).join(&old.path);
         remove_tree(&dir).map_err(|error| io_error(&dir, &error))?;
         for pin in pins.iter().filter(|pin| inside(&pin.path, &old.path)) {
-            export(root, cache, pin)?;
+            export(root, (cache, store), pin)?;
         }
     }
     pins.sort_by(|a, b| a.path.cmp(&b.path));
@@ -326,8 +377,10 @@ pub fn lock(
 /// Puts back each library the lock of the workspace at `root` pins that is
 /// not in `.gcsl/libraries/`, from its commit, its repository kept in
 /// `cache`'s `git/` (see [The lock](#the-lock)); and says, of each there,
-/// whether it differs from its pin, by `store`'s digest of its tree. Nothing
-/// for a workspace with no lock.
+/// whether it differs from its pin, by `store`'s digest of its tree. An
+/// untouched recorded export that differs is replaced from the pinned
+/// commit; an edited or unrecorded library is left alone. Nothing for a
+/// workspace with no lock.
 ///
 /// # Errors
 ///
@@ -341,17 +394,42 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
     for (at, pin) in lock.libraries.iter().enumerate() {
         nested(pin, &lock.libraries[..at])?;
     }
+    let mut exports = Exports::read(root)?;
+    let mut pins: Vec<&Pinned> = lock.libraries.iter().collect();
+    pins.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut exported: Vec<&str> = Vec::new();
     let mut differ = Vec::new();
-    for pin in &lock.libraries {
+    for pin in pins {
         let dir = root.join(LIBRARIES_DIR).join(&pin.path);
-        if !dir.is_dir() {
-            export(root, cache, pin)?;
+        if !dir.is_dir() || exported.iter().any(|path| inside(&pin.path, path)) {
+            export(root, (cache, store), pin)?;
+            exported.push(&pin.path);
             continue;
         }
-        if tree_of(root, store, &pin.path)?.hex() != pin.tree {
+        let tree = tree_of(root, store, &pin.path)?;
+        if tree.hex() == pin.tree {
+            // A library just as its pin has it is what an export would
+            // write, whoever wrote it, so it is recorded as one: an export
+            // from before the record, or one whose record a crash lost, is
+            // then refreshed when the pin moves.
+            let recorded = exports.0.get(&pin.path);
+            if recorded
+                .is_none_or(|exported| exported.commit != pin.commit || exported.tree != pin.tree)
+            {
+                exports.record(root, pin, &tree)?;
+            }
+        } else if exports
+            .0
+            .get(&pin.path)
+            .is_some_and(|exported| exported.tree == tree.hex())
+        {
+            export(root, (cache, store), pin)?;
+            exported.push(&pin.path);
+        } else {
             differ.push(format!(
-                "`{}/{}` differs from the commit `pekit.lock` pins, {}",
-                LIBRARIES_DIR, pin.path, pin.commit
+                "`{}/{}` differs from the commit `pekit.lock` pins, {}; remove \
+                 `{}/{}` and pekit will restore it from the pin",
+                LIBRARIES_DIR, pin.path, pin.commit, LIBRARIES_DIR, pin.path
             ));
         }
     }
@@ -498,7 +576,8 @@ fn tree_of(root: &Path, store: &Store, path: &str) -> Result<Digest, LockError> 
 /// Exports the library `pin` at its commit into the workspace at `root`,
 /// replacing what is there, its repository kept in `cache`'s `git/` and
 /// fetched if it lacks the commit.
-fn export(root: &Path, cache: &Path, pin: &Pinned) -> Result<(), LockError> {
+fn export(root: &Path, (cache, store): (&Path, &Store), pin: &Pinned) -> Result<Digest, LockError> {
+    let mut exports = Exports::read(root)?;
     let repo = cached(cache, &pin.git)?;
     let object = format!("{}^{{commit}}", pin.commit);
     if git(&repo, &["cat-file", "-e", &object]).is_err() {
@@ -510,8 +589,6 @@ fn export(root: &Path, cache: &Path, pin: &Pinned) -> Result<(), LockError> {
         format!("{}:{}", pin.commit, pin.dir)
     };
     let dir = root.join(LIBRARIES_DIR).join(&pin.path);
-    // Into a directory beside it, then in place of it, so that a library is
-    // whole or as it was.
     let temp = dir.with_file_name(format!(
         ".{}.{}",
         dir.file_name()
@@ -536,10 +613,36 @@ fn export(root: &Path, cache: &Path, pin: &Pinned) -> Result<(), LockError> {
             error => LockError::Git(format!("`git archive {tree}` of `{}` {error}", pin.git)),
         });
     }
-    if dir.exists() {
-        remove_tree(&dir).map_err(|error| io_error(&dir, &error))?;
+    let digest = store
+        .put_tree(&temp)
+        .map_err(|error| io_error(&temp, &error))?;
+    if !pin.tree.is_empty() && digest.hex() != pin.tree {
+        let _ = remove_tree(&temp);
+        return Err(LockError::Io(format!(
+            "`{}/{}` at {} does not match the tree digest `pekit.lock` pins, {}",
+            LIBRARIES_DIR, pin.path, pin.commit, pin.tree
+        )));
     }
-    fs::rename(&temp, &dir).map_err(|error| io_error(&dir, &error))
+    // Into a directory beside it, then in place of it, the old one moved
+    // aside first and put back if the new one can't go in, so that a library
+    // is whole or as it was: one interrupted between the two is missing, and
+    // put back from its pin.
+    let previous = dir.with_file_name(format!(".pekit-previous.{}", crate::sweep::token()));
+    let replacing = dir.exists();
+    if replacing {
+        fs::rename(&dir, &previous).map_err(|error| io_error(&dir, &error))?;
+    }
+    if let Err(error) = fs::rename(&temp, &dir) {
+        if replacing {
+            let _ = fs::rename(&previous, &dir);
+        }
+        return Err(io_error(&dir, &error));
+    }
+    if replacing {
+        remove_tree(&previous).map_err(|error| io_error(&previous, &error))?;
+    }
+    exports.record(root, pin, &digest)?;
+    Ok(digest)
 }
 
 /// The bare repository of `git` kept in `cache`'s `git/`, cloned if it is

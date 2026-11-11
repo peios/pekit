@@ -85,6 +85,15 @@ clones under the cache directory's `git/`, fetched only to resolve a
 revision or to get a pinned commit the clone lacks. Git runs as the `git`
 program found on `PATH`.
 
+Each successful export records its commit and tree digest, by import path,
+in `.gcsl/pekit-exports.json`. This local JSON file is outside every library
+tree and is not committed. The export is unpacked and hashed in a temporary
+directory beside its destination before replacing it. The old directory is
+renamed aside, the complete new directory renamed into place, and the old
+one removed. Only then is the record written through a temporary file and
+renamed into place. An interrupted replacement cannot record a half-export
+as the new one.
+
 ## Putting back and checking
 
 Before loading, `build`, `test`, `run`, `query`, `package`, and `publish`
@@ -94,11 +103,23 @@ restore the lock's libraries (`lock::restore`):
   is exported. Two nested libraries pinned at two commits fail the command.
 - A pinned library whose directory is missing is exported from its commit.
 - A pinned library whose directory is there is put into the store as a
-  tree, and its digest compared with the pin's. A library that differs is
-  reported.
+  tree, and its digest compared with the pin's. If it matches but its
+  record is missing or names another commit or tree, it is recorded: it is
+  what an export would write, so it refreshes when the pin moves. If it
+  differs but still
+  matches pekit's export record, it is an untouched older export: it is
+  replaced from the pinned commit and its record updated. Outer libraries
+  are handled before libraries inside them; after an outer export, each
+  pinned library inside it is exported and recorded at that commit too.
+- A differing library whose tree does not match its record, or has no
+  record, is left alone and reported with a recovery hint: preserve any
+  edits, remove `.gcsl/libraries/<path>/`, and pekit puts back the pin.
 
 Outside a strict build, each difference is a warning, and the build goes on
-with the library as it is.
+with the library as it is. Refreshing an untouched older export happens
+outside strict builds too. An export made by an older pekit has no record;
+if it matches the pin it is recorded then, and if it already differs it
+needs removing once.
 
 A strict build fails, listing every problem, if any of these holds
 (`lock::check_strict`):

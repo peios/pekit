@@ -1171,11 +1171,7 @@ fn load_for(cwd: &Path, shared: &Shared, terminal: &mut Terminal<'_>) -> Option<
         }
     } else {
         for difference in differ {
-            let _ = writeln!(
-                terminal.err,
-                "warning: {difference}: remove it to have the pinned one put back, or commit \
-                 the change to its repository and run `pekit lock --update`"
-            );
+            let _ = writeln!(terminal.err, "warning: {difference}");
         }
     }
     Some(loaded)
