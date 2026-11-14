@@ -161,3 +161,60 @@ fn a_build_s_source_is_the_same_whether_its_steps_ran_or_were_found() {
     assert_eq!(found, sources_of(dir.path(), fresh.path(), &["hello"]));
     assert_eq!(found.fetched.len(), 1);
 }
+
+#[test]
+fn a_library_s_code_is_its_whole_library_if_the_lock_pins_it_and_itself_if_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = serde_json::json!({
+        "libraries": [{
+            "path": "example.com/greet",
+            "git": "https://example.com/greet",
+            "dir": "",
+            "commit": "0".repeat(40),
+            "tree": "0".repeat(64),
+        }],
+    });
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("pekit.lock", &lock.to_string()),
+            (
+                ".gcsl/libraries/example.com/greet/greet.gcsl",
+                "def greeting() -> String { = \"hello\" }\n",
+            ),
+            (".gcsl/libraries/example.com/greet/unread.txt", "never read"),
+            (
+                ".gcsl/libraries/example.com/loose/loose.gcsl",
+                "def name() -> String { = \"world\" }\n",
+            ),
+            (".gcsl/libraries/example.com/loose/unread.txt", "never read"),
+            (
+                "app/build.gcsl",
+                "import \"example.com/greet\"\n\
+                 import \"example.com/loose\"\n\
+                 def build hello() { text = \"{greet.greeting()} {loose.name()}\" }\n",
+            ),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+
+    let found = sources_of(dir.path(), state.path(), &["hello"]);
+
+    // The pinned library whole, as a build from its source restores it;
+    // the unpinned one's code alone.
+    let libraries: Vec<&str> = found.libraries.iter().map(String::as_str).collect();
+    assert_eq!(libraries, ["example.com/greet"]);
+    let dirs: Vec<&str> = found.dirs.iter().map(String::as_str).collect();
+    assert_eq!(dirs, [".gcsl/libraries/example.com/greet"]);
+    let files: Vec<&str> = found.files.iter().map(String::as_str).collect();
+    assert_eq!(
+        files,
+        [
+            ".gcsl/libraries/example.com/loose/loose.gcsl",
+            "app/build.gcsl",
+            "pekit.lock",
+            "workspace.gcsl"
+        ]
+    );
+}

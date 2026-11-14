@@ -10,10 +10,13 @@
 //!   environment's programs;
 //! - each git tree it fetched, by its URL and commit;
 //! - each workspace file and directory its code, its own effects and its
-//!   steps read, or its targets' values hold, the code of libraries the
-//!   workspace imports included, save a path that leads out of the
-//!   workspace, such as a link to a repository of packages to take build
-//!   roots from.
+//!   steps read, or its targets' values hold, with `workspace.gcsl` and
+//!   `pekit.lock`, which loading the workspace takes, save a path that
+//!   leads out of the workspace, such as a link to a repository of
+//!   packages to take build roots from;
+//! - each library whose code it ran: one the lock pins whole, by its
+//!   import path and its directory, as a build restores it whole, and one
+//!   it pins none of by the files of its code.
 //!
 //! What is fetched while a toolchain is made, in GCSL's `^making_tool`,
 //! is a tool, as is what the toolchain is made from.
@@ -63,6 +66,10 @@ pub struct SourceSet {
     /// The git trees it fetched, sorted.
     #[serde(default)]
     pub git: BTreeSet<GitTree>,
+    /// The libraries whose code it ran, by their import paths, sorted: each
+    /// one the lock pins, its directory among `dirs`.
+    #[serde(default)]
+    pub libraries: BTreeSet<String>,
     /// The workspace files it read, by their paths relative to the
     /// workspace's root, sorted.
     #[serde(default)]

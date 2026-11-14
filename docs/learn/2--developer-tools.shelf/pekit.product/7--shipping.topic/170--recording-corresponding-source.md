@@ -27,8 +27,12 @@ Its source is everything a build of all its packages used, except tools:
 - each git commit its build fetched, by repository and commit;
 - each file and directory of the workspace that its code read, that its
   steps were given, or that its packages hold, by its path in the
-  workspace. The GCSL code itself is among them, the code of the
-  libraries the workspace imports included.
+  workspace. The GCSL code itself is among them, with `workspace.gcsl`
+  and `pekit.lock`, which loading the workspace takes;
+- each library whose code it ran. A library that `pekit.lock` pins is
+  recorded whole, by its import path and its directory, since a build
+  restores a pinned library whole. One the lock doesn't pin is recorded
+  by the files of its code alone.
 
 A tool isn't source:
 
@@ -64,7 +68,7 @@ isn't counted.
    names of the recipe's packages:
 
    ```text
-   recorded org.gnu.bash: 21 fetched, 0 git, 14 files, 2 directories
+   recorded org.gnu.bash: 21 fetched, 0 git, 15 files, 9 directories
    ```
 
 2. Review `pekit.sources`, and commit it with the change that made it.
@@ -89,8 +93,8 @@ A workspace with no `pekit.sources` publishes without the check.
 ## Check the result
 
 Each recipe in `pekit.sources` lists its `packages`, its `fetched` files,
-its `git` commits, and the workspace's `files` and `dirs` it read, each
-sorted:
+its `git` commits, the `libraries` whose code it ran, and the workspace's
+`files` and `dirs` it read, each sorted:
 
 ```json
 {
@@ -103,11 +107,23 @@ sorted:
     }
   ],
   "git": [],
-  "files": ["org.gnu.bash/build.gcsl", "recipe.gcsl"],
-  "dirs": ["org.gnu.bash/patches"]
+  "libraries": ["github.com/gcslib/ppk"],
+  "files": [
+    "org.gnu.bash/build.gcsl",
+    "pekit.lock",
+    "recipe.gcsl",
+    "workspace.gcsl"
+  ],
+  "dirs": [".gcsl/libraries/github.com/gcslib/ppk", "org.gnu.bash/patches"]
 }
 ```
 
 A directory stands for everything in it. A package of the
 source fetches each file again by its digest, which the store answers, and
 takes the commits and the workspace's files as they are.
+
+A build from a package of the source restores every library that its
+`pekit.lock` pins, and fetches any that it lacks. So give the package a
+lock that pins only the recipe's `libraries`, beside their directories.
+It then builds with no network, from the store's tools and what the
+package holds.
