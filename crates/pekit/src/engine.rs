@@ -50,7 +50,7 @@
 //! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
 //! dependency, fails there.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io;
@@ -88,6 +88,7 @@ use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences,
 use crate::remote::Remote;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::scratch::Scratch;
+use crate::sources::{Fetched, GitTree, SourceSet};
 use crate::store::{Digest, Seen, Steady, Store, TreeEntry, clock_beside};
 use crate::sweep::Sweeper;
 use crate::target::Target;
@@ -165,6 +166,7 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
     let builtin = job.builtin();
     match builtin {
         Builtin::Fetch
+        | Builtin::FetchTool
         | Builtin::FetchGit
         | Builtin::ArchiveUnpack
         | Builtin::KeychainString
@@ -413,6 +415,9 @@ pub struct Outcomes {
     /// to: nothing, if it was not over its limit or another process had
     /// it; or why it failed, which fails no build.
     pub evicted: Option<Result<Option<Evicted>, String>>,
+    /// What the build's source was, its targets' together (see
+    /// [Sources](crate::sources#sources)).
+    pub sources: SourceSet,
 }
 
 /// A step that gave another result than its record holds for the same
@@ -686,6 +691,7 @@ fn build_roots(
     crate::sandbox::steady_inheritance();
     let mut run = new_run(loaded, targets, settings, (wrap, contexts), events)?;
     run.drive()?;
+    let sources = run.sources();
     run.finish_uploads()?;
     if settings.exposing == Exposing::All {
         run.expose_waiting()?;
@@ -719,6 +725,7 @@ fn build_roots(
     });
     Ok(Outcomes {
         evicted,
+        sources,
         targets: outcomes,
         ran: run.ran,
         cached: run.cached,
@@ -1920,6 +1927,92 @@ impl Run<'_> {
         }
     }
 
+    /// What the build's source was, once it is done (see
+    /// [Sources](crate::sources#sources)): every file it fetched but a
+    /// tool's, every git tree it fetched, and every workspace file and
+    /// directory its targets' code, their effects and their steps read, or
+    /// their values hold, save a path that leads out of the workspace, such as a link to a
+    /// repository of packages to take build roots from: what is outside the
+    /// workspace is no source of it.
+    fn sources(&self) -> SourceSet {
+        let workspace = &self.loaded.workspace;
+        let names = &self.loaded.names;
+        let mut set = SourceSet::default();
+        let mut read = BTreeSet::new();
+        let mut code = Vec::new();
+        for root in &self.roots {
+            if let Some(call) = root.call.as_ref() {
+                for &file in call.files() {
+                    code.extend(workspace.files_needed(file));
+                }
+            }
+            // What a target comes to may hold workspace files that nothing
+            // read in its build, a package's files that only packing reads.
+            if let Some(Ok(value)) = &root.done {
+                read.extend(
+                    (value.files().into_iter())
+                        .chain(value.dirs())
+                        .filter_map(|file| in_workspace(&file.path)),
+                );
+            }
+        }
+        for (id, node) in self.graph.nodes() {
+            if node.kind() == NodeKind::Deferred {
+                read.extend(self.node_reads(id));
+                code.extend(workspace.node_code_files(&self.graph, id));
+                continue;
+            }
+            let Ok(job) = workspace.effect_job(&self.graph, id) else {
+                continue;
+            };
+            let text = |at: usize| match job.args().get(at) {
+                Some(Plain::Str(text)) => text.clone(),
+                _ => String::new(),
+            };
+            match job.builtin() {
+                Builtin::Fetch => {
+                    set.fetched.insert(Fetched {
+                        url: text(0),
+                        sha256: text(1).to_ascii_lowercase(),
+                    });
+                }
+                Builtin::FetchGit => {
+                    set.git.insert(GitTree {
+                        url: text(0),
+                        commit: text(1),
+                    });
+                }
+                _ => {}
+            }
+            for arg in job.args() {
+                if let Plain::Str(path) = arg {
+                    read.extend(in_workspace(path));
+                }
+                read.extend(
+                    arg.files()
+                        .into_iter()
+                        .filter_map(|(path, _)| in_workspace(path)),
+                );
+            }
+        }
+        read.extend(
+            code.into_iter()
+                .filter_map(|file| names.get(file as usize))
+                .filter(|name| !name.starts_with('<'))
+                .cloned(),
+        );
+        let root = &self.loaded.root;
+        let real_root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        let left_out = (read.iter())
+            .filter(|path| {
+                fs::canonicalize(root.join(path)).is_ok_and(|real| !real.starts_with(&real_root))
+            })
+            .cloned()
+            .collect();
+        set.add_reads(read, &left_out, |path| root.join(path).is_dir());
+        set
+    }
+
     /// The workspace files and directories the node `id`, a step, is given:
     /// those its arguments, captures and context hold, by their paths
     /// relative to the root, sorted.
@@ -2177,9 +2270,11 @@ impl Run<'_> {
         };
         match job.builtin() {
             // A fetch is pekit's to answer, and never a step's.
-            Builtin::Fetch if step.is_some() => Err(engine(&IN_A_STEP)),
+            Builtin::Fetch | Builtin::FetchTool if step.is_some() => Err(engine(&IN_A_STEP)),
             Builtin::FetchGit if step.is_some() => Err(engine(&git_fetch::IN_A_STEP)),
-            Builtin::Fetch => Ok(Some(Work::Fetch {
+            // A tool's fetch is fetched as any other: the mark is only for
+            // collecting a package's source.
+            Builtin::Fetch | Builtin::FetchTool => Ok(Some(Work::Fetch {
                 url: text(0),
                 sha256: text(1),
                 store: self.store.clone(),
@@ -2218,6 +2313,7 @@ impl Run<'_> {
         match job.builtin() {
             // Answered from the store, or reading nothing.
             Builtin::Fetch
+            | Builtin::FetchTool
             | Builtin::FetchGit
             | Builtin::ArchiveUnpack
             | Builtin::KeychainString

@@ -50,6 +50,10 @@ pekit \- build, test, run, and package GCSL build files as cached, sandboxed ste
 .B pekit lock
 .RB [ \-\-update ]
 .br
+.B pekit sources
+.RI [ OPTIONS ]
+.RI [ PACKAGE ...]
+.br
 .B pekit clean
 .RB [ \-\-cache ]
 .br
@@ -222,6 +226,11 @@ strictly first, then publish them as
 does, allowing the packagers' own effects and finding the strict build's steps; if any
 .I PACKAGE
 fails to pack strictly, publish none.
+If the workspace has a
+.IR pekit.sources ,
+publish none unless it records what each recipe of the packages is built from, as
+.B sources
+would record it.
 .B \-\-check\-reproducible
 is refused.
 .TP
@@ -245,6 +254,11 @@ and tag
 .IR NAME @ VERSION
 with a lightweight tag.
 A tag of that name on another commit fails the release before anything is published.
+If the workspace has a
+.IR pekit.sources ,
+publish nothing unless it records what the package's recipe is built from, as
+.B sources
+would record it.
 A tag of that name on
 .B HEAD
 publishes again and adds no tag.
@@ -257,6 +271,20 @@ does not pin, at the commit its source's revision names, and export it into
 Drop each pinned library that nothing imports, with its directory.
 Print a line for each library pinned or dropped.
 .TP
+.B sources
+For the recipe of each
+.IR PACKAGE ,
+or of every
+.B package
+definition in the current directory and below it if none is given, record in
+.I pekit.sources
+what its packages are built from, with their names, and print how much.
+A recipe is the directory its packages' definitions are in.
+Each recipe's packages, every package of the recipe, are built on their own and not packed, and what the build used is recorded: each file it fetched, by URL and SHA-256, but a tool's, which is one a toolchain is made from or one fetched with
+.BR "tool = true" ;
+each git commit it fetched; and each workspace file and directory its code read, its steps were given, or its packages hold, but a path that leads out of the workspace.
+A recipe's record replaces what was recorded of it, and the others are kept.
+.TP
 .B clean
 Remove
 .IR pekit-out/ .
@@ -266,8 +294,9 @@ Remove
 .BR run ,
 .BR query ,
 .BR package ,
+.BR publish ,
 and
-.B publish
+.B sources
 take these options.
 .B release
 takes
@@ -660,6 +689,10 @@ The libraries the workspace pins, and where they come from; see
 .TP
 .I .gcsl/libraries/
 The pinned libraries, exported from their repositories.
+.TP
+.I pekit.sources
+What each recipe's packages are built from, as JSON, written by
+.BR sources .
 .TP
 .I pekit-out/
 At the workspace's root: each step's outputs under

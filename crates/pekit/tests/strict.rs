@@ -233,3 +233,172 @@ fn require_strict_is_read_as_written() {
         );
     }
 }
+
+#[test]
+fn publish_strict_refuses_a_recipe_whose_source_is_not_what_is_recorded() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let publish = |ws: &Path| {
+        pekit(
+            ws,
+            cache.path(),
+            &["publish", "dev.example.data", &to, "--strict"],
+        )
+    };
+    // Recorded, it publishes.
+    let recorded = pekit(ws.path(), cache.path(), &["sources", "--strict"]);
+    let (out, err) = shown(&recorded);
+    assert!(recorded.status.success(), "{err}");
+    assert_eq!(
+        out,
+        "recorded app: 0 fetched, 0 git, 3 files, 0 directories\n"
+    );
+    let sources = fs::read_to_string(ws.path().join("pekit.sources")).unwrap();
+    for path in [
+        "\"app/data.txt\"",
+        "\"app/package.gcsl\"",
+        "\"workspace.gcsl\"",
+        "\"dev.example.data\"",
+    ] {
+        assert!(sources.contains(path), "{sources}");
+    }
+    let published = publish(ws.path());
+    assert!(published.status.success(), "{}", shown(&published).1);
+    // A package that reads another file is built from what isn't recorded,
+    // so nothing is published until it is.
+    write(
+        ws.path(),
+        &[
+            (
+                "app/package.gcsl",
+                &PACKAGES.replace(
+                    "files = {\"share/data.txt\" = file(\"data.txt\")}",
+                    "files = {\"share/data.txt\" = file(\"data.txt\"); \
+                     \"share/more.txt\" = file(\"more.txt\")}",
+                ),
+            ),
+            ("app/more.txt", "more\n"),
+        ],
+    );
+    let refused = publish(ws.path());
+    let (_, err) = shown(&refused);
+    assert!(!refused.status.success());
+    assert!(
+        err.contains(
+            "error: nothing is published, since `pekit.sources` does not record what app is \
+             built from: run `pekit sources --strict` for it, and review the change"
+        ),
+        "{err}"
+    );
+    assert!(
+        !store
+            .path()
+            .join("dev.example.data-1.0/share/more.txt")
+            .exists()
+    );
+    let again = pekit(ws.path(), cache.path(), &["sources", "--strict"]);
+    assert!(again.status.success(), "{}", shown(&again).1);
+    let published = publish(ws.path());
+    assert!(published.status.success(), "{}", shown(&published).1);
+    assert!(
+        store
+            .path()
+            .join("dev.example.data-1.0/share/more.txt")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_workspace_without_a_sources_file_publishes_as_before() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let published = pekit(
+        ws.path(),
+        cache.path(),
+        &["publish", "dev.example.data", &to, "--strict"],
+    );
+    assert!(published.status.success(), "{}", shown(&published).1);
+    assert!(!ws.path().join("pekit.sources").exists());
+}
+
+#[test]
+fn publishing_one_package_of_a_recipe_checks_the_recipe_s_whole_record() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
+    write(
+        ws.path(),
+        &[
+            (
+                "app/other.gcsl",
+                "def package dev.example.other() {\n\
+                 \x20   version = \"1.0\"\n\
+                 \x20   files = {\"share/other.txt\" = file(\"other.txt\")}\n\
+                 }\n",
+            ),
+            ("app/other.txt", "other\n"),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    // Recording one package records its recipe, both packages.
+    let recorded = pekit(
+        ws.path(),
+        cache.path(),
+        &["sources", "dev.example.data", "--strict"],
+    );
+    let (out, err) = shown(&recorded);
+    assert!(recorded.status.success(), "{err}");
+    assert_eq!(
+        out,
+        "recorded app: 0 fetched, 0 git, 5 files, 0 directories\n"
+    );
+    let published = pekit(
+        ws.path(),
+        cache.path(),
+        &["publish", "dev.example.other", &to, "--strict"],
+    );
+    assert!(published.status.success(), "{}", shown(&published).1);
+}
+
+#[test]
+fn a_package_added_to_a_recipe_is_recorded_before_anything_is_published() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let recorded = pekit(ws.path(), cache.path(), &["sources", "--strict"]);
+    assert!(recorded.status.success(), "{}", shown(&recorded).1);
+    // A package of the same files: the source is the same, the packages
+    // are not.
+    write(
+        ws.path(),
+        &[(
+            "app/other.gcsl",
+            "def package dev.example.other() {\n\
+             \x20   version = \"1.0\"\n\
+             \x20   files = {\"share/data.txt\" = file(\"data.txt\")}\n\
+             }\n",
+        )],
+    );
+    let refused = pekit(
+        ws.path(),
+        cache.path(),
+        &["publish", "dev.example.data", &to, "--strict"],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        shown(&refused)
+            .1
+            .contains("does not record what app is built from"),
+        "{}",
+        shown(&refused).1
+    );
+}

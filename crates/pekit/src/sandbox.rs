@@ -467,6 +467,7 @@ impl Effects for HostView {
     fn isolates(&self, builtin: Builtin) -> bool {
         match builtin {
             Builtin::Fetch
+            | Builtin::FetchTool
             | Builtin::FetchGit
             | Builtin::ArchiveUnpack
             | Builtin::FileRead

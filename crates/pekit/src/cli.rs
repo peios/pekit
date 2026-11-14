@@ -52,6 +52,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
+use gcsl::workspace::Workspace;
 
 use crate::budget::{Budget, DEFAULT_UNSEEN, Limits, budget_dir, machine_memory};
 use crate::evict::limit_of;
@@ -105,6 +106,8 @@ enum Command {
     Clean(CleanArgs),
     /// Pin the libraries the workspace imports in `pekit.lock`.
     Lock(LockArgs),
+    /// Record what each recipe's packages are built from in `pekit.sources`.
+    Sources(PackageArgs),
     /// Build a package from `HEAD` strictly, publish it, and tag it.
     Release(ReleaseArgs),
 }
@@ -488,6 +491,7 @@ pub fn run(
         }
         Command::Clean(args) => clean_command(&args, cwd, terminal),
         Command::Lock(args) => lock_command(&args, cwd, terminal),
+        Command::Sources(args) => sources_command(&args, cwd, terminal),
         Command::Release(args) => release_command(&args, cwd, terminal),
     }
 }
@@ -1026,16 +1030,14 @@ fn released(
             return ExitCode::FAILURE;
         }
     };
-    let publish = Settings {
-        strict: false,
-        ..settings.clone()
-    };
-    if !publish_release(
-        (&mut loaded, &packages),
-        (&tag, &args.to),
-        (&publish, &publishing),
-        terminal,
-    ) {
+    if !sources_recorded((&mut loaded, &packages), &settings, &checked, terminal)
+        || !publish_release(
+            (&mut loaded, &packages),
+            (&tag, &args.to),
+            (&settings, &publishing),
+            terminal,
+        )
+    {
         return ExitCode::FAILURE;
     }
     if !tagged && let Err(message) = repository.tag(&tag) {
@@ -1060,16 +1062,20 @@ fn release_tag(value: &Plain) -> Option<String> {
 }
 
 /// Publishes the release `tag` of `packages`, the one package of `loaded`'s
-/// workspace, into the store `to`, with `settings`, the strict build's but
-/// allowing the target's own effects, since publishing is one, already
-/// checked by that build, and its steps found in the store; `shared` for
-/// its progress. Whether it was published, said on `terminal`.
+/// workspace, into the store `to`, with `strict`, the strict build's
+/// settings, but allowing the target's own effects, since publishing is
+/// one, already checked by that build, and its steps found in the store;
+/// `shared` for its progress. Whether it was published, said on `terminal`.
 fn publish_release(
     (loaded, packages): (&mut Loaded, &[Target]),
     (tag, to): (&str, &str),
-    (settings, shared): (&Settings, &Shared),
+    (strict, shared): (&Settings, &Shared),
     terminal: &mut Terminal<'_>,
 ) -> bool {
+    let settings = &Settings {
+        strict: false,
+        ..strict.clone()
+    };
     let packing = Packing::Publish { to: to.to_owned() };
     let published = build_targets(
         (loaded, packages, Doing::Pack(&packing)),
@@ -1369,6 +1375,237 @@ fn package_command(
     }
 }
 
+/// `pekit sources [PACKAGE...]` (see [Sources](crate::sources#sources)):
+/// each recipe of the packages selected built on its own, and what its
+/// build's source was recorded in the sources file.
+fn sources_command(args: &PackageArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> ExitCode {
+    let shared = &args.shared;
+    let Some(mut loaded) = load_for(cwd, shared, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    if !strict_as_required("sources", &loaded, shared, terminal) {
+        return ExitCode::FAILURE;
+    }
+    let mut names: Vec<&str> = args.packages.iter().map(String::as_str).collect();
+    if names.is_empty() {
+        names.push("**");
+    }
+    let packages = match select(&loaded.workspace, "package", &names, &loaded.here) {
+        Ok(packages) if packages.is_empty() => {
+            let _ = writeln!(
+                terminal.err,
+                "error: no `package` is selected by {}",
+                quoted(&names)
+            );
+            return ExitCode::FAILURE;
+        }
+        Ok(packages) => packages,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "{}", error.message());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(settings) = settings_for(shared, &loaded, terminal) else {
+        return ExitCode::FAILURE;
+    };
+    let mut sources = match crate::sources::Sources::read(&loaded.root) {
+        Ok(sources) => sources,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let recipes = match by_recipe(&loaded.workspace, &packages) {
+        Ok(recipes) => recipes,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut failed = false;
+    for (recipe, members) in recipes {
+        match recipe_sources((&mut loaded, &members), &settings, shared, terminal) {
+            Ok(Some(source)) => {
+                let _ = writeln!(
+                    terminal.out,
+                    "recorded {}: {} fetched, {} git, {} files, {} directories",
+                    shown_recipe(&recipe),
+                    source.fetched.len(),
+                    source.git.len(),
+                    source.files.len(),
+                    source.dirs.len()
+                );
+                sources.set(recipe_record(recipe, &members, source));
+            }
+            Ok(None) => failed = true,
+            Err(error) => {
+                failed = true;
+                let _ = write!(terminal.err, "{}", error.render(&loaded));
+            }
+        }
+    }
+    if let Err(message) = sources.write(&loaded.root) {
+        let _ = writeln!(terminal.err, "error: {message}");
+        return ExitCode::FAILURE;
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Whether the sources file of `loaded`'s workspace records what each recipe
+/// of `packages` is built from (see [Sources](crate::sources#sources)): so
+/// it does, if the workspace has no sources file. Each recipe that differs,
+/// or has no record, or a build that failed, is shown on `terminal`.
+fn sources_recorded(
+    (loaded, packages): (&mut Loaded, &[Target]),
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> bool {
+    match sources_checked((loaded, packages), settings, shared, terminal) {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            let _ = write!(terminal.err, "{}", error.render(loaded));
+            false
+        }
+    }
+}
+
+/// [`sources_recorded`], but a build's failure of pekit's own its error.
+///
+/// # Errors
+///
+/// What [`build_targets`] fails with.
+fn sources_checked(
+    (loaded, packages): (&mut Loaded, &[Target]),
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Result<bool, BuildError> {
+    if !loaded.root.join(crate::sources::SOURCES_FILE).exists() {
+        return Ok(true);
+    }
+    let sources = match crate::sources::Sources::read(&loaded.root) {
+        Ok(sources) => sources,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return Ok(false);
+        }
+    };
+    let recipes = match by_recipe(&loaded.workspace, packages) {
+        Ok(recipes) => recipes,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "{message}");
+            return Ok(false);
+        }
+    };
+    let mut stale = Vec::new();
+    for (recipe, members) in recipes {
+        let Some(built) = recipe_sources((loaded, &members), settings, shared, terminal)? else {
+            return Ok(false);
+        };
+        let mut built = recipe_record(recipe, &members, built);
+        built.packages.sort();
+        if sources.get(&built.recipe) != Some(&built) {
+            stale.push(built.recipe);
+        }
+    }
+    if stale.is_empty() {
+        return Ok(true);
+    }
+    let shown: Vec<&str> = stale.iter().map(|recipe| shown_recipe(recipe)).collect();
+    let _ = writeln!(
+        terminal.err,
+        "error: nothing is published, since `{}` does not record what {} {} built from: \
+         run `pekit sources --strict` for {}, and review the change",
+        crate::sources::SOURCES_FILE,
+        shown.join(", "),
+        if shown.len() == 1 { "is" } else { "are" },
+        if shown.len() == 1 { "it" } else { "them" },
+    );
+    Ok(false)
+}
+
+/// The recipes of `packages`, each once, in the order its first package
+/// was given, each with every package of the recipe, given or not, since a
+/// recipe's record is all its packages' source (see
+/// [Sources](crate::sources#sources)).
+///
+/// # Errors
+///
+/// That a recipe's packages cannot be selected, as shown.
+fn by_recipe(
+    workspace: &Workspace,
+    packages: &[Target],
+) -> Result<Vec<(String, Vec<Target>)>, String> {
+    let mut grouped: Vec<(String, Vec<Target>)> = Vec::new();
+    for package in packages {
+        let recipe = crate::sources::recipe_of(&package.qualified());
+        if grouped.iter().any(|(each, _)| *each == recipe) {
+            continue;
+        }
+        let glob = if recipe.is_empty() {
+            "*".to_owned()
+        } else {
+            format!("{recipe}/*")
+        };
+        let members =
+            select(workspace, "package", &[glob.as_str()], "").map_err(|error| error.message())?;
+        grouped.push((recipe, members));
+    }
+    Ok(grouped)
+}
+
+/// The record of `recipe`, of the packages `members`, which `source` is
+/// what they are built from.
+fn recipe_record(
+    recipe: String,
+    members: &[Target],
+    source: crate::sources::SourceSet,
+) -> crate::sources::Recipe {
+    crate::sources::Recipe {
+        recipe,
+        packages: members
+            .iter()
+            .map(|member| crate::sources::name_of(&member.qualified()))
+            .collect(),
+        source,
+    }
+}
+
+/// A recipe as it is shown: its directory, or `.` for the workspace's root.
+fn shown_recipe(recipe: &str) -> &str {
+    if recipe.is_empty() { "." } else { recipe }
+}
+
+/// What one recipe's packages, `members`, are built from: their build's
+/// source, built on their own and not packed, so that what packing takes,
+/// a packager's own program say, is not counted. `None`, each failure shown
+/// on `terminal`, if a package did not build.
+///
+/// # Errors
+///
+/// What [`build_targets`] fails with.
+fn recipe_sources(
+    (loaded, members): (&mut Loaded, &[Target]),
+    settings: &Settings,
+    shared: &Shared,
+    terminal: &mut Terminal<'_>,
+) -> Result<Option<crate::sources::SourceSet>, BuildError> {
+    let built = build_targets((loaded, members, Doing::Build), settings, shared, terminal)?;
+    let mut failed = false;
+    for outcome in &built.targets {
+        if let Err(error) = outcome {
+            failed = true;
+            let _ = write!(terminal.err, "{}", error.render(loaded));
+        }
+    }
+    Ok((!failed).then_some(built.sources))
+}
+
 /// `packages` of `loaded`'s workspace packed, or published, as `packing`
 /// says, with `settings` and `shared`: under `--strict`, published as
 /// [`published_strictly`] publishes them. `None` if that published none.
@@ -1445,6 +1682,10 @@ fn published_strictly(
     }
     warn_of_eviction(&packed, terminal);
     warn_of_remote(&packed, terminal);
+    if !sources_recorded((loaded, packages), settings, shared, terminal) {
+        let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
+        return Ok(None);
+    }
     let publish = Settings {
         strict: false,
         reuse: Reuse::Store,
