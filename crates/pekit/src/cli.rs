@@ -1436,6 +1436,12 @@ fn sources_command(args: &PackageArgs, cwd: &Path, terminal: &mut Terminal<'_>) 
                     source.dirs.len()
                 );
                 sources.set(recipe_record(recipe, &members, source));
+                // Each recipe as it is recorded, so that what was recorded
+                // is kept if a later recipe's build is stopped.
+                if let Err(message) = sources.write(&loaded.root) {
+                    let _ = writeln!(terminal.err, "error: {message}");
+                    return ExitCode::FAILURE;
+                }
             }
             Ok(None) => failed = true,
             Err(error) => {
@@ -1443,10 +1449,6 @@ fn sources_command(args: &PackageArgs, cwd: &Path, terminal: &mut Terminal<'_>) 
                 let _ = write!(terminal.err, "{}", error.render(&loaded));
             }
         }
-    }
-    if let Err(message) = sources.write(&loaded.root) {
-        let _ = writeln!(terminal.err, "error: {message}");
-        return ExitCode::FAILURE;
     }
     if failed {
         ExitCode::FAILURE
