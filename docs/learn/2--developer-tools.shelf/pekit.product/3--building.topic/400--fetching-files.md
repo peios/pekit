@@ -56,6 +56,32 @@ fetches a file with the same digest, from any URL.
 A fetch whose download doesn't match its digest fails, and pekit keeps
 nothing of it.
 
+## Mark a tool
+
+pekit records what each package is built from, its corresponding source
+(see [Recording Corresponding Source](~pekit/recording-corresponding-source)).
+Every fetch counts as source unless it's a tool the build runs, such as a
+compiler's release archive.
+
+What a registered toolchain's definition fetches is a tool already, and so
+is everything fetched to make the toolchain, such as the source of a tool
+it compiles. Mark a tool fetched anywhere else with `tool = true`:
+
+```gcsl
+def libclang() -> Dir {
+    let wheel = fetch(
+        "https://files.pythonhosted.org/packages/1d/fc/716c1e62e512ef1c160e7984a73a5fc7df45166f2ff3f254e71c58076f7c/libclang-18.1.1-py2.py3-none-manylinux2010_x86_64.whl",
+        sha256 = "c533091d8a3bbf7460a00cb6c1a71da93bffe148f172c7d03b1c31fbf8aa2a0b",
+        tool = true,
+    )
+    = archive.unpack(wheel).dir("libclang-18.1.1.data/platlib/clang/native")
+}
+```
+
+The file is fetched and kept the same either way. Mark only tools: an
+unmarked fetch is recorded as source, which costs some space if it wasn't,
+while a source marked as a tool goes missing from the record.
+
 ## Unpack an archive
 
 `archive.unpack` unpacks a tar archive, compressed with gzip, xz, bzip2, or

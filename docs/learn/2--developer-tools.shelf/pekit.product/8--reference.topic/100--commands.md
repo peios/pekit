@@ -25,6 +25,7 @@ These are the commands, in the order you're likely to meet them:
 | `pekit query deps` | Lists the steps and files targets reach. | [Querying What Targets Reach](~pekit/querying-what-targets-reach) |
 | `pekit query rdeps` | Lists the targets that read a file. | [Querying What Targets Reach](~pekit/querying-what-targets-reach) |
 | `pekit lock` | Pins the libraries the workspace imports. | [Pinning Libraries](~pekit/pinning-libraries) |
+| `pekit sources` | Records what each recipe's packages are built from in `pekit.sources`. | [Recording Corresponding Source](~pekit/recording-corresponding-source) |
 | `pekit package` | Packs packages with the workspace's packagers. | [Packaging](~pekit/packaging) |
 | `pekit publish` | Packs packages and publishes them into a store. | [Packaging](~pekit/packaging) |
 | `pekit release` | Builds a package from `HEAD` strictly, publishes it, and tags it. | [Releasing](~pekit/releasing) |
@@ -32,8 +33,8 @@ These are the commands, in the order you're likely to meet them:
 
 ## Options the building commands share
 
-`build`, `test`, `run`, `query`, `package`, and `publish` take the same
-options for how they build:
+`build`, `test`, `run`, `query`, `package`, `publish`, and `sources` take
+the same options for how they build:
 
 | Option | Does | Read |
 |---|---|---|

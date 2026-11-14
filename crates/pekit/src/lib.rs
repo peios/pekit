@@ -33,6 +33,7 @@ pub mod release;
 pub mod remote;
 pub mod sandbox;
 pub mod scratch;
+pub mod sources;
 pub mod store;
 pub mod sweep;
 pub mod target;

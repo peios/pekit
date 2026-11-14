@@ -12,8 +12,9 @@
 #   strict build too, with a static ppk. Copying it into an artifact store, which ppk refuses for
 #   a version whose content changed, is publishing, which is no step.
 #   The package's `ppk` field, if it has one, is its manifest's metadata:
-#   `description`, `homepage`, `license`, `license_class` and
-#   `source_license`, each a string, and `dependencies`, `requires`,
+#   `description`, `homepage`, `license`, `license_class`, `source` and
+#   `source_license`, each a string, `source` naming the package that holds
+#   its corresponding source, and `dependencies`, `requires`,
 #   `provides`, `claims` and `descriptors`, each a record of strings, given
 #   to `ppk pack` as its options of those names, `--depends` for
 #   `dependencies` and `--descriptor` for `descriptors`. Any other field in
@@ -67,7 +68,7 @@ def pack(pkg: Package, arch: String = this_arch(), ppk: File = program()) -> Dir
 # The fields of a package's `ppk` that are one value, each given to
 # `ppk pack` as the option of its name with `-` for `_`, such as
 # `--license-class <class>`.
-let SINGLE_FIELDS = ["description", "homepage", "license", "license_class", "source_license"]
+let SINGLE_FIELDS = ["description", "homepage", "license", "license_class", "source", "source_license"]
 
 # The fields of a package's `ppk` that are tables, each entry given to
 # `ppk pack` as `table_option(field)`, the entry's key and its value.

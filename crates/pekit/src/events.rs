@@ -132,7 +132,7 @@ pub enum EventKind {
 #[must_use]
 pub fn effect_label(job: &EffectJob) -> String {
     let builtin = job.builtin().name();
-    if job.builtin() == Builtin::Fetch
+    if matches!(job.builtin(), Builtin::Fetch | Builtin::FetchTool)
         && let Some(Plain::Str(url)) = job.args().first()
     {
         return format!("{builtin} {}", fetched_name(url));

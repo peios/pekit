@@ -19,6 +19,7 @@ else `CACHE/budget`.
 |---|---|---|
 | `workspace.gcsl` | The root file, and `pekitconf`. | The user. |
 | `pekit.lock` | The pinned libraries and their sources, as JSON. | `pekit lock`. |
+| `pekit.sources` | What each recipe's packages are built from, as JSON. | `pekit sources`. |
 | `.gcsl/libraries/<path>/` | Each pinned library, exported. | `pekit lock`, and restoring before a build. |
 | `pekit-out/<target>/<function>[.N]/` | Symbolic links to each target's results. | Each build. |
 | `pekit-out/.steps/<function>/<identity>/` | A step's outputs: copies of what targets gave, and read-only links for exposed outputs. | Each build. |
