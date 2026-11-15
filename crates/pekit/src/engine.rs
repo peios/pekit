@@ -79,6 +79,7 @@ use crate::git_fetch;
 use crate::keychain::{self, Keychain};
 use crate::layers::remove_tree;
 use crate::load::Loaded;
+use crate::lock::{LIBRARIES_DIR, LOCK_FILE};
 use crate::meter::Metered;
 use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::pool::{Done, Pool, Ran, Work};
@@ -1995,13 +1996,33 @@ impl Run<'_> {
                 );
             }
         }
-        read.extend(
-            code.into_iter()
-                .filter_map(|file| names.get(file as usize))
-                .filter(|name| !name.starts_with('<'))
-                .cloned(),
-        );
+        // A library's code stands for the whole library its pin restores, as
+        // a build from its source restores each library the lock pins; code
+        // of one the lock pins none of stands for itself. One found outside
+        // the workspace, through `$GCSL_LIBRARY_PATH`, is no source of it.
         let root = &self.loaded.root;
+        let library_prefix = format!("{}/", gcsl::workspace::LIBRARIES);
+        for name in code.into_iter().filter_map(|file| names.get(file as usize)) {
+            if let Some(rest) = name.strip_prefix(&library_prefix) {
+                let pinned = (self.loaded.pinned.iter())
+                    .map(|pin| pin.path.as_str())
+                    .filter(|path| rest.starts_with(&format!("{path}/")))
+                    .max_by_key(|path| path.len());
+                let place = format!("{LIBRARIES_DIR}/{}", pinned.unwrap_or(rest));
+                if root.join(&place).exists() {
+                    set.libraries.extend(pinned.map(str::to_owned));
+                    read.insert(place);
+                }
+            } else if !name.starts_with('<') {
+                read.insert(name.clone());
+            }
+        }
+        // What loading the workspace takes, whatever the build read of it:
+        // its definition, and the lock, which restores its libraries.
+        read.insert(WORKSPACE_FILE.to_owned());
+        if root.join(LOCK_FILE).is_file() {
+            read.insert(LOCK_FILE.to_owned());
+        }
         let real_root = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         let left_out = (read.iter())
             .filter(|path| {
