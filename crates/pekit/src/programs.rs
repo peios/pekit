@@ -415,6 +415,11 @@ impl Times {
             if !kind.is_symlink() && meta.mode() & 0o7777 != entry.mode {
                 fs::set_permissions(&path, fs::Permissions::from_mode(entry.mode))?;
             }
+            // Its time already, it is left alone, so that its stamp, by
+            // its change time, still says it is unchanged.
+            if (meta.mtime(), meta.mtime_nsec()) == (entry.modified.0, entry.modified.1.into()) {
+                continue;
+            }
             let modified = Timespec {
                 tv_sec: entry.modified.0,
                 tv_nsec: entry.modified.1.into(),

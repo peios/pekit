@@ -403,3 +403,37 @@ fn a_program_found_leaves_its_files_times_and_modes_as_its_run_did() {
     assert_eq!(counts(&again), (1, 1, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "newer\n600\n700\nb\n");
 }
+
+#[test]
+fn a_program_found_that_only_touched_a_file_leaves_it_newer() {
+    let text = |word: &str| {
+        format!(
+            "#[hermetic] def touched(src: File) -> File {{\n\
+             \x20   let a = exec([\"sh\", \"-c\", \"cat {{src.path}} > a; sleep 0.05; echo z > z\"])\n\
+             \x20   let b = exec([\"sh\", \"-c\", \"sleep 0.05; touch a\"])\n\
+             \x20   let c = exec([\"sh\", \"-c\", \"if [ a -nt z ]; then echo newer; else echo older; fi > out; echo {word} >> out\"])\n\
+             \x20   = working_dir().file(\"out\")\n\
+             }}\n\
+             def build both() {{ = touched(file(\"x.txt\")) }}\n"
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("app/x.txt", "x\n"),
+            ("app/build.gcsl", &text("a")),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let out = dir.path().join("pekit-out/app/both/touched/out");
+    assert_eq!(fs::read_to_string(&out).unwrap(), "newer\na\n");
+    // Both found: the second changed no contents, only `a`'s time, which
+    // its record gives back.
+    write(dir.path(), &[("app/build.gcsl", &text("b"))]);
+    let again = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!(counts(&again), (1, 2, 0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "newer\nb\n");
+}
