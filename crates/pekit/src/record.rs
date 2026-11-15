@@ -474,4 +474,9 @@ pub struct ExecRecord {
     /// How long it ran, in milliseconds: what finding it saves.
     #[serde(default)]
     pub duration_ms: u64,
+    /// The blob of the times and modes of what the two trees held after
+    /// it, which their digests leave out, so that a program found leaves
+    /// them as its run did; a record without it is not found.
+    #[serde(default)]
+    pub times: Option<Digest>,
 }

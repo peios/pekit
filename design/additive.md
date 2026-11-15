@@ -97,6 +97,17 @@ therefore cached each on its own.
   walk of a composition is about five times as slow as in a release
   build (50 ms for 8,400 entries). A build whose steps' code changed and
   whose programs see what they saw runs none of them.
+- **Times and modes:** a tree's digest keeps a file's contents and
+  executable bit alone, so a replay first gave every file it placed the
+  copy's time, in the order of their names, and mode 0644 or 0755. A
+  GCSL build that ran `configure` and `make` as separate programs then
+  saw `configure` newer than `config.status` and reconfigured (gcc's
+  `configargs.h`, Python's lost `CFLAGS_NODIST`), and a `chmod` was lost
+  (PEI-1692). A record now keeps a blob of each entry's modification time
+  and permission bits, but a sealed composition's and a mount point's;
+  a replay gives them to both trees, contents before their directories;
+  a record without them is not found. The blob is about 1 MB for 100,000
+  entries, compressed.
 - **Counted:** a build says how many programs its steps found, `1 step
   run (2 programs found), 0 found in the store`, and tells an
   `EffectFound` event for each, which the trace shows.

@@ -16,9 +16,10 @@
 //!    the step has staged, those digests, the built-in and its arguments;
 //! 3. where the store's records are reused, it finds the program's record,
 //!    places again each writable tree whose digest differs from the
-//!    record's, whole, and gives the record's result, without running it;
+//!    record's, whole, gives both the times and modes the run left, and
+//!    gives the record's result, without running it;
 //! 4. else it runs it, hashes its writable trees again, and, where records
-//!    are kept, records what it gave and them.
+//!    are kept, records what it gave, them, and their times and modes.
 //!
 //! What it tells the engine, a [`ProgramRan`], is whether the program was
 //! found and its writable trees' digests after it, or that they could not
@@ -164,6 +165,7 @@ pub fn perform_program(
     let after = captured(sandbox, &work.store);
     if let (Ok(plain), Some((own, tmp)), false) = (&outcome, after, work.reuse == Reuse::Compare)
         && let Ok(result) = stored(plain, &HashMap::new(), &work.store)
+        && let Some(times) = times_of(sandbox, &work.store)
     {
         // A record that cannot be written is a program run again.
         let _ = work.store.put_record(
@@ -173,6 +175,7 @@ pub fn perform_program(
                 own,
                 tmp,
                 duration_ms,
+                times: Some(times),
             },
         );
     }
@@ -217,6 +220,16 @@ fn replay(
     let Ok((own, tmp)) = sandbox.writable() else {
         return Ok(false);
     };
+    // A record that kept no times, or whose times the store no longer
+    // holds, is a program run again: placed without them, what it wrote
+    // would look as new as the copy, to make and the like.
+    let Some(times) = found
+        .times
+        .and_then(|times| store.read_blob(&times).ok())
+        .and_then(|blob| Times::decode(&blob))
+    else {
+        return Ok(false);
+    };
     let mut placing = Vec::new();
     let mounted = sandbox.mounted();
     for (path, before, after) in [(&own, now.0, found.own), (&tmp, now.1, found.tmp)] {
@@ -246,6 +259,13 @@ fn replay(
                 )
             })?;
     }
+    // Every tree, placed again or not, is given the times and modes the run
+    // left: a program that only touched a file changed no digest.
+    times
+        .apply([&own, &tmp], &skipped(sandbox))
+        .map_err(|error| {
+            format!("cannot give what a program found in the store wrote its times: {error}")
+        })?;
     // Its sealed compositions, if they were placed again, are read-only
     // again, as a run would have left them.
     sandbox.reseal().map_err(|error| {
@@ -280,4 +300,192 @@ fn placed_beside(
         return Err(error);
     }
     Ok(beside)
+}
+
+/// What the trees' digests leave out of what a program left: each file's,
+/// directory's and link's time of change, and each file's and directory's
+/// mode, by its tree, its own output directory (0) or `/tmp` (1), and its
+/// path in it. A program found is given them, so that what it wrote is
+/// newer than what it read, as its run left it, and a mode it set is kept.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Times {
+    /// Each entry, a directory before what it holds.
+    entries: Vec<Stamped>,
+}
+
+/// One entry of [`Times`].
+#[derive(Debug, PartialEq, Eq)]
+struct Stamped {
+    /// Its tree: 0 for the own output directory, 1 for `/tmp`.
+    tree: u8,
+    /// Its path in it, empty for the tree itself.
+    path: Vec<u8>,
+    /// Its mode's permission bits; none of a link's.
+    mode: u32,
+    /// Its time of change: seconds and nanoseconds.
+    modified: (i64, u32),
+}
+
+impl Times {
+    /// The times of what the trees `trees` hold, but what is at or under
+    /// one of `skipped`.
+    ///
+    /// # Errors
+    ///
+    /// That something in them cannot be read.
+    fn of(trees: [&Path; 2], skipped: &[PathBuf]) -> io::Result<Self> {
+        let mut times = Self::default();
+        for (tree, root) in (0u8..).zip(trees) {
+            times.walk(tree, root, root, skipped)?;
+        }
+        Ok(times)
+    }
+
+    /// Adds `path`, in the tree `tree` at `root`, and, if it is a
+    /// directory, what it holds, in the order of their names.
+    fn walk(&mut self, tree: u8, root: &Path, path: &Path, skipped: &[PathBuf]) -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::MetadataExt as _;
+        if skipped.iter().any(|skip| path.starts_with(skip)) {
+            return Ok(());
+        }
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && path != root => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let kind = meta.file_type();
+        if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
+            return Ok(());
+        }
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        self.entries.push(Stamped {
+            tree,
+            path: relative.as_os_str().as_bytes().to_vec(),
+            mode: if kind.is_symlink() {
+                0
+            } else {
+                meta.mode() & 0o7777
+            },
+            modified: (meta.mtime(), u32::try_from(meta.mtime_nsec()).unwrap_or(0)),
+        });
+        if kind.is_dir() {
+            let mut names = fs::read_dir(path)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<io::Result<Vec<_>>>()?;
+            names.sort_unstable();
+            for name in names {
+                self.walk(tree, root, &path.join(name), skipped)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives each entry still in the trees `trees` its mode and time of
+    /// change, what a directory holds before it, so that writing to it
+    /// leaves its own time; but nothing at or under one of `skipped`, and
+    /// no file of more than one link, which may be another's too.
+    ///
+    /// # Errors
+    ///
+    /// That one could not be given them.
+    fn apply(&self, trees: [&Path; 2], skipped: &[PathBuf]) -> io::Result<()> {
+        use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        for entry in self.entries.iter().rev() {
+            let Some(root) = trees.get(usize::from(entry.tree)) else {
+                continue;
+            };
+            let path = if entry.path.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(std::ffi::OsStr::from_bytes(&entry.path))
+            };
+            if skipped.iter().any(|skip| path.starts_with(skip)) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let kind = meta.file_type();
+            if kind.is_file() && meta.nlink() > 1 {
+                continue;
+            }
+            if !kind.is_symlink() && meta.mode() & 0o7777 != entry.mode {
+                fs::set_permissions(&path, fs::Permissions::from_mode(entry.mode))?;
+            }
+            let modified = Timespec {
+                tv_sec: entry.modified.0,
+                tv_nsec: entry.modified.1.into(),
+            };
+            let times = Timestamps {
+                last_access: modified,
+                last_modification: modified,
+            };
+            utimensat(CWD, &path, &times, AtFlags::SYMLINK_NOFOLLOW)?;
+        }
+        Ok(())
+    }
+
+    /// Its bytes, as the store keeps them: each entry's tree, mode, time
+    /// and path, compressed.
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for entry in &self.entries {
+            bytes.push(entry.tree);
+            bytes.extend_from_slice(&entry.mode.to_le_bytes());
+            bytes.extend_from_slice(&entry.modified.0.to_le_bytes());
+            bytes.extend_from_slice(&entry.modified.1.to_le_bytes());
+            let length = u32::try_from(entry.path.len()).map_err(io::Error::other)?;
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(&entry.path);
+        }
+        zstd::encode_all(&bytes[..], 3)
+    }
+
+    /// The times whose bytes are `blob`, or `None` if they are not.
+    fn decode(blob: &[u8]) -> Option<Self> {
+        let bytes = zstd::decode_all(blob).ok()?;
+        let mut rest = &bytes[..];
+        let mut take = |count: usize| -> Option<&[u8]> {
+            let (taken, after) = rest.split_at_checked(count)?;
+            rest = after;
+            Some(taken)
+        };
+        let mut entries = Vec::new();
+        while let Some(tree) = take(1) {
+            let tree = tree[0];
+            let mode = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let seconds = i64::from_le_bytes(take(8)?.try_into().ok()?);
+            let nanoseconds = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let length = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let path = take(usize::try_from(length).ok()?)?.to_vec();
+            entries.push(Stamped {
+                tree,
+                path,
+                mode,
+                modified: (seconds, nanoseconds),
+            });
+        }
+        Some(Self { entries })
+    }
+}
+
+/// What a program's times leave alone in the step whose sandbox is
+/// `sandbox`: its sealed compositions, whose files may be the store's own,
+/// and its mount points, on the host.
+fn skipped(sandbox: &StepSandbox) -> Vec<PathBuf> {
+    let mut skipped = sandbox.sealed();
+    skipped.extend(sandbox.mounted().into_keys());
+    skipped
+}
+
+/// The blob of the times of what the writable trees of the step whose
+/// sandbox is `sandbox` hold, put into `store`, or `None` if they cannot be
+/// read or kept.
+fn times_of(sandbox: &StepSandbox, store: &Store) -> Option<Digest> {
+    let (own, tmp) = sandbox.writable().ok()?;
+    let times = Times::of([&own, &tmp], &skipped(sandbox)).ok()?;
+    store.put_bytes(&times.encode().ok()?).ok()
 }
