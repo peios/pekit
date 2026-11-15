@@ -44,7 +44,11 @@ neither captured nor put back.
 
 A program that runs is recorded with its status, its output and error, and
 the digests of the two writable trees after it, whose contents go into the
-store. Hashing the trees again after each program is cheap: the step's
+store. A tree's digest leaves out modification times and modes other than
+the executable bit, so the record also keeps a blob of them: each file's,
+directory's and symbolic link's modification time, and each file's and
+directory's permission bits, by path. A sealed composition and a mount
+point are left out of it. Hashing the trees again after each program is cheap: the step's
 sandbox keeps a stamp of each file, as [Blobs and
 Trees](~pekit/blobs-and-trees) describes, and reads again only a file
 whose stamp changed.
@@ -54,13 +58,18 @@ whose stamp changed.
 A program found is not run. Each writable tree whose digest differs from
 the record's is placed again from the store, whole, so the step's world is
 exactly as the recorded run left it, and the record's result is given to
-the step. A record whose contents aren't all in the store is not found.
+the step. A record whose contents aren't all in the store is not found, and
+neither is a record without the blob of times and modes, such as one made
+before pekit kept them.
 
 A replay puts back what the store keeps of a tree: contents, symbolic
-links, and whether a file is executable. It doesn't put back modification
-times, or which files were hard links of one another. So a `make` after a
-replay sees every file as new. A sealed composition put back is sealed
-again.
+links, and whether a file is executable. Then it gives every entry of both
+trees, placed again or not, the modification time and mode the recorded run
+left, what a directory holds before the directory. So a `make` after a
+replay sees which files are newer than others as it would have after the
+run, and a `chmod` a found program ran is kept. A replay doesn't put back
+which files were hard links of one another, and leaves alone a file with
+more than one link. A sealed composition put back is sealed again.
 
 ## What stops recording
 
