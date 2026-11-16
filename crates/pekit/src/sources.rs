@@ -26,7 +26,10 @@
 //! was in the sources file, `pekit.sources`, beside `pekit.lock`, with the
 //! names of the recipe's packages. A package that holds a recipe's source
 //! is built from that record alone, so it is the same wherever it is built,
-//! and the record shows in review when a recipe's source changes.
+//! and the record shows in review when a recipe's source changes. Such a
+//! package, one whose own code reads the sources file, is no source of its
+//! recipe but for its code: what it reads, fetches and holds is the
+//! record's, which would otherwise keep each path it ever named.
 //! `pekit publish --strict` refuses to publish a recipe's packages when its
 //! record is not what its build's source and its packages are.
 

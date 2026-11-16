@@ -47,6 +47,12 @@ Packing isn't part of a recipe's source either: pekit builds a recipe's
 packages without packing them to record it, so a packager's own program
 isn't counted.
 
+Nor is what the package of the source holds. A package whose own code reads
+`pekit.sources` is built from the record, so pekit counts its code but not
+what it reads, fetches or holds. Otherwise a file the record once named
+would stay recorded after the recipe stopped using it, or even after it was
+deleted, since the package of the source holds it.
+
 ## Before you start
 
 - A workspace whose packages build strictly, if the workspace requires

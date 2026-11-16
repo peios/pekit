@@ -85,11 +85,13 @@ use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::pool::{Done, Pool, Ran, Work};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
-use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
+use crate::record::{
+    Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored,
+};
 use crate::remote::Remote;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::scratch::Scratch;
-use crate::sources::{Fetched, GitTree, SourceSet};
+use crate::sources::{Fetched, GitTree, SOURCES_FILE, SourceSet};
 use crate::store::{Digest, Seen, Steady, Store, TreeEntry, clock_beside};
 use crate::sweep::Sweeper;
 use crate::target::Target;
@@ -1934,30 +1936,31 @@ impl Run<'_> {
     /// directory its targets' code, their effects and their steps read, or
     /// their values hold, save a path that leads out of the workspace, such as a link to a
     /// repository of packages to take build roots from: what is outside the
-    /// workspace is no source of it.
+    /// workspace is no source of it. A target whose own effects read the
+    /// sources file, as a recipe's source package does, is built from the
+    /// record, so its code is a source, but what it reads, fetches and holds
+    /// is the record's: counted, a path the record once named would be
+    /// recorded for ever.
     fn sources(&self) -> SourceSet {
         let workspace = &self.loaded.workspace;
         let names = &self.loaded.names;
         let mut set = SourceSet::default();
         let mut read = BTreeSet::new();
         let mut code = Vec::new();
-        for root in &self.roots {
-            if let Some(call) = root.call.as_ref() {
-                for &file in call.files() {
-                    code.extend(workspace.files_needed(file));
-                }
-            }
-            // What a target comes to may hold workspace files that nothing
-            // read in its build, a package's files that only packing reads.
-            if let Some(Ok(value)) = &root.done {
-                read.extend(
-                    (value.files().into_iter())
-                        .chain(value.dirs())
-                        .filter_map(|file| in_workspace(&file.path)),
-                );
-            }
-        }
+        let from_record = self.built_from_record();
+        let of_record = |unit: u32| {
+            self.unit_roots
+                .get(&unit)
+                .is_some_and(|root| from_record.contains(root))
+        };
+        self.roots_sources(&from_record, &mut code, &mut read);
         for (id, node) in self.graph.nodes() {
+            if of_record(node.unit()) {
+                if node.kind() == NodeKind::Deferred {
+                    code.extend(workspace.node_code_files(&self.graph, id));
+                }
+                continue;
+            }
             if node.kind() == NodeKind::Deferred {
                 read.extend(self.node_reads(id));
                 code.extend(workspace.node_code_files(&self.graph, id));
@@ -2032,6 +2035,67 @@ impl Run<'_> {
             .collect();
         set.add_reads(read, &left_out, |path| root.join(path).is_dir());
         set
+    }
+
+    /// The code of every root, into `code`, and what each holds of the
+    /// workspace, into `read`, but the roots of `from_record`'s (see
+    /// [`Run::sources`]).
+    fn roots_sources(
+        &self,
+        from_record: &HashSet<usize>,
+        code: &mut Vec<u32>,
+        read: &mut BTreeSet<String>,
+    ) {
+        let workspace = &self.loaded.workspace;
+        for (index, root) in self.roots.iter().enumerate() {
+            if let Some(call) = root.call.as_ref() {
+                for &file in call.files() {
+                    code.extend(workspace.files_needed(file));
+                }
+            }
+            if from_record.contains(&index) {
+                continue;
+            }
+            // What a target comes to may hold workspace files that nothing
+            // read in its build, a package's files that only packing reads.
+            if let Some(Ok(value)) = &root.done {
+                read.extend(
+                    (value.files().into_iter())
+                        .chain(value.dirs())
+                        .filter_map(|file| in_workspace(&file.path)),
+                );
+            }
+        }
+    }
+
+    /// The roots, by index, whose own effects read the sources file, and so
+    /// are built from the record (see [`Run::sources`]).
+    fn built_from_record(&self) -> HashSet<usize> {
+        let workspace = &self.loaded.workspace;
+        let mut roots = HashSet::new();
+        for (id, node) in self.graph.nodes() {
+            if node.kind() == NodeKind::Deferred {
+                continue;
+            }
+            let Some(&root) = self.unit_roots.get(&node.unit()) else {
+                continue;
+            };
+            let Ok(job) = workspace.effect_job(&self.graph, id) else {
+                continue;
+            };
+            let reads_record = job.args().iter().any(|arg| {
+                let named = matches!(arg, Plain::Str(path) if in_workspace(path).as_deref() == Some(SOURCES_FILE));
+                named
+                    || arg
+                        .files()
+                        .into_iter()
+                        .any(|(path, _)| in_workspace(path).as_deref() == Some(SOURCES_FILE))
+            });
+            if reads_record {
+                roots.insert(root);
+            }
+        }
+        roots
     }
 
     /// The workspace files and directories the node `id`, a step, is given:
