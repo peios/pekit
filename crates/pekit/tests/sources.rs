@@ -218,3 +218,32 @@ fn a_library_s_code_is_its_whole_library_if_the_lock_pins_it_and_itself_if_not()
         ]
     );
 }
+
+#[test]
+fn what_a_target_built_from_the_record_holds_is_no_source() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            ("doc.txt", "doc\n"),
+            // A file the last record named, which nothing reads now.
+            ("old.txt", "old\n"),
+            ("pekit.sources", "[\"old.txt\"]\n"),
+            (
+                "app/build.gcsl",
+                "import json\n\
+                 def build doc() { = file(\"../doc.txt\") }\n\
+                 # Built from the record, as a recipe's source package is.\n\
+                 def build listed() {\n\
+                 \x20   let paths: List<String> = json.decode(file(\"../pekit.sources\").read())\n\
+                 \x20   = for path in paths { = file(\"../{path}\") }\n\
+                 }\n",
+            ),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    let source = sources_of(dir.path(), state.path(), &["app/doc", "app/listed"]);
+    assert!(source.files.contains("doc.txt"), "{:?}", source.files);
+    assert!(!source.files.contains("old.txt"), "{:?}", source.files);
+}
