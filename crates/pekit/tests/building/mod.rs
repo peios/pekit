@@ -75,6 +75,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         exposing: Exposing::AsNeeded,
         remote: None,
         budget: budget(state),
+        epoch: None,
     }
 }
 

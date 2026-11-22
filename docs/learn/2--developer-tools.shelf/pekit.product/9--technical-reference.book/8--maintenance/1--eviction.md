@@ -22,9 +22,10 @@ An eviction never lists a record's contents whole. Each blob counts what
 names it: each live record that names it directly, and each tree a live
 record reaches that holds it as an entry. Evicting a record lets go of what
 it names. A blob that nothing names any more is removed, and a removed tree
-lets go of its entries in turn. Trees share their subtrees, so an
-eviction's memory grows with the store's blobs and its trees' entries, not
-with how much each record names. A store of 128,000 records and 37 GiB
+lets go of its entries in turn. Trees share their subtrees. So the memory
+an eviction needs depends on how many blobs the store holds, together with
+how many entries its trees have. It doesn't depend on how much each record
+names. A store of 128,000 records and 37 GiB
 evicts in about 200 MiB.
 
 Before it removes any blob, an eviction removes every materialized tree and
@@ -83,3 +84,8 @@ failure:
 ```text
 warning: the store could not be kept within `PEKIT_CACHE_LIMIT`: MESSAGE
 ```
+
+If another process has the store open and the ledger says the store is over
+its limit, the build says so in the same warning, with the store's size and
+its limit, rather than evicting nothing silently. A command shows each
+warning once, however many builds it runs.

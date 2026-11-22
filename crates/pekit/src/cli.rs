@@ -47,8 +47,8 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, ExitCode, ExitStatus};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
@@ -536,8 +536,6 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         }
     };
     let counts = steps_counted(&outcomes);
-    warn_of_eviction(&outcomes, terminal);
-    warn_of_remote(&outcomes, terminal);
     let mut failed = false;
     for (target, outcome) in targets.iter().zip(&outcomes.targets) {
         match outcome {
@@ -1030,7 +1028,9 @@ fn released(
             return ExitCode::FAILURE;
         }
     };
-    if !sources_recorded((&mut loaded, &packages), &settings, &checked, terminal)
+    // Checked already by the build: the sources' build finds its steps in the
+    // store, as the publishing does, rather than running each again.
+    if !sources_recorded((&mut loaded, &packages), &settings, &publishing, terminal)
         || !publish_release(
             (&mut loaded, &packages),
             (&tag, &args.to),
@@ -1366,8 +1366,6 @@ fn package_command(
         }
     }
     let _ = writeln!(terminal.out, "{}", steps_counted(&outcomes));
-    warn_of_eviction(&outcomes, terminal);
-    warn_of_remote(&outcomes, terminal);
     if failed {
         ExitCode::FAILURE
     } else {
@@ -1678,12 +1676,8 @@ fn published_strictly(
             packages.len()
         );
         let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
-        warn_of_eviction(&packed, terminal);
-        warn_of_remote(&packed, terminal);
         return Ok(None);
     }
-    warn_of_eviction(&packed, terminal);
-    warn_of_remote(&packed, terminal);
     if !sources_recorded((loaded, packages), settings, shared, terminal) {
         let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
         return Ok(None);
@@ -1758,18 +1752,33 @@ fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         return ExitCode::FAILURE;
     };
     let mut doomed = vec![root.join("pekit-out")];
+    // Held until the store is emptied, so that no other pekit has it.
+    let mut held = None;
     if args.cache {
         let cache = cache_dir();
-        doomed.extend([cache.join("store"), cache.join("scratch")]);
+        let store = cache.join("store");
+        match held_alone(&store) {
+            Ok(alone) => held = alone,
+            Err(message) => {
+                let _ = writeln!(terminal.err, "error: {message}");
+                return ExitCode::FAILURE;
+            }
+        }
+        doomed.extend([store, cache.join("scratch")]);
     }
     let mut failed = false;
     for path in doomed {
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
         }
-        match remove_tree(&path) {
+        let (removed, done) = if held.is_some() && path.join(STORE_LOCK).exists() {
+            (emptied_but_lock(&path), "emptied")
+        } else {
+            (remove_tree(&path), "removed")
+        };
+        match removed {
             Ok(()) => {
-                let _ = writeln!(terminal.out, "removed {}", path.display());
+                let _ = writeln!(terminal.out, "{done} {}", path.display());
             }
             Err(error) => {
                 failed = true;
@@ -1786,6 +1795,58 @@ fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The file in a store's directory that every pekit with the store open
+/// holds a lock on (see [Eviction](crate::evict#eviction)).
+const STORE_LOCK: &str = "lock";
+
+/// The lock of the store at `store`, held exclusively, if it has one, so
+/// that no other pekit has it open while it is emptied.
+///
+/// # Errors
+///
+/// That another pekit has it open, or the lock can't be taken.
+fn held_alone(store: &Path) -> Result<Option<std::fs::File>, String> {
+    let lock = match std::fs::File::options()
+        .write(true)
+        .open(store.join(STORE_LOCK))
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot open the store's lock: {error}")),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
+            "another pekit has the store, `{}`, open, so nothing was removed: clean it once \
+             no other pekit is running",
+            store.display()
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!("cannot lock the store: {error}")),
+    }
+}
+
+/// Removes everything in the store's directory `store` but its lock, which
+/// stays: a pekit waiting on the lock to open the store then opens it empty,
+/// rather than with a lock of its own that no other holds.
+///
+/// # Errors
+///
+/// That something in it can't be removed.
+fn emptied_but_lock(store: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(store)? {
+        let entry = entry?;
+        if entry.file_name() == STORE_LOCK {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            remove_tree(&entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether the test whose result is `result`, a `TestResult`, passed, and
@@ -1816,10 +1877,23 @@ fn quoted(names: &[&str]) -> String {
 /// if the eviction as `outcomes`' build ended failed: which fails no build.
 fn warn_of_eviction(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     if let Some(Err(message)) = &outcomes.evicted {
-        let _ = writeln!(
-            terminal.err,
-            "warning: the store could not be kept within `PEKIT_CACHE_LIMIT`: {message}"
+        warn_once(
+            terminal,
+            &format!("the store could not be kept within `PEKIT_CACHE_LIMIT`: {message}"),
         );
+    }
+}
+
+/// The warnings the command has shown, each once however many of its builds
+/// give it: `pekit sources` builds each recipe apart, say.
+static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Shows `warning` on `terminal`, unless the command has shown it already.
+fn warn_once(terminal: &mut Terminal<'_>, warning: &str) {
+    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    if !warned.iter().any(|shown| shown == warning) {
+        let _ = writeln!(terminal.err, "warning: {warning}");
+        warned.push(warning.to_owned());
     }
 }
 
@@ -1844,9 +1918,38 @@ fn steps_counted(outcomes: &Outcomes) -> String {
 /// not in `outcomes`' build: which fails no build, its steps run here.
 fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     if let Some(message) = &outcomes.remote_failed {
-        let _ = writeln!(
-            terminal.err,
-            "warning: {message}; the build went on without the remote cache"
+        warn_once(
+            terminal,
+            &format!("{message}; the build went on without the remote cache"),
+        );
+    }
+}
+
+/// Warns on `terminal` if the output directory `outputs` is on another file
+/// system than the store `store`: an output can't be a link to its blob
+/// there, so each is copied, and copied again by every build, since only a
+/// link is known to be up to date (see [Exposure](crate::exposure#exposure)).
+/// Each is told by its nearest directory that is there, through links.
+fn warn_of_file_systems(outputs: &Path, store: &Path, terminal: &mut Terminal<'_>) {
+    use std::os::unix::fs::MetadataExt as _;
+    let device = |path: &Path| {
+        path.ancestors()
+            .find_map(|dir| std::fs::metadata(dir).ok())
+            .map(|meta| meta.dev())
+    };
+    if let (Some(outputs_on), Some(store_on)) = (device(outputs), device(store))
+        && outputs_on != store_on
+    {
+        warn_once(
+            terminal,
+            &format!(
+                "`{}` is on another file system than the store, `{}`: every output is \
+                 copied out of the store rather than linked, and copied again by every \
+                 build. Put it on the store's file system; a link to a directory there \
+                 will do",
+                outputs.display(),
+                store.display()
+            ),
         );
     }
 }
@@ -1878,6 +1981,11 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             return None;
         }
     };
+    warn_of_file_systems(
+        &loaded.root.join("pekit-out"),
+        &cache.join("store"),
+        terminal,
+    );
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
     let strict = shared.allows.strict;
@@ -1942,6 +2050,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         exposing: Exposing::AsNeeded,
         remote,
         budget: Some(budget),
+        epoch: None,
     })
 }
 
@@ -1999,9 +2108,16 @@ fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
     Ok(Arc::new(budget))
 }
 
+/// The trace of every build the command has run so far, and when its first
+/// began, which every build's events are timed from: each build adds to it
+/// and writes it whole, so that a command of several builds, `release`'s or
+/// `--check-reproducible`'s say, leaves one trace of them all, and a build
+/// that stops leaves those before it.
+static COMMAND_TRACE: Mutex<Option<(Trace, Instant)>> = Mutex::new(None);
+
 /// Builds `targets` of `loaded`'s workspace with `settings`, or does with
 /// them what `doing` says, showing its progress on `terminal` as it goes
-/// and writing its trace where `shared` says.
+/// and writing the command's trace so far where `shared` says.
 ///
 /// # Errors
 ///
@@ -2013,7 +2129,16 @@ fn build_targets(
     shared: &Shared,
     terminal: &mut Terminal<'_>,
 ) -> Result<Outcomes, BuildError> {
-    let mut trace = Trace::new();
+    let (mut trace, epoch) = COMMAND_TRACE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| (Trace::new(), Instant::now()));
+    let settings = &Settings {
+        epoch: Some(epoch),
+        ..settings.clone()
+    };
+    let tracing = shared.trace.is_some();
     let mut profile = GcslProfile::new();
     let mut reports = Vec::new();
     let mut progress = Progress::default();
@@ -2021,7 +2146,9 @@ fn build_targets(
     let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
-            trace.add(event);
+            if tracing {
+                trace.add(event);
+            }
             profile.add(event);
             if live {
                 progress.show(event, err);
@@ -2075,7 +2202,10 @@ fn build_targets(
             );
         }
     }
+    *COMMAND_TRACE.lock().unwrap_or_else(PoisonError::into_inner) = Some((trace, epoch));
     let outcomes = outcomes?;
+    warn_of_eviction(&outcomes, terminal);
+    warn_of_remote(&outcomes, terminal);
     for name in &outcomes.flaky {
         let _ = writeln!(
             terminal.err,

@@ -38,7 +38,9 @@
 //!   has the store open. An eviction takes it exclusively without waiting,
 //!   so it evicts nothing while another process has the store; having it,
 //!   it removes the claims' files, which no process then holds
-//!   ([Claims](crate::claims#claims)).
+//!   ([Claims](crate::claims#claims)). A store its ledger says is over its
+//!   limit while another process has it is an error, which a build warns
+//!   of, rather than nothing evicted silently.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -278,7 +280,8 @@ fn index(number: u32) -> usize {
 ///
 /// # Errors
 ///
-/// That the store cannot be read or written.
+/// That the store cannot be read or written, or that its ledger says it is
+/// over `limit` while another process has it, so that nothing is evicted.
 pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicted>> {
     journal(store.root(), used)?;
     Ledger::add(store.root(), used.added)?;
@@ -288,7 +291,16 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
             // A lock that failed to change has been let go of: held shared
             // again, as every process that has the store holds it.
             store.held().lock_shared()?;
-            return Ok(None);
+            return match Ledger::read(store.root()) {
+                Some(blobs) if blobs > limit => Err(io::Error::other(format!(
+                    "it holds {}, over its limit of {}, and nothing was evicted, since \
+                     another pekit has it open: a build evicts as it ends only if no other \
+                     has the store",
+                    gib(blobs),
+                    gib(limit)
+                ))),
+                _ => Ok(None),
+            };
         }
         Err(TryLockError::Error(error)) => {
             store.held().lock_shared()?;
@@ -366,6 +378,16 @@ impl Ledger {
         fs::write(&temp, format!("{bytes} {walked}\n"))?;
         fs::rename(&temp, root.join("size"))
     }
+}
+
+/// `bytes` in GiB, to a tenth, as a warning shows a size.
+fn gib(bytes: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a size shown to a tenth of a GiB"
+    )]
+    let gib = bytes as f64 / f64::from(1u32 << 30);
+    format!("{gib:.1} GiB")
 }
 
 /// The seconds since the Unix epoch.

@@ -1,10 +1,14 @@
 //! Tests of the store's materialised trees.
 
+mod elsewhere;
+mod skipping;
+
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use pekit::store::{FileEntry, Store};
+use skipping::skip;
 
 /// A store in a new temporary directory, and the directory.
 fn store() -> (Store, tempfile::TempDir) {
@@ -98,4 +102,58 @@ fn materialised_trees_are_forgotten_whole() {
     store.forget_materialised().unwrap();
     // Made again when it is next asked for.
     assert!(store.is_materialised(&digest, &store.materialised(&digest, &[]).unwrap()));
+}
+
+#[test]
+fn a_removal_of_materialised_trees_stopped_part_way_leaves_none_half_there() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (store, dir) = store();
+    let (digest, _) = tree(&store, dir.path());
+    let at = store.materialised(&digest, &[]).unwrap();
+    // A directory in the tree that cannot be emptied stops a removal part
+    // way, as a kill or an I/O error would.
+    let stuck = at.join("stuck");
+    fs::create_dir(&stuck).unwrap();
+    fs::write(stuck.join("x"), "").unwrap();
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+    store.forget_materialised().unwrap();
+    assert!(!store.trees_root().exists());
+    // Asked for again, the tree is made whole, not found half removed.
+    let again = store.materialised(&digest, &[]).unwrap();
+    assert!(store.is_materialised(&digest, &again));
+    assert!(again.join("a").exists() && !again.join("stuck").exists());
+    // What could not be removed waits in `tmp/` for a sweep.
+    for entry in fs::read_dir(store.root().join("tmp")).unwrap() {
+        let left = entry.unwrap().path();
+        let _ = fs::set_permissions(
+            left.join(digest.hex()).join("stuck"),
+            fs::Permissions::from_mode(0o755),
+        );
+        fs::remove_dir_all(left).unwrap();
+    }
+}
+
+#[test]
+fn no_copy_is_made_that_could_never_be_linked_on_another_file_system() {
+    let (store, dir) = store();
+    // Another file system than the store's, where the machine has one.
+    let Some(other) = elsewhere::elsewhere(dir.path()) else {
+        skip("a place to write on another file system than the temporary directory's");
+        return;
+    };
+    let (_, same) = tree(&store, dir.path());
+    let linked = store.link_copy(&same, 1, &other.path().join("b"));
+    assert_eq!(
+        linked.unwrap_err().kind(),
+        std::io::ErrorKind::CrossesDevices
+    );
+    let copies = fs::read_dir(store.root().join("cas"))
+        .unwrap()
+        .flat_map(|shard| fs::read_dir(shard.unwrap().path()).unwrap())
+        .filter(|blob| {
+            let name = blob.as_ref().unwrap().file_name();
+            name.to_string_lossy().contains(".r")
+        })
+        .count();
+    assert_eq!(copies, 0);
 }

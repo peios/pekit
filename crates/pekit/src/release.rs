@@ -37,15 +37,26 @@ impl Repository {
     ///
     /// That it is in none, or the repository has no commit.
     pub fn of(root: &Path) -> Result<Self, String> {
-        let top = git(root, &["rev-parse", "--show-toplevel"]).map_err(|_| {
-            format!(
-                "`pekit release` builds from a git commit, and `{}` is in no git repository",
-                root.display()
-            )
+        // Git's own error, unless it is the one these say plainly: git
+        // refusing a repository another user owns, say, is shown as git
+        // says it.
+        let top = git(root, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+            if error.contains("not a git repository") {
+                format!(
+                    "`pekit release` builds from a git commit, and `{}` is in no git repository",
+                    root.display()
+                )
+            } else {
+                error
+            }
         })?;
         let prefix = git(root, &["rev-parse", "--show-prefix"])?;
-        let head = git(root, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|_| {
-            "`pekit release` builds from a git commit, and there is none yet".to_owned()
+        let head = git(root, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|error| {
+            if error.contains("Needed a single revision") {
+                "`pekit release` builds from a git commit, and there is none yet".to_owned()
+            } else {
+                error
+            }
         })?;
         Ok(Self {
             top: PathBuf::from(top),

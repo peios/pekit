@@ -31,7 +31,8 @@ When a build ends with the store over its limit, pekit removes what is
 cheapest to make again until the store is under nine tenths of the limit.
 [Reuse and the Store](~pekit/reuse-and-the-store) explains the order. An
 eviction waits until no other pekit process is using the store, so a build
-that runs while another is running leaves it to a later build.
+that runs while another is running leaves it to a later build. If the store
+is over its limit then, pekit warns that nothing was evicted.
 
 ## Move the store
 
@@ -51,6 +52,13 @@ The cache directory also holds the git repositories pekit fetched from,
 and the directories steps are staged in. Keep it on a file system that
 supports hard links, as every local Linux file system does.
 
+Keep each workspace's `pekit-out/` on the same file system as the store.
+pekit links outputs to the store's files, and it can't link across file
+systems, so it copies every output instead, and copies it again on every
+build. A large build then writes far more to disk than it needs to. pekit
+warns when this happens. To fix it, make `pekit-out` a symbolic link to a
+directory on the store's file system.
+
 ## Clear what builds made
 
 `pekit clean` removes the workspace's `pekit-out/`:
@@ -69,6 +77,11 @@ next build runs every step again:
 ```sh
 pekit clean --cache
 ```
+
+It removes nothing while another pekit process has the store open, since
+that process would lose the files it is using. Run it once no other build
+is running. The store's lock file stays, so a pekit that was waiting for the
+store finds it empty.
 
 Neither removes pekit's state directory, which holds the key that
 identifies this machine's secrets. See [Using Secrets](~pekit/using-secrets).

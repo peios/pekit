@@ -1,6 +1,7 @@
 //! Tests of the `pekit` command, run as someone runs it.
 
 mod cache;
+mod elsewhere;
 mod skipping;
 
 use std::fs;
@@ -87,6 +88,72 @@ fn a_target_is_built_and_then_found_in_the_store() {
         out,
         "built app/hello: 0 steps run, 1 found in the store\n  pekit-out/app/hello/shout/out.txt\n"
     );
+}
+
+#[test]
+fn an_output_directory_on_another_file_system_than_the_store_is_warned_of() {
+    // The store in the temporary directory, the workspace on another file
+    // system, where the machine has one.
+    let cache = tempfile::tempdir().unwrap();
+    let Some(dir) = elsewhere::elsewhere(cache.path()) else {
+        skip("a place to write on another file system than the temporary directory's");
+        return;
+    };
+    // A step whose result is two files.
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "#[hermetic] fn twice() -> Dir {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; echo same > out/a; echo same > out/b\"])\n\
+                 \x20   working_dir().dir(\"out\")\n\
+                 }\n\
+                 def build both() { out = twice() }\n",
+            ),
+        ],
+    );
+    let app = dir.path().join("app");
+    let built = pekit(&app, cache.path(), &["build", "both"]);
+    let (_, err) = printed(&built);
+    assert!(built.status.success(), "{err}");
+    let warning = "is on another file system than the store";
+    assert_eq!(err.matches(warning).count(), 1, "{err}");
+    let out = dir.path().join("pekit-out/app/both/twice/out");
+    assert_eq!(fs::read_to_string(out.join("a")).unwrap(), "same\n");
+    assert_eq!(fs::read_to_string(out.join("b")).unwrap(), "same\n");
+}
+
+#[test]
+fn a_step_whose_result_is_no_data_fails_its_target_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "#[hermetic] fn maker() -> {f: fn() -> Int} { f = fn() -> Int { 1 } }\n\
+                 #[hermetic] fn fine() -> String { = \"ok\" }\n\
+                 def build bad() { out = maker() }\n\
+                 def build good() { out = fine() }\n",
+            ),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let built = pekit(
+        &dir.path().join("app"),
+        cache.path(),
+        &["build", "bad", "good"],
+    );
+    let (out, err) = printed(&built);
+    assert!(!built.status.success());
+    assert!(
+        err.contains("a step's result must be plain data: it holds a function"),
+        "{err}"
+    );
+    assert!(out.contains("built app/good"), "{out}");
 }
 
 #[test]
@@ -461,10 +528,33 @@ fn clean_removes_the_outputs_and_with_cache_the_store() {
             .0
             .starts_with("built app/hello: 0 steps run, 1 found")
     );
-    // And the store: it runs again. The state directory stays.
+    // Not the store while another pekit has it open.
+    let other = pekit::store::Store::open(&cache.path().join("store")).unwrap();
+    let refused = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
+    let (out, err) = printed(&refused);
+    assert!(!refused.status.success());
+    assert_eq!(out, "");
+    assert!(
+        err.starts_with("error: another pekit has the store"),
+        "{err}"
+    );
+    assert!(cache.path().join("store/cas").exists());
+    drop(other);
+    // And the store: it runs again. The state directory stays, and the
+    // store's lock, which another pekit may be waiting on.
     let cleaned = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
     assert!(cleaned.status.success());
-    assert!(!cache.path().join("store").exists());
+    let (out, _) = printed(&cleaned);
+    let store = cache.path().join("store");
+    assert!(
+        out.contains(&format!("emptied {}\n", store.display())),
+        "{out}"
+    );
+    let left: Vec<_> = fs::read_dir(cache.path().join("store"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["lock"]);
     assert!(cache.path().join("state").exists());
     let again = pekit(dir.path(), cache.path(), &["build", "hello"]);
     assert!(

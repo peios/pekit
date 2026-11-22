@@ -221,6 +221,74 @@ fn a_release_s_checking_and_publishing_unpack_what_its_build_unpacked() {
 }
 
 #[test]
+fn a_release_runs_each_step_once_more_to_check_it_and_traces_every_build() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    // A package whose files a step of its own makes.
+    write(
+        &ws,
+        &[
+            ("workspace.gcsl", WORKSPACE),
+            (
+                "app/package.gcsl",
+                "import fs\n\
+                 #[hermetic] fn placed(data: File) -> Dir { fs.compose_dir({\"data.txt\" = data}) }\n\
+                 def package dev.example.data() {\n\
+                 \x20   version = \"1.0\"\n\
+                 \x20   files = {\"share\" = placed(file(\"data.txt\"))}\n\
+                 }\n",
+            ),
+            ("app/data.txt", "data\n"),
+        ],
+    );
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "one"]);
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    // Its sources recorded, so that the release checks them too.
+    let recorded = pekit(&ws, cache.path(), &["sources", "--strict"]);
+    assert!(recorded.status.success(), "{:?}", shown(&recorded));
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "sources"]);
+    let trace = dir.path().join("trace.json");
+    let traced = format!("--trace={}", trace.display());
+    let released = pekit(
+        &ws,
+        cache.path(),
+        &["release", "dev.example.data", &to, &traced],
+    );
+    assert!(released.status.success(), "{:?}", shown(&released));
+    let trace: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
+    let events = trace["traceEvents"].as_array().unwrap();
+    let named = |prefix: &str, phase: &str| {
+        events
+            .iter()
+            .filter(|event| {
+                event["ph"] == phase
+                    && event["name"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with(prefix))
+            })
+            .count()
+    };
+    // Found in the store, as `sources` built it, and run once more by the
+    // reproducibility check; the sources' check and the publishing find
+    // it in the store.
+    assert_eq!(named("placed/", "b"), 1, "{trace:#}");
+    // One trace of every build: the build, its check, the sources' build
+    // and the publishing.
+    assert_eq!(named("placed/", "i"), 3, "{trace:#}");
+    let published = store.path().join("dev.example.data-1.0/share/data.txt");
+    assert_eq!(fs::read_to_string(published).unwrap(), "data\n");
+}
+
+#[test]
 fn a_release_needs_a_commit() {
     if !has_git() {
         skip("no `git`");
@@ -236,4 +304,32 @@ fn a_release_needs_a_commit() {
         "{:?}",
         shown(&released)
     );
+    // Without a commit, it says so.
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let released = pekit(dir.path(), cache.path(), &["release", "x", "--to=/nowhere"]);
+    assert!(
+        shown(&released).1.contains("and there is none yet"),
+        "{:?}",
+        shown(&released)
+    );
+}
+
+#[test]
+fn a_release_shows_why_git_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &[("workspace.gcsl", "")]);
+    let cache = tempfile::tempdir().unwrap();
+    // No git to run: that, not a missing repository.
+    let released = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["release", "x", "--to=/nowhere"])
+        .current_dir(dir.path())
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
+        .env("PATH", cache.path())
+        .output()
+        .unwrap();
+    let (_, err) = shown(&released);
+    assert!(!released.status.success());
+    assert!(err.contains("cannot run `git`"), "{err}");
 }

@@ -100,6 +100,29 @@ fn a_store_another_process_has_is_not_evicted() {
 }
 
 #[test]
+fn a_store_over_its_limit_that_another_process_has_says_so() {
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(&state.path().join("store")).unwrap();
+    let other = Store::open(&state.path().join("store")).unwrap();
+    ledger(state.path(), 3 << 30, 0);
+    // Nothing is evicted, as another has the store, and it says why.
+    let skipped = pekit::evict::evict(&store, &store.used(), 2 << 30).unwrap_err();
+    assert!(
+        skipped
+            .to_string()
+            .starts_with("it holds 3.0 GiB, over its limit of 2.0 GiB, and nothing was evicted"),
+        "{skipped}"
+    );
+    // Within its limit, it is no failure.
+    assert!(
+        pekit::evict::evict(&store, &store.used(), 4 << 30)
+            .unwrap()
+            .is_none()
+    );
+    drop(other);
+}
+
+#[test]
 fn a_scratch_directory_is_evicted_whole_unless_a_run_holds_it() {
     let dir = tempfile::tempdir().unwrap();
     write(

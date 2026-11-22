@@ -100,6 +100,32 @@ pub enum StoreError {
     },
 }
 
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Secret => write!(f, "the step's result holds a secret, which is never stored"),
+            Self::Unkept(path) => write!(
+                f,
+                "the step's result names `{path}`, which is not a file or directory it made"
+            ),
+            Self::NotData => write!(
+                f,
+                "the step's result holds a function or a step's future, which is no data a \
+                 store can keep"
+            ),
+            Self::Io { path, error } if path.is_empty() => {
+                write!(
+                    f,
+                    "a long string of the step's result can't be stored: {error}"
+                )
+            }
+            Self::Io { path, error } => write!(f, "`{path}` can't be stored: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
 /// Puts every file and directory `plain`, a step's result, names into
 /// `store`, from where `host` says each is on the host's file system, the
 /// tree mounted on each of the step's mount points, `mounted` by where it

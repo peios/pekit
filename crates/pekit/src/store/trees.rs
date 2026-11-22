@@ -278,15 +278,27 @@ impl Store {
     }
 
     /// Removes every materialised tree, as an eviction does before it
-    /// removes a blob.
+    /// removes a blob. They are moved into `tmp/` whole first, a rename being
+    /// atomic, so that a removal stopped part way, by a kill or an error,
+    /// never leaves a tree half there under its name, which a later build
+    /// would take as whole. What is left in `tmp/` is swept as anything left
+    /// there is ([`crate::sweep::sweep_stale`]).
     ///
     /// # Errors
     ///
-    /// That they cannot be removed.
+    /// That they cannot be moved.
     pub fn forget_materialised(&self) -> io::Result<()> {
-        match fs::remove_dir_all(self.trees_root()) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
+        let aside = self.temp_path();
+        if let Some(tmp) = aside.parent() {
+            fs::create_dir_all(tmp)?;
         }
+        match fs::rename(self.trees_root(), &aside) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        // Gone from where any build looks, whether or not it is removed now.
+        let _ = fs::remove_dir_all(&aside);
+        Ok(())
     }
 }

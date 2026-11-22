@@ -36,6 +36,12 @@ The trace has these rows:
   runs, and `keep` stores the files of its result.
 - **evaluation.** One span for each time a target's or a step's code ran.
 
+A command that builds more than once writes one trace of every build, on
+one timeline. `pekit release` builds, checks its sources and publishes, and
+`--check-reproducible` builds twice. pekit writes the file again as each
+build ends, so a command that stops part way still leaves the trace of the
+builds before it.
+
 The trace names programs, but never shows their arguments, so it holds no
 secrets.
 

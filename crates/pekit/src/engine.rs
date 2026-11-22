@@ -85,9 +85,7 @@ use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::pool::{Done, Pool, Ran, Work};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
-use crate::record::{
-    Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored,
-};
+use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
 use crate::remote::Remote;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::scratch::Scratch;
@@ -351,6 +349,11 @@ pub struct Settings {
     /// budget](crate::budget#the-budget)): none if this build's pool alone
     /// bounds them.
     pub budget: Option<Arc<Budget>>,
+    /// When the build's [events](crate::events#events) are timed from: when
+    /// it began, if none. A command of several builds, `pekit release`'s
+    /// say, times them all from its first, so that they fall on one
+    /// timeline.
+    pub epoch: Option<Instant>,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -831,7 +834,7 @@ fn new_run<'a>(
         pool: Pool::new(settings.jobs.max(1)),
         in_flight: HashMap::new(),
         events,
-        began: Instant::now(),
+        began: settings.epoch.unwrap_or_else(Instant::now),
         keychain,
         code_table,
         ran: 0,
@@ -3477,33 +3480,35 @@ impl Run<'_> {
     /// on the pool, and it is recorded once they are ([`Run::kept`]),
     /// unless it names a file that is not its own.
     fn succeeded(&mut self, id: NodeId, value: &Value) -> Result<(), BuildError> {
-        let plain = self
-            .loaded
-            .workspace
-            .to_plain(value)
-            .map_err(BuildError::Engine)?;
+        // What the step's own code gave fails it, and its targets, not the
+        // build: a result that is no data, or names another's files.
+        let Some(step) = self.steps.get(&id) else {
+            return Ok(());
+        };
+        let plain = self.loaded.workspace.to_plain(value).and_then(|plain| {
+            match foreign_file(&plain, step) {
+                Some(path) => Err(format!(
+                    "the step's result names `{path}`, which is neither in its output \
+                     directory `{}` nor given to it: a step's files must be one or the \
+                     other, so that no other step's have its paths",
+                    step.sandbox.own()
+                )),
+                None => Ok(plain),
+            }
+        });
+        let plain = match plain {
+            Ok(plain) => plain,
+            Err(message) => {
+                self.unrecordable(id, message);
+                if let Some(step) = self.steps.remove(&id) {
+                    self.unstage(id, &step)?;
+                }
+                return Ok(());
+            }
+        };
         let Some(step) = self.steps.get_mut(&id) else {
             return Ok(());
         };
-        if let Some(path) = foreign_file(&plain, step) {
-            let message = format!(
-                "the step's result names `{path}`, which is neither in its output directory \
-                 `{}` nor given to it: a step's files must be one or the other, so that no \
-                 other step's have its paths",
-                step.sandbox.own()
-            );
-            self.graph
-                .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
-            let name = self.step_name(id);
-            self.emit(EventKind::Failed {
-                step: name,
-                retrying: false,
-            });
-            if let Some(step) = self.steps.remove(&id) {
-                self.unstage(id, &step)?;
-            }
-            return Ok(());
-        }
         step.phase = Phase::Keeping;
         step.result = Some(value.clone());
         let work = Work::Keep {
@@ -3551,16 +3556,14 @@ impl Run<'_> {
             Err(StoreError::Io { path, error }) => {
                 let message =
                     format!("the step's result names `{path}`, which it did not make: {error}");
-                self.graph
-                    .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
-                let step = self.step_name(id);
-                self.emit(EventKind::Failed {
-                    step,
-                    retrying: false,
-                });
+                self.unrecordable(id, message);
                 return Ok(());
             }
-            Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
+            Err(error @ (StoreError::Unkept(_) | StoreError::NotData)) => {
+                self.unrecordable(id, error.to_string());
+                return Ok(());
+            }
+            Err(other) => return Err(self.store_failed(id, &other)),
         };
         for (path, entry) in &kept {
             self.outputs.insert(path.clone(), *entry);
@@ -3572,7 +3575,12 @@ impl Run<'_> {
             Ok(result) => self.keep_record(id, step, receipt, result)?,
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
-            Err(other) => return Err(BuildError::Engine(format!("{other:?}"))),
+            // What the step's own code gave fails it, not the build.
+            Err(error @ (StoreError::Unkept(_) | StoreError::NotData)) => {
+                self.unrecordable(id, error.to_string());
+                return Ok(());
+            }
+            Err(other) => return Err(self.store_failed(id, &other)),
         }
         if step.failed_once {
             let name = self
@@ -3588,6 +3596,27 @@ impl Run<'_> {
         let step = self.step_name(id);
         self.emit(EventKind::Finished { step });
         Ok(())
+    }
+
+    /// Fails the step `id`, whose result can't be recorded, as `message`
+    /// says: its failure is its targets', not the build's.
+    fn unrecordable(&mut self, id: NodeId, message: String) {
+        self.graph
+            .resolve(id, Err(Diagnostic::error(message, Span::new(0, 0))));
+        let step = self.step_name(id);
+        self.emit(EventKind::Failed {
+            step,
+            retrying: false,
+        });
+    }
+
+    /// The build's error for the step `id`, whose result the store could not
+    /// take, `error`: of the store, not of the step's code.
+    fn store_failed(&self, id: NodeId, error: &StoreError) -> BuildError {
+        BuildError::Engine(format!(
+            "cannot record step `{}`: {error}",
+            self.step_name(id)
+        ))
     }
 
     /// Records `result`, what the step `step`, the node `id`, gave, by its

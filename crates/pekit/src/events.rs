@@ -11,7 +11,8 @@
 //! once the result is given. The
 //! terminal's display and the Chrome trace (`--trace`) are made from them,
 //! and so will the web view be. Each is stamped with its time since the
-//! build began.
+//! build began, or since the epoch its settings give, as a command of
+//! several builds gives them all its first's.
 //!
 //! An event never holds a secret's value. It names a step by its name and an
 //! effect by its built-in and the program it runs, never the program's other
@@ -28,7 +29,7 @@ use gcsl::eval::plain::Plain;
 /// Something a build tells (see [Events](#events)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
-    /// When, since the build began.
+    /// When, since the build began, or the epoch its settings give.
     pub at: Duration,
     /// What.
     pub kind: EventKind,

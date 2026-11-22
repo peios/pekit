@@ -10,7 +10,8 @@
 //! program run a span on the row of the pool's thread that ran it, named by
 //! what it ran and labelled with its step, as is each staging of a step's
 //! sandbox, `stage`, and keeping of its result's files, `keep`. Times are in microseconds since
-//! the build began.
+//! the command's first build began: a command of several builds, `pekit release`'s or
+//! `--check-reproducible`'s say, writes one trace of them all, on one timeline.
 
 use serde_json::{Value, json};
 

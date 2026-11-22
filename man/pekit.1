@@ -430,6 +430,12 @@ Write a trace of the build to
 .IR FILE ,
 in the Trace Event Format: a span for each attempt of each step, each program, each staging and keeping of a step's files, and each run of a target's or a step's code.
 The trace names programs but not their arguments.
+A command that builds more than once, such as
+.B release
+or a build with
+.BR \-\-check\-reproducible ,
+writes one trace of all its builds, on one timeline.
+The file is written again as each build ends, so a command that stops part way leaves the trace of the builds before.
 .TP
 .BI \-\-kind " KIND"
 For
@@ -455,6 +461,10 @@ For
 .B clean
 only: also remove the store, its scratch directories, and the directories steps are staged in, so that every step runs again.
 The state directory is never removed.
+Nothing is removed while another
+.B pekit
+process has the store open.
+The store's lock file stays.
 .TP
 .BR \-h ", " \-\-help
 Print help, for
@@ -511,10 +521,11 @@ or
 in powers of 1000.
 .B 0
 is no limit.
-The default is 50 GiB.
+The default is 100 GiB.
 When a build ends with the store larger, and no other
 .B pekit
 process has the store open, the store is evicted to nine tenths of the limit, cheapest to make again for its size first.
+If another process has it open, nothing is evicted, and a store over its limit is warned of.
 A value that is no size fails every command that builds.
 .TP
 .B PEKIT_STATE_DIR
