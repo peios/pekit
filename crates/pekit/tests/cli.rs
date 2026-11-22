@@ -1,6 +1,7 @@
 //! Tests of the `pekit` command, run as someone runs it.
 
 mod cache;
+mod elsewhere;
 mod skipping;
 
 use std::fs;
@@ -91,16 +92,13 @@ fn a_target_is_built_and_then_found_in_the_store() {
 
 #[test]
 fn an_output_directory_on_another_file_system_than_the_store_is_warned_of() {
-    use std::os::unix::fs::MetadataExt as _;
-    // The workspace beside the test's build, the store in the temporary
-    // directory: two file systems, where the machine has them.
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    // The store in the temporary directory, the workspace on another file
+    // system, where the machine has one.
     let cache = tempfile::tempdir().unwrap();
-    let device = |path: &Path| fs::metadata(path).unwrap().dev();
-    if device(dir.path()) == device(cache.path()) {
-        skip("a temporary directory on another file system than the build's");
+    let Some(dir) = elsewhere::elsewhere(cache.path()) else {
+        skip("a place to write on another file system than the temporary directory's");
         return;
-    }
+    };
     // A step whose result is two files.
     write(
         dir.path(),
