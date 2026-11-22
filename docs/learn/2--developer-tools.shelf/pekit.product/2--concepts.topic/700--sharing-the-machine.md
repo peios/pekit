@@ -112,13 +112,12 @@ memory while it evaluates a target's code, before and between its steps.
 The code of a large target, such as a Rust package with hundreds of crates,
 can need a few hundred megabytes while it runs.
 
-pekit evaluates at most a few targets at once, by default twice `--jobs` and
-at least 8, and starts the next as one finishes. A target stops counting
-once its code has run to the end and it waits only for its steps, so its
-steps still run alongside the next targets' code. A build of hundreds of
-targets then needs the memory of a few at once rather than of all of them,
-and takes about as long, since pekit evaluates code on one thread either
-way.
+pekit evaluates at most a few targets at once, by default as many as `--jobs`
+and at least 8, and starts the next as one finishes. A target stops counting
+once its code has run to the end and it waits only for its steps, so its steps
+still run alongside the next targets' code. A build of hundreds of targets
+then needs the memory of a few at once rather than of all of them, and takes
+about as long, since pekit evaluates code on one thread either way.
 
 To change the limit, give `--evaluating` or set `PEKIT_EVALUATING`:
 
