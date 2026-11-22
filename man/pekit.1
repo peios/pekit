@@ -517,10 +517,11 @@ or
 in powers of 1000.
 .B 0
 is no limit.
-The default is 50 GiB.
+The default is 100 GiB.
 When a build ends with the store larger, and no other
 .B pekit
 process has the store open, the store is evicted to nine tenths of the limit, cheapest to make again for its size first.
+If another process has it open, nothing is evicted, and a store over its limit is warned of.
 A value that is no size fails every command that builds.
 .TP
 .B PEKIT_STATE_DIR

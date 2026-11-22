@@ -536,8 +536,6 @@ fn build_command(args: &BuildArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         }
     };
     let counts = steps_counted(&outcomes);
-    warn_of_eviction(&outcomes, terminal);
-    warn_of_remote(&outcomes, terminal);
     let mut failed = false;
     for (target, outcome) in targets.iter().zip(&outcomes.targets) {
         match outcome {
@@ -1368,8 +1366,6 @@ fn package_command(
         }
     }
     let _ = writeln!(terminal.out, "{}", steps_counted(&outcomes));
-    warn_of_eviction(&outcomes, terminal);
-    warn_of_remote(&outcomes, terminal);
     if failed {
         ExitCode::FAILURE
     } else {
@@ -1680,12 +1676,8 @@ fn published_strictly(
             packages.len()
         );
         let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
-        warn_of_eviction(&packed, terminal);
-        warn_of_remote(&packed, terminal);
         return Ok(None);
     }
-    warn_of_eviction(&packed, terminal);
-    warn_of_remote(&packed, terminal);
     if !sources_recorded((loaded, packages), settings, shared, terminal) {
         let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
         return Ok(None);
@@ -1818,10 +1810,23 @@ fn quoted(names: &[&str]) -> String {
 /// if the eviction as `outcomes`' build ended failed: which fails no build.
 fn warn_of_eviction(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     if let Some(Err(message)) = &outcomes.evicted {
-        let _ = writeln!(
-            terminal.err,
-            "warning: the store could not be kept within `PEKIT_CACHE_LIMIT`: {message}"
+        warn_once(
+            terminal,
+            &format!("the store could not be kept within `PEKIT_CACHE_LIMIT`: {message}"),
         );
+    }
+}
+
+/// The warnings the command has shown, each once however many of its builds
+/// give it: `pekit sources` builds each recipe apart, say.
+static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Shows `warning` on `terminal`, unless the command has shown it already.
+fn warn_once(terminal: &mut Terminal<'_>, warning: &str) {
+    let mut warned = WARNED.lock().unwrap_or_else(PoisonError::into_inner);
+    if !warned.iter().any(|shown| shown == warning) {
+        let _ = writeln!(terminal.err, "warning: {warning}");
+        warned.push(warning.to_owned());
     }
 }
 
@@ -1846,9 +1851,9 @@ fn steps_counted(outcomes: &Outcomes) -> String {
 /// not in `outcomes`' build: which fails no build, its steps run here.
 fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     if let Some(message) = &outcomes.remote_failed {
-        let _ = writeln!(
-            terminal.err,
-            "warning: {message}; the build went on without the remote cache"
+        warn_once(
+            terminal,
+            &format!("{message}; the build went on without the remote cache"),
         );
     }
 }
@@ -2098,6 +2103,8 @@ fn build_targets(
     }
     *COMMAND_TRACE.lock().unwrap_or_else(PoisonError::into_inner) = Some((trace, epoch));
     let outcomes = outcomes?;
+    warn_of_eviction(&outcomes, terminal);
+    warn_of_remote(&outcomes, terminal);
     for name in &outcomes.flaky {
         let _ = writeln!(
             terminal.err,

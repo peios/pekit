@@ -31,7 +31,8 @@ When a build ends with the store over its limit, pekit removes what is
 cheapest to make again until the store is under nine tenths of the limit.
 [Reuse and the Store](~pekit/reuse-and-the-store) explains the order. An
 eviction waits until no other pekit process is using the store, so a build
-that runs while another is running leaves it to a later build.
+that runs while another is running leaves it to a later build. If the store
+is over its limit then, pekit warns that nothing was evicted.
 
 ## Move the store
 

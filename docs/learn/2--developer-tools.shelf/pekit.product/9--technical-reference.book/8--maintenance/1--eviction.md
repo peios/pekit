@@ -83,3 +83,8 @@ failure:
 ```text
 warning: the store could not be kept within `PEKIT_CACHE_LIMIT`: MESSAGE
 ```
+
+If another process has the store open and the ledger says the store is over
+its limit, the build says so in the same warning, with the store's size and
+its limit, rather than evicting nothing silently. A command shows each
+warning once, however many builds it runs.
