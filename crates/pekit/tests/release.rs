@@ -304,4 +304,32 @@ fn a_release_needs_a_commit() {
         "{:?}",
         shown(&released)
     );
+    // Without a commit, it says so.
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let released = pekit(dir.path(), cache.path(), &["release", "x", "--to=/nowhere"]);
+    assert!(
+        shown(&released).1.contains("and there is none yet"),
+        "{:?}",
+        shown(&released)
+    );
+}
+
+#[test]
+fn a_release_shows_why_git_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &[("workspace.gcsl", "")]);
+    let cache = tempfile::tempdir().unwrap();
+    // No git to run: that, not a missing repository.
+    let released = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["release", "x", "--to=/nowhere"])
+        .current_dir(dir.path())
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
+        .env("PATH", cache.path())
+        .output()
+        .unwrap();
+    let (_, err) = shown(&released);
+    assert!(!released.status.success());
+    assert!(err.contains("cannot run `git`"), "{err}");
 }
