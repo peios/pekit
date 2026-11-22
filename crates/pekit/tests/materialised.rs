@@ -99,3 +99,32 @@ fn materialised_trees_are_forgotten_whole() {
     // Made again when it is next asked for.
     assert!(store.is_materialised(&digest, &store.materialised(&digest, &[]).unwrap()));
 }
+
+#[test]
+fn a_removal_of_materialised_trees_stopped_part_way_leaves_none_half_there() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (store, dir) = store();
+    let (digest, _) = tree(&store, dir.path());
+    let at = store.materialised(&digest, &[]).unwrap();
+    // A directory in the tree that cannot be emptied stops a removal part
+    // way, as a kill or an I/O error would.
+    let stuck = at.join("stuck");
+    fs::create_dir(&stuck).unwrap();
+    fs::write(stuck.join("x"), "").unwrap();
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+    store.forget_materialised().unwrap();
+    assert!(!store.trees_root().exists());
+    // Asked for again, the tree is made whole, not found half removed.
+    let again = store.materialised(&digest, &[]).unwrap();
+    assert!(store.is_materialised(&digest, &again));
+    assert!(again.join("a").exists() && !again.join("stuck").exists());
+    // What could not be removed waits in `tmp/` for a sweep.
+    for entry in fs::read_dir(store.root().join("tmp")).unwrap() {
+        let left = entry.unwrap().path();
+        let _ = fs::set_permissions(
+            left.join(digest.hex()).join("stuck"),
+            fs::Permissions::from_mode(0o755),
+        );
+        fs::remove_dir_all(left).unwrap();
+    }
+}
