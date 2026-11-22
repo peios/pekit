@@ -546,6 +546,12 @@ fn clean_removes_the_outputs_and_with_cache_the_store() {
     // store's lock, which another pekit may be waiting on.
     let cleaned = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
     assert!(cleaned.status.success());
+    let (out, _) = printed(&cleaned);
+    let store = cache.path().join("store");
+    assert!(
+        out.contains(&format!("emptied {}\n", store.display())),
+        "{out}"
+    );
     let left: Vec<_> = fs::read_dir(cache.path().join("store"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name())

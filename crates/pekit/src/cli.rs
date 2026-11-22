@@ -1771,14 +1771,14 @@ fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
         }
-        let removed = if held.is_some() && path.join(STORE_LOCK).exists() {
-            emptied_but_lock(&path)
+        let (removed, done) = if held.is_some() && path.join(STORE_LOCK).exists() {
+            (emptied_but_lock(&path), "emptied")
         } else {
-            remove_tree(&path)
+            (remove_tree(&path), "removed")
         };
         match removed {
             Ok(()) => {
-                let _ = writeln!(terminal.out, "removed {}", path.display());
+                let _ = writeln!(terminal.out, "{done} {}", path.display());
             }
             Err(error) => {
                 failed = true;
