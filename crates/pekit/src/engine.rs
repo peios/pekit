@@ -85,9 +85,7 @@ use crate::platform::{ExecutionPlatform, HOST_PLATFORM, PLATFORM};
 use crate::pool::{Done, Pool, Ran, Work};
 use crate::query::{StepDeps, TargetDeps, in_workspace};
 use crate::receipt::{IdentityOf, ReceiptOf, identity, receipt};
-use crate::record::{
-    Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored,
-};
+use crate::record::{Kept, Manifest, StepRecord, StoreError, Stored, differences, manifest_key, stored};
 use crate::remote::Remote;
 use crate::sandbox::{HostTools, HostView, OUTPUTS, Pending, StepSandbox, WORKSPACE, under};
 use crate::scratch::Scratch;

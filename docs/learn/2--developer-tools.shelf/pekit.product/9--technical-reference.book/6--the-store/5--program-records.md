@@ -48,8 +48,8 @@ store. A tree's digest leaves out modification times and modes other than
 the executable bit, so the record also keeps a blob of them: each file's,
 directory's and symbolic link's modification time, and each file's and
 directory's permission bits, by path. A sealed composition and a mount
-point are left out of it. Hashing the trees again after each program is cheap: the step's
-sandbox keeps a stamp of each file, as [Blobs and
+point are left out of it. Hashing the trees again after each program is
+cheap: the step's sandbox keeps a stamp of each file, as [Blobs and
 Trees](~pekit/blobs-and-trees) describes, and reads again only a file
 whose stamp changed.
 
