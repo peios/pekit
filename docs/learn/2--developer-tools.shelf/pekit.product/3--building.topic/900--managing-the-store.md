@@ -78,6 +78,11 @@ next build runs every step again:
 pekit clean --cache
 ```
 
+It removes nothing while another pekit process has the store open, since
+that process would lose the files it is using. Run it once no other build
+is running. The store's lock file stays, so a pekit that was waiting for the
+store finds it empty.
+
 Neither removes pekit's state directory, which holds the key that
 identifies this machine's secrets. See [Using Secrets](~pekit/using-secrets).
 

@@ -461,6 +461,10 @@ For
 .B clean
 only: also remove the store, its scratch directories, and the directories steps are staged in, so that every step runs again.
 The state directory is never removed.
+Nothing is removed while another
+.B pekit
+process has the store open.
+The store's lock file stays.
 .TP
 .BR \-h ", " \-\-help
 Print help, for

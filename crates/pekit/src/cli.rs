@@ -1752,16 +1752,31 @@ fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
         return ExitCode::FAILURE;
     };
     let mut doomed = vec![root.join("pekit-out")];
+    // Held until the store is emptied, so that no other pekit has it.
+    let mut held = None;
     if args.cache {
         let cache = cache_dir();
-        doomed.extend([cache.join("store"), cache.join("scratch")]);
+        let store = cache.join("store");
+        match held_alone(&store) {
+            Ok(alone) => held = alone,
+            Err(message) => {
+                let _ = writeln!(terminal.err, "error: {message}");
+                return ExitCode::FAILURE;
+            }
+        }
+        doomed.extend([store, cache.join("scratch")]);
     }
     let mut failed = false;
     for path in doomed {
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
         }
-        match remove_tree(&path) {
+        let removed = if held.is_some() && path.join(STORE_LOCK).exists() {
+            emptied_but_lock(&path)
+        } else {
+            remove_tree(&path)
+        };
+        match removed {
             Ok(()) => {
                 let _ = writeln!(terminal.out, "removed {}", path.display());
             }
@@ -1780,6 +1795,58 @@ fn clean_command(args: &CleanArgs, cwd: &Path, terminal: &mut Terminal<'_>) -> E
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The file in a store's directory that every pekit with the store open
+/// holds a lock on (see [Eviction](crate::evict#eviction)).
+const STORE_LOCK: &str = "lock";
+
+/// The lock of the store at `store`, held exclusively, if it has one, so
+/// that no other pekit has it open while it is emptied.
+///
+/// # Errors
+///
+/// That another pekit has it open, or the lock can't be taken.
+fn held_alone(store: &Path) -> Result<Option<std::fs::File>, String> {
+    let lock = match std::fs::File::options()
+        .write(true)
+        .open(store.join(STORE_LOCK))
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot open the store's lock: {error}")),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
+            "another pekit has the store, `{}`, open, so nothing was removed: clean it once \
+             no other pekit is running",
+            store.display()
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!("cannot lock the store: {error}")),
+    }
+}
+
+/// Removes everything in the store's directory `store` but its lock, which
+/// stays: a pekit waiting on the lock to open the store then opens it empty,
+/// rather than with a lock of its own that no other holds.
+///
+/// # Errors
+///
+/// That something in it can't be removed.
+fn emptied_but_lock(store: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(store)? {
+        let entry = entry?;
+        if entry.file_name() == STORE_LOCK {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            remove_tree(&entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether the test whose result is `result`, a `TestResult`, passed, and

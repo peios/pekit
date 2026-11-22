@@ -499,10 +499,27 @@ fn clean_removes_the_outputs_and_with_cache_the_store() {
             .0
             .starts_with("built app/hello: 0 steps run, 1 found")
     );
-    // And the store: it runs again. The state directory stays.
+    // Not the store while another pekit has it open.
+    let other = pekit::store::Store::open(&cache.path().join("store")).unwrap();
+    let refused = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
+    let (out, err) = printed(&refused);
+    assert!(!refused.status.success());
+    assert_eq!(out, "");
+    assert!(
+        err.starts_with("error: another pekit has the store"),
+        "{err}"
+    );
+    assert!(cache.path().join("store/cas").exists());
+    drop(other);
+    // And the store: it runs again. The state directory stays, and the
+    // store's lock, which another pekit may be waiting on.
     let cleaned = pekit(dir.path(), cache.path(), &["clean", "--cache"]);
     assert!(cleaned.status.success());
-    assert!(!cache.path().join("store").exists());
+    let left: Vec<_> = fs::read_dir(cache.path().join("store"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["lock"]);
     assert!(cache.path().join("state").exists());
     let again = pekit(dir.path(), cache.path(), &["build", "hello"]);
     assert!(
