@@ -1030,7 +1030,9 @@ fn released(
             return ExitCode::FAILURE;
         }
     };
-    if !sources_recorded((&mut loaded, &packages), &settings, &checked, terminal)
+    // Checked already by the build: the sources' build finds its steps in the
+    // store, as the publishing does, rather than running each again.
+    if !sources_recorded((&mut loaded, &packages), &settings, &publishing, terminal)
         || !publish_release(
             (&mut loaded, &packages),
             (&tag, &args.to),
