@@ -128,6 +128,37 @@ fn an_output_directory_on_another_file_system_than_the_store_is_warned_of() {
 }
 
 #[test]
+fn a_step_whose_result_is_no_data_fails_its_target_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "#[hermetic] fn maker() -> {f: fn() -> Int} { f = fn() -> Int { 1 } }\n\
+                 #[hermetic] fn fine() -> String { = \"ok\" }\n\
+                 def build bad() { out = maker() }\n\
+                 def build good() { out = fine() }\n",
+            ),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let built = pekit(
+        &dir.path().join("app"),
+        cache.path(),
+        &["build", "bad", "good"],
+    );
+    let (out, err) = printed(&built);
+    assert!(!built.status.success());
+    assert!(
+        err.contains("a step's result must be plain data: it holds a function"),
+        "{err}"
+    );
+    assert!(out.contains("built app/good"), "{out}");
+}
+
+#[test]
 fn a_step_one_machine_uploads_another_finds_in_the_remote_cache() {
     let served = cache::serve(1 << 20);
     let dir = workspace();
