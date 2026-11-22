@@ -148,19 +148,17 @@ fn evaluations(trace: &Path) -> Vec<String> {
 #[test]
 fn at_most_as_many_targets_as_evaluating_says_are_evaluated_at_once() {
     let dir = tempfile::tempdir().unwrap();
-    let mut build = String::from(
-        "#[hermetic] fn work(n: Int) -> File {\n\
-         \x20   let r = exec([\"sh\", \"-c\", \"echo {n} > out\"])\n\
-         \x20   working_dir().file(\"out\")\n\
-         }\n",
-    );
-    for n in 1..=3 {
-        // Its code waits for its step's result, then ends.
-        build.push_str(&format!("def build t{n}() {{ out = work({n}).read() }}\n"));
-    }
+    // Each target's code waits for its step's result, then ends.
+    let build = "#[hermetic] fn work(n: Int) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"echo {n} > out\"])\n\
+                 \x20   working_dir().file(\"out\")\n\
+                 }\n\
+                 def build t1() { out = work(1).read() }\n\
+                 def build t2() { out = work(2).read() }\n\
+                 def build t3() { out = work(3).read() }\n";
     write(
         dir.path(),
-        &[("workspace.gcsl", ""), ("app/build.gcsl", &build)],
+        &[("workspace.gcsl", ""), ("app/build.gcsl", build)],
     );
     let app = dir.path().join("app");
     let trace = dir.path().join("trace.json");
