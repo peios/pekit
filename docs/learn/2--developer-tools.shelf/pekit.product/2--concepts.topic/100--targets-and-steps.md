@@ -85,6 +85,19 @@ finished. The target's code ran once, start to finish, before any of them.
 In a terminal, pekit shows a line with the steps running and how many have
 finished while the build goes, and clears it when the build ends.
 
+When its output goes to a file or a service's journal instead, pekit keeps
+quiet for a build that ends within a minute. After a minute, it writes a
+line every minute with how many targets have ended, how many steps ran or
+were found, which steps are running, and how much memory pekit is using:
+
+```text
+[00:12:00] 23 of 30 targets ended; 812 steps run, 4410 found; running 2: compile/9927fb8abbee4a05, link/3f1c0a9e2b7d4c68; pekit uses 3.2 GiB
+```
+
+From then on it also writes a line as each target ends, `ended` or
+`FAILED`. Set `PEKIT_PROGRESS_SECS` to change the minute, or to `0` for no
+lines.
+
 ## Several targets are one build
 
 `pekit build app tool` builds both targets as one build. A step that both

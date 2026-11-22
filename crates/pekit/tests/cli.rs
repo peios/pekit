@@ -211,6 +211,58 @@ fn at_most_as_many_targets_as_evaluating_says_are_evaluated_at_once() {
 }
 
 #[test]
+fn a_long_build_into_a_log_shows_where_it_is_and_each_target_s_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let build = "#[hermetic] fn slow(n: Int) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"sleep {n}; echo {n} > out\"])\n\
+                 \x20   working_dir().file(\"out\")\n\
+                 }\n\
+                 def build quick() { out = slow(0) }\n\
+                 def build later() { out = slow(4) }\n";
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", build)],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let logged = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["build", "quick", "later"])
+        .current_dir(dir.path().join("app"))
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
+        .env("PEKIT_PROGRESS_SECS", "1")
+        .output()
+        .unwrap();
+    let (_, err) = printed(&logged);
+    assert!(logged.status.success(), "{err}");
+    // Where the build is, each second, once a second has passed: `quick`
+    // has ended, and `later`'s step runs.
+    let status = err
+        .lines()
+        .find(|line| line.contains("1 of 2 targets ended"))
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(status.starts_with("[00:00:0"), "{status}");
+    assert!(status.contains("; running 1: slow/"), "{status}");
+    assert!(status.contains("; pekit uses "), "{status}");
+    // And `later`'s end, once lines are shown.
+    assert!(
+        err.lines().any(|line| line.ends_with(" ended app/later")),
+        "{err}"
+    );
+    // A build that ends within the period shows none.
+    let again = pekit(
+        &dir.path().join("app"),
+        cache.path(),
+        &["build", "quick", "later"],
+    );
+    assert!(
+        !printed(&again).1.contains("targets ended"),
+        "{:?}",
+        printed(&again)
+    );
+}
+
+#[test]
 fn a_step_whose_result_is_no_data_fails_its_target_alone() {
     let dir = tempfile::tempdir().unwrap();
     write(

@@ -859,6 +859,7 @@ fn new_run<'a>(
         remote_failed: None,
         uploads: 0,
         admitted: 0,
+        told_ended: Vec::new(),
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -1488,6 +1489,8 @@ struct Run<'a> {
     /// How many of the roots, in order, may be evaluated (see
     /// [`Run::admit`]).
     admitted: usize,
+    /// Whether each root's end has been told, by its number among them.
+    told_ended: Vec<bool>,
 }
 
 /// The step that holds a name (see [`Run::claim_name`]).
@@ -1642,6 +1645,7 @@ impl Run<'_> {
             self.run_roots();
             self.name_new_steps();
             let demands = self.root_demands();
+            self.tell_ended();
             if self.roots.iter().all(|root| root.done.is_some()) {
                 return Ok(());
             }
@@ -1695,6 +1699,24 @@ impl Run<'_> {
                         .to_owned(),
                 ));
             }
+        }
+    }
+
+    /// Tells, of each root that is done, that it ended, once.
+    fn tell_ended(&mut self) {
+        self.told_ended.resize(self.roots.len(), false);
+        let mut ended = Vec::new();
+        for (root, told) in self.roots.iter().zip(&mut self.told_ended) {
+            if let (Some(done), false) = (&root.done, *told) {
+                *told = true;
+                ended.push(EventKind::TargetEnded {
+                    target: root.dir.clone(),
+                    failed: done.is_err(),
+                });
+            }
+        }
+        for kind in ended {
+            self.emit(kind);
         }
     }
 

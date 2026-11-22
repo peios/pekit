@@ -516,6 +516,15 @@ How many targets a build evaluates at once, as
 .B \-\-evaluating
 says, which overrides it.
 .TP
+.B PEKIT_PROGRESS_SECS
+When standard error is no terminal, how often a build that runs longer writes a line of its progress, in seconds:
+how many targets have ended, how many steps ran and were found, the steps running, and the memory
+.B pekit
+uses, then also a line as each target ends.
+The default is 60;
+.B 0
+writes none.
+.TP
 .B PEKIT_CACHE_LIMIT
 The size the store is kept within, a number of bytes followed by nothing,
 .BR B ,

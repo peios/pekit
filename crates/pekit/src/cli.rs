@@ -2177,6 +2177,10 @@ fn build_targets(
     let mut reports = Vec::new();
     let mut progress = Progress::default();
     let live = terminal.live;
+    let logged = (!live)
+        .then(|| LogProgress::start(epoch, targets.len()))
+        .flatten();
+    let log = logged.as_ref().map(LogProgress::state);
     let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
@@ -2187,11 +2191,21 @@ fn build_targets(
             if live {
                 progress.show(event, err);
             }
+            if let Some(log) = &log {
+                log.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .show(event);
+            }
         };
         let first = build_once((loaded, targets, doing), settings, &mut events);
         reports.extend(loaded.workspace.profile_report());
         match first {
             Ok(first) if shared.reuse.check_reproducible => {
+                if let Some(log) = &log {
+                    log.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .next_pass();
+                }
                 let again = Settings {
                     reuse: Reuse::Compare,
                     ..settings.clone()
@@ -2212,6 +2226,7 @@ fn build_targets(
     if live {
         progress.clear(terminal.err);
     }
+    drop(logged);
     if let Some(path) = &shared.gcsl_profile {
         for report in reports {
             profile.add_report(report);
@@ -2317,6 +2332,199 @@ impl Progress {
 /// How many characters of a progress line are shown, so that it fits on
 /// one line of a narrow terminal.
 const PROGRESS_WIDTH: usize = 79;
+
+/// How often a build's progress is shown when standard error is no
+/// terminal, unless `PEKIT_PROGRESS_SECS` says otherwise (see [`LogProgress`]).
+const LOG_PERIOD: Duration = Duration::from_secs(60);
+
+/// A build's progress as a log shows it, standard error being no terminal,
+/// a service's journal say: nothing for a build that ends within a period,
+/// `PEKIT_PROGRESS_SECS` seconds, 60 by default, `0` for never, since one
+/// that short needs none; after it, a line of where the build is each
+/// period, and a line as each target ends. A thread of its own shows the
+/// periodic line, so that a step that runs for an hour still shows one.
+struct LogProgress {
+    /// What it shows.
+    state: Arc<Mutex<LogState>>,
+    /// What stops the thread.
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    /// The thread.
+    ticker: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Where a build is, as [`LogProgress`] shows it.
+#[derive(Debug)]
+struct LogState {
+    /// When the command's first build began, which each line is timed from.
+    epoch: Instant,
+    /// How many targets the build has.
+    targets: usize,
+    /// How many have ended, and how many of those failed, in this pass.
+    ended: (usize, usize),
+    /// Whether this is the reproducibility check's second pass.
+    checking: bool,
+    /// How many steps ran, and how many were found in the store.
+    steps: (usize, usize),
+    /// The steps running, in the order they started.
+    running: Vec<String>,
+    /// Whether it has shown a line yet: it shows targets ending only after.
+    talking: bool,
+}
+
+impl LogProgress {
+    /// The log's progress of a build of `targets` targets, its lines timed
+    /// from `epoch`, if `PEKIT_PROGRESS_SECS` asks for any.
+    fn start(epoch: Instant, targets: usize) -> Option<Self> {
+        let period = match std::env::var("PEKIT_PROGRESS_SECS")
+            .ok()
+            .map(|secs| secs.trim().parse())
+        {
+            Some(Ok(0)) => return None,
+            Some(Ok(secs)) => Duration::from_secs(secs),
+            _ => LOG_PERIOD,
+        };
+        let state = Arc::new(Mutex::new(LogState {
+            epoch,
+            targets,
+            ended: (0, 0),
+            checking: false,
+            steps: (0, 0),
+            running: Vec::new(),
+            talking: false,
+        }));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let shown = Arc::clone(&state);
+        let ticker = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(period)
+            {
+                let mut state = shown.lock().unwrap_or_else(PoisonError::into_inner);
+                state.talking = true;
+                let line = state.status();
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
+        });
+        Some(Self {
+            state,
+            stop: Some(stop),
+            ticker: Some(ticker),
+        })
+    }
+
+    /// What it shows, which a build's events change.
+    fn state(&self) -> Arc<Mutex<LogState>> {
+        Arc::clone(&self.state)
+    }
+}
+
+impl Drop for LogProgress {
+    /// Stops its thread.
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.join();
+        }
+    }
+}
+
+impl LogState {
+    /// Takes in `event`, showing a target's end once it has shown a line.
+    fn show(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::Started { step, .. } => self.running.push(step.clone()),
+            EventKind::Finished { step } | EventKind::Failed { step, .. } => {
+                self.running.retain(|running| running != step);
+                if matches!(event.kind, EventKind::Finished { .. }) {
+                    self.steps.0 += 1;
+                }
+            }
+            EventKind::Cached { .. } => self.steps.1 += 1,
+            EventKind::TargetEnded { target, failed } => {
+                self.ended.0 += 1;
+                self.ended.1 += usize::from(*failed);
+                if self.talking {
+                    let how = if *failed { "FAILED" } else { "ended" };
+                    let line = format!("{} {how} {target}", self.stamp());
+                    let _ = writeln!(std::io::stderr(), "{line}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts the reproducibility check's pass, whose targets end again.
+    fn next_pass(&mut self) {
+        self.ended = (0, 0);
+        self.checking = true;
+    }
+
+    /// The time since the command's first build began, `[HH:MM:SS]`.
+    fn stamp(&self) -> String {
+        let secs = self.epoch.elapsed().as_secs();
+        format!(
+            "[{:02}:{:02}:{:02}]",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        )
+    }
+
+    /// The line of where the build is.
+    fn status(&self) -> String {
+        let (ended, failed) = self.ended;
+        let mut line = format!("{} {ended} of {} targets ended", self.stamp(), self.targets);
+        if failed > 0 {
+            let _ = write!(line, ", {failed} failed");
+        }
+        if self.checking {
+            line.push_str(" (checking reproducibility)");
+        }
+        let (ran, found) = self.steps;
+        let steps = if ran == 1 { "step" } else { "steps" };
+        let _ = write!(line, "; {ran} {steps} run, {found} found");
+        if !self.running.is_empty() {
+            let shown: Vec<&str> = self.running.iter().take(3).map(String::as_str).collect();
+            let _ = write!(
+                line,
+                "; running {}: {}",
+                self.running.len(),
+                shown.join(", ")
+            );
+            if self.running.len() > shown.len() {
+                let _ = write!(line, " and {} more", self.running.len() - shown.len());
+            }
+        }
+        if let Some(rss) = own_rss() {
+            let _ = write!(line, "; pekit uses {}", shown_size(rss));
+        }
+        line
+    }
+}
+
+/// `bytes` as a size is shown: in MiB below a GiB, else in GiB to a tenth.
+fn shown_size(bytes: u64) -> String {
+    #[expect(clippy::cast_precision_loss, reason = "a size shown to a tenth")]
+    let bytes = bytes as f64;
+    let gib = f64::from(1u32 << 30);
+    if bytes < gib {
+        format!("{:.0} MiB", bytes / f64::from(1u32 << 20))
+    } else {
+        format!("{:.1} GiB", bytes / gib)
+    }
+}
+
+/// The bytes of memory this process has resident, from `/proc/self/status`.
+fn own_rss() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
+}
 
 /// The cache directory (see [Commands](#commands)).
 fn cache_dir() -> PathBuf {
