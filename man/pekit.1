@@ -326,6 +326,20 @@ Every build on the machine also shares one budget of programs and memory; see
 and
 .IR CONFIG/machine.conf .
 .TP
+.BI \-\-evaluating " N"
+Evaluate at most
+.I N
+targets at once,
+.B 0
+for every target named.
+A target is evaluating from when its code first runs until it ends, while it holds its working state; one that waits only for its steps no longer counts, and the next target starts.
+A build of many targets then needs the memory of a few of them, not of all.
+In place of
+.BR PEKIT_EVALUATING ;
+the default is twice
+.BR \-\-jobs ,
+and at least 8.
+.TP
 .B \-\-no\-dynamic
 Fail a target at the point it waits for a step's result.
 .TP
@@ -496,6 +510,11 @@ under
 .BR XDG_CACHE_HOME ,
 else
 .IR ~/.cache/pekit .
+.TP
+.B PEKIT_EVALUATING
+How many targets a build evaluates at once, as
+.B \-\-evaluating
+says, which overrides it.
 .TP
 .B PEKIT_CACHE_LIMIT
 The size the store is kept within, a number of bytes followed by nothing,

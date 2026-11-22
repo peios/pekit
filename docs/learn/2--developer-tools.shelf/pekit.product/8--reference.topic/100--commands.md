@@ -39,6 +39,7 @@ the same options for how they build:
 | Option | Does | Read |
 |---|---|---|
 | `--jobs` | Limits how many programs this build runs at once. | [Targets and Steps](~pekit/targets-and-steps), [Sharing the Machine](~pekit/sharing-the-machine) |
+| `--evaluating` | Limits how many targets this build evaluates at once. | [Sharing the Machine](~pekit/sharing-the-machine#memory-for-evaluating-targets) |
 | `--platform` | Builds for another platform. | [Building for Another Platform](~pekit/building-for-another-platform) |
 | `--profile` | Chooses the keychain's profile. | [Using Secrets](~pekit/using-secrets) |
 | `--rebuild` | Runs every step, reusing nothing from the store. | [Reuse and the Store](~pekit/reuse-and-the-store) |

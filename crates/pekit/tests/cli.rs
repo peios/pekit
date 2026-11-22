@@ -125,6 +125,93 @@ fn an_output_directory_on_another_file_system_than_the_store_is_warned_of() {
     assert_eq!(fs::read_to_string(out.join("b")).unwrap(), "same\n");
 }
 
+/// The targets whose code ran, by the trace at `trace`, each run's target
+/// in the order the runs began.
+fn evaluations(trace: &Path) -> Vec<String> {
+    let trace: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
+    let mut runs: Vec<(u64, String)> = trace["traceEvents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["cat"] == "evaluation" && event["args"]["step"] == false)
+        .map(|event| {
+            (
+                event["ts"].as_u64().unwrap(),
+                event["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    runs.sort();
+    runs.into_iter().map(|(_, name)| name).collect()
+}
+
+#[test]
+fn at_most_as_many_targets_as_evaluating_says_are_evaluated_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut build = String::from(
+        "#[hermetic] fn work(n: Int) -> File {\n\
+         \x20   let r = exec([\"sh\", \"-c\", \"echo {n} > out\"])\n\
+         \x20   working_dir().file(\"out\")\n\
+         }\n",
+    );
+    for n in 1..=3 {
+        // Its code waits for its step's result, then ends.
+        build.push_str(&format!("def build t{n}() {{ out = work({n}).read() }}\n"));
+    }
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", &build)],
+    );
+    let app = dir.path().join("app");
+    let trace = dir.path().join("trace.json");
+    let traced = format!("--trace={}", trace.display());
+    let cache = tempfile::tempdir().unwrap();
+    let one = pekit(
+        &app,
+        cache.path(),
+        &["build", "t1", "t2", "t3", "--evaluating", "1", &traced],
+    );
+    assert!(one.status.success(), "{:?}", printed(&one));
+    // One target's code ran to its end before the next's began.
+    let runs = evaluations(&trace);
+    let mut seen: Vec<&String> = Vec::new();
+    for run in &runs {
+        if seen.last() != Some(&run) {
+            assert!(!seen.contains(&run), "{runs:?}");
+            seen.push(run);
+        }
+    }
+    assert_eq!(seen.len(), 3, "{runs:?}");
+    // With no limit, each began before any ended.
+    let cache = tempfile::tempdir().unwrap();
+    let all = pekit(
+        &app,
+        cache.path(),
+        &["build", "t1", "t2", "t3", "--evaluating", "0", &traced],
+    );
+    assert!(all.status.success(), "{:?}", printed(&all));
+    let runs = evaluations(&trace);
+    assert_eq!(runs[..3], ["app/t1", "app/t2", "app/t3"], "{runs:?}");
+    // A setting that is no number is an error.
+    let wrong = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["build", "t1"])
+        .current_dir(&app)
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
+        .env("PEKIT_EVALUATING", "some")
+        .output()
+        .unwrap();
+    assert!(!wrong.status.success());
+    assert!(
+        printed(&wrong)
+            .1
+            .contains("`PEKIT_EVALUATING=some` is no number of targets"),
+        "{:?}",
+        printed(&wrong)
+    );
+}
+
 #[test]
 fn a_step_whose_result_is_no_data_fails_its_target_alone() {
     let dir = tempfile::tempdir().unwrap();

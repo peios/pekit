@@ -301,6 +301,11 @@ struct Shared {
     /// How many programs may run at once.
     #[arg(long, short)]
     jobs: Option<usize>,
+    /// How many targets may be evaluated at once, `0` for all: each holds
+    /// its working state while its code runs. In place of
+    /// `PEKIT_EVALUATING`; twice `--jobs`, and at least 8, by default.
+    #[arg(long, value_name = "N")]
+    evaluating: Option<usize>,
     /// Write a Chrome trace of the build to this file.
     #[arg(long, value_name = "FILE")]
     trace: Option<PathBuf>,
@@ -946,6 +951,7 @@ fn released(
 ) -> ExitCode {
     let shared = |check_reproducible| Shared {
         jobs: args.jobs,
+        evaluating: None,
         trace: args.trace.clone(),
         gcsl_profile: None,
         profile: "release".to_owned(),
@@ -1925,6 +1931,28 @@ fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     }
 }
 
+/// How many targets a build of `jobs` jobs evaluates at once: as `--evaluating`,
+/// `flag`, says, else as `PEKIT_EVALUATING`, `setting`, says, a number, `0`
+/// for all, else, unset or empty, twice `jobs` and at least 8 (see
+/// [Building](crate::engine#building)).
+///
+/// # Errors
+///
+/// That it is set to no number.
+fn evaluating_of(flag: Option<usize>, setting: Option<&str>, jobs: usize) -> Result<usize, String> {
+    if let Some(evaluating) = flag {
+        return Ok(evaluating);
+    }
+    match setting.map(str::trim).filter(|setting| !setting.is_empty()) {
+        None => Ok(jobs.saturating_mul(2).max(8)),
+        Some(setting) => setting.parse().map_err(|_| {
+            format!(
+                "`PEKIT_EVALUATING={setting}` is no number of targets: write one, or `0` for all"
+            )
+        }),
+    }
+}
+
 /// Warns on `terminal` if the output directory `outputs` is on another file
 /// system than the store `store`: an output can't be a link to its blob
 /// there, so each is copied, and copied again by every build, since only a
@@ -2014,13 +2042,19 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             })
         }
     };
+    let jobs = shared
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
+    let setting = std::env::var("PEKIT_EVALUATING").ok();
+    let evaluating = evaluating_of(shared.evaluating, setting.as_deref(), jobs)
+        .map_err(|message| writeln!(terminal.err, "error: {message}"))
+        .ok()?;
     Some(Settings {
         store: cache.join("store"),
         outputs: loaded.root.join("pekit-out"),
         scratch: cache.join("scratch"),
-        jobs: shared.jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-        }),
+        jobs,
+        evaluating,
         // A strict build's steps see nothing of the host, so their results
         // are those of any machine of the platform, and keyed apart from
         // a build's that borrowed its tools.
