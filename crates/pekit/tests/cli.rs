@@ -90,6 +90,44 @@ fn a_target_is_built_and_then_found_in_the_store() {
 }
 
 #[test]
+fn an_output_directory_on_another_file_system_than_the_store_is_warned_of() {
+    use std::os::unix::fs::MetadataExt as _;
+    // The workspace beside the test's build, the store in the temporary
+    // directory: two file systems, where the machine has them.
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let device = |path: &Path| fs::metadata(path).unwrap().dev();
+    if device(dir.path()) == device(cache.path()) {
+        skip("a temporary directory on another file system than the build's");
+        return;
+    }
+    // A step whose result is two files.
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                "#[hermetic] fn twice() -> Dir {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"mkdir out; echo same > out/a; echo same > out/b\"])\n\
+                 \x20   working_dir().dir(\"out\")\n\
+                 }\n\
+                 def build both() { out = twice() }\n",
+            ),
+        ],
+    );
+    let app = dir.path().join("app");
+    let built = pekit(&app, cache.path(), &["build", "both"]);
+    let (_, err) = printed(&built);
+    assert!(built.status.success(), "{err}");
+    let warning = "is on another file system than the store";
+    assert_eq!(err.matches(warning).count(), 1, "{err}");
+    let out = dir.path().join("pekit-out/app/both/twice/out");
+    assert_eq!(fs::read_to_string(out.join("a")).unwrap(), "same\n");
+    assert_eq!(fs::read_to_string(out.join("b")).unwrap(), "same\n");
+}
+
+#[test]
 fn a_step_one_machine_uploads_another_finds_in_the_remote_cache() {
     let served = cache::serve(1 << 20);
     let dir = workspace();

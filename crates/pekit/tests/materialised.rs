@@ -1,10 +1,13 @@
 //! Tests of the store's materialised trees.
 
+mod skipping;
+
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use pekit::store::{FileEntry, Store};
+use skipping::skip;
 
 /// A store in a new temporary directory, and the directory.
 fn store() -> (Store, tempfile::TempDir) {
@@ -127,4 +130,32 @@ fn a_removal_of_materialised_trees_stopped_part_way_leaves_none_half_there() {
         );
         fs::remove_dir_all(left).unwrap();
     }
+}
+
+#[test]
+fn no_copy_is_made_that_could_never_be_linked_on_another_file_system() {
+    use std::os::unix::fs::MetadataExt as _;
+    let (store, dir) = store();
+    // Beside the test's build: another file system than the temporary
+    // directory's, where the machine has two.
+    let other = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    if fs::metadata(other.path()).unwrap().dev() == fs::metadata(dir.path()).unwrap().dev() {
+        skip("a temporary directory on another file system than the build's");
+        return;
+    }
+    let (_, same) = tree(&store, dir.path());
+    let linked = store.link_copy(&same, 1, &other.path().join("b"));
+    assert_eq!(
+        linked.unwrap_err().kind(),
+        std::io::ErrorKind::CrossesDevices
+    );
+    let copies = fs::read_dir(store.root().join("cas"))
+        .unwrap()
+        .flat_map(|shard| fs::read_dir(shard.unwrap().path()).unwrap())
+        .filter(|blob| {
+            let name = blob.as_ref().unwrap().file_name();
+            name.to_string_lossy().contains(".r")
+        })
+        .count();
+    assert_eq!(copies, 0);
 }

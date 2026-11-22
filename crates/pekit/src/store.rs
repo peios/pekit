@@ -1027,7 +1027,12 @@ impl Store {
     /// cannot be made.
     pub fn link_copy(&self, entry: &FileEntry, copy: u32, at: &Path) -> io::Result<()> {
         let path = self.copy_path(entry, copy);
-        if fs::hard_link(&path, at).is_err() {
+        if let Err(error) = fs::hard_link(&path, at) {
+            // No copy is made that could never be linked there: on another
+            // file system, the caller copies the blob instead.
+            if error.kind() == io::ErrorKind::CrossesDevices || self.across_devices(at) {
+                return Err(io::Error::from(io::ErrorKind::CrossesDevices));
+            }
             let source = self.blob_of_mode(entry)?;
             let temp = self.temp_path();
             fs::copy(&source, &temp)?;
@@ -1044,6 +1049,16 @@ impl Store {
         }
         self.note_linked((entry, copy), &path);
         Ok(())
+    }
+
+    /// Whether `at`'s directory is on another file system than the store,
+    /// where no link to a blob can be made; `false` if either can't be told.
+    fn across_devices(&self, at: &Path) -> bool {
+        let device = |path: &Path| fs::metadata(path).ok().map(|meta| meta.dev());
+        match (at.parent().and_then(device), device(&self.root)) {
+            (Some(there), Some(store)) => there != store,
+            _ => false,
+        }
     }
 
     /// Where the copy numbered `copy` of the blob of `entry` is, or would be

@@ -1858,6 +1858,35 @@ fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
     }
 }
 
+/// Warns on `terminal` if the output directory `outputs` is on another file
+/// system than the store `store`: an output can't be a link to its blob
+/// there, so each is copied, and copied again by every build, since only a
+/// link is known to be up to date (see [Exposure](crate::exposure#exposure)).
+/// Each is told by its nearest directory that is there, through links.
+fn warn_of_file_systems(outputs: &Path, store: &Path, terminal: &mut Terminal<'_>) {
+    use std::os::unix::fs::MetadataExt as _;
+    let device = |path: &Path| {
+        path.ancestors()
+            .find_map(|dir| std::fs::metadata(dir).ok())
+            .map(|meta| meta.dev())
+    };
+    if let (Some(outputs_on), Some(store_on)) = (device(outputs), device(store))
+        && outputs_on != store_on
+    {
+        warn_once(
+            terminal,
+            &format!(
+                "`{}` is on another file system than the store, `{}`: every output is \
+                 copied out of the store rather than linked, and copied again by every \
+                 build. Put it on the store's file system; a link to a directory there \
+                 will do",
+                outputs.display(),
+                store.display()
+            ),
+        );
+    }
+}
+
 /// The settings a command builds `loaded`'s workspace with, as `shared`
 /// says: the host's snapshot, warned of on `terminal` if its packages
 /// cannot be identified. `None`, the error shown, for a `--platform` that
@@ -1885,6 +1914,11 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             return None;
         }
     };
+    warn_of_file_systems(
+        &loaded.root.join("pekit-out"),
+        &cache.join("store"),
+        terminal,
+    );
     let host = HostSnapshot::of_host();
     let execution = ExecutionPlatform::of_host();
     let strict = shared.allows.strict;
