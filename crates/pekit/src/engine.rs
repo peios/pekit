@@ -351,6 +351,11 @@ pub struct Settings {
     /// budget](crate::budget#the-budget)): none if this build's pool alone
     /// bounds them.
     pub budget: Option<Arc<Budget>>,
+    /// When the build's [events](crate::events#events) are timed from: when
+    /// it began, if none. A command of several builds, `pekit release`'s
+    /// say, times them all from its first, so that they fall on one
+    /// timeline.
+    pub epoch: Option<Instant>,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -831,7 +836,7 @@ fn new_run<'a>(
         pool: Pool::new(settings.jobs.max(1)),
         in_flight: HashMap::new(),
         events,
-        began: Instant::now(),
+        began: settings.epoch.unwrap_or_else(Instant::now),
         keychain,
         code_table,
         ran: 0,

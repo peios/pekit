@@ -47,8 +47,8 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, ExitCode, ExitStatus};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
@@ -1942,6 +1942,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         exposing: Exposing::AsNeeded,
         remote,
         budget: Some(budget),
+        epoch: None,
     })
 }
 
@@ -1999,9 +2000,16 @@ fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
     Ok(Arc::new(budget))
 }
 
+/// The trace of every build the command has run so far, and when its first
+/// began, which every build's events are timed from: each build adds to it
+/// and writes it whole, so that a command of several builds, `release`'s or
+/// `--check-reproducible`'s say, leaves one trace of them all, and a build
+/// that stops leaves those before it.
+static COMMAND_TRACE: Mutex<Option<(Trace, Instant)>> = Mutex::new(None);
+
 /// Builds `targets` of `loaded`'s workspace with `settings`, or does with
 /// them what `doing` says, showing its progress on `terminal` as it goes
-/// and writing its trace where `shared` says.
+/// and writing the command's trace so far where `shared` says.
 ///
 /// # Errors
 ///
@@ -2013,7 +2021,16 @@ fn build_targets(
     shared: &Shared,
     terminal: &mut Terminal<'_>,
 ) -> Result<Outcomes, BuildError> {
-    let mut trace = Trace::new();
+    let (mut trace, epoch) = COMMAND_TRACE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| (Trace::new(), Instant::now()));
+    let settings = &Settings {
+        epoch: Some(epoch),
+        ..settings.clone()
+    };
+    let tracing = shared.trace.is_some();
     let mut profile = GcslProfile::new();
     let mut reports = Vec::new();
     let mut progress = Progress::default();
@@ -2021,7 +2038,9 @@ fn build_targets(
     let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
-            trace.add(event);
+            if tracing {
+                trace.add(event);
+            }
             profile.add(event);
             if live {
                 progress.show(event, err);
@@ -2075,6 +2094,7 @@ fn build_targets(
             );
         }
     }
+    *COMMAND_TRACE.lock().unwrap_or_else(PoisonError::into_inner) = Some((trace, epoch));
     let outcomes = outcomes?;
     for name in &outcomes.flaky {
         let _ = writeln!(

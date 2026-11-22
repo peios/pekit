@@ -430,6 +430,12 @@ Write a trace of the build to
 .IR FILE ,
 in the Trace Event Format: a span for each attempt of each step, each program, each staging and keeping of a step's files, and each run of a target's or a step's code.
 The trace names programs but not their arguments.
+A command that builds more than once, such as
+.B release
+or a build with
+.BR \-\-check\-reproducible ,
+writes one trace of all its builds, on one timeline.
+The file is written again as each build ends, so a command that stops part way leaves the trace of the builds before.
 .TP
 .BI \-\-kind " KIND"
 For
