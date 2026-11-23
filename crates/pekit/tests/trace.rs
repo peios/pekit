@@ -148,14 +148,16 @@ fn a_trace_has_a_span_per_run_of_a_target_s_or_a_step_s_code() {
 #[test]
 fn a_trace_has_a_span_per_staging_and_keeping_on_its_thread() {
     let mut trace = Trace::new();
+    // Each told a little after it ended, as the build takes it in.
     for (ms, work, worker) in [(4, "stage", 0), (9, "keep", 2)] {
         trace.add(&at(
-            ms,
+            ms + 1,
             EventKind::Worked {
                 step: "cc".to_owned(),
                 work: work.to_owned(),
                 worker,
                 began: Duration::from_millis(ms - 3),
+                ended: Duration::from_millis(ms),
             },
         ));
     }

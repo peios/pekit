@@ -106,12 +106,13 @@ impl Trace {
                 work,
                 worker,
                 began,
+                ended,
             } => {
                 self.name_workers(worker + 1);
                 let began = micros(*began);
                 self.events.push(json!({
                     "name": work, "cat": "engine", "ph": "X",
-                    "ts": began, "dur": ts.saturating_sub(began),
+                    "ts": began, "dur": micros(*ended).saturating_sub(began),
                     "pid": PID, "tid": worker + FIRST_WORKER_ROW,
                     "args": { "step": step },
                 }));

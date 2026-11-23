@@ -4359,13 +4359,16 @@ impl Run<'_> {
     /// The job `ran` finished: the engine's own work for a step, or an
     /// effect.
     fn finished(&mut self, mut ran: Ran) -> Result<(), BuildError> {
+        // Told as the build takes it in, so that times only grow; it
+        // ended before.
         let worked = |work: &str| Event {
-            at: ran.ended.saturating_duration_since(self.began),
+            at: self.began.elapsed(),
             kind: EventKind::Worked {
                 step: self.step_name(ran.node),
                 work: work.to_owned(),
                 worker: ran.worker,
                 began: ran.began.saturating_duration_since(self.began),
+                ended: ran.ended.saturating_duration_since(self.began),
             },
         };
         match std::mem::replace(&mut ran.done, Done::Effect) {

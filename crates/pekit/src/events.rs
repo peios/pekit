@@ -113,6 +113,9 @@ pub enum EventKind {
         worker: usize,
         /// When it began, since the build began.
         began: Duration,
+        /// When it ended, since the build began: before the event is told,
+        /// once the build takes in what it did.
+        ended: Duration,
     },
     /// Something the build did, or could not do, that its user should know
     /// of as it goes: room it made on the disk, say.
