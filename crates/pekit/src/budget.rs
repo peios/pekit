@@ -123,7 +123,10 @@ impl Limits {
             let set = line
                 .split_once('=')
                 .ok_or_else(|| "it sets nothing: write `KEY = VALUE`".to_owned())
-                .and_then(|(key, value)| limits.set(key.trim(), value.trim()));
+                .and_then(|(key, value)| match key.trim() {
+                    key if SETTINGS.contains(&key) => Ok(()),
+                    key => limits.set(key, value.trim()),
+                });
             set.map_err(|why| {
                 format!("line {} of the machine's configuration: {why}", number + 1)
             })?;
@@ -166,7 +169,8 @@ impl Limits {
             "unseen" => self.unseen = size()?,
             other => {
                 return Err(format!(
-                    "`{other}` is no limit: write `jobs`, `memory` or `unseen`"
+                    "`{other}` is no setting: write `jobs`, `memory`, `unseen`, `cache_limit` \
+                     or `evaluating`"
                 ));
             }
         }
@@ -189,6 +193,26 @@ impl Limits {
             .unwrap_or(usize::MAX)
             .clamp(1, self.units())
     }
+}
+
+/// The keys of the machine's configuration that set no limit of the
+/// budget but how every build on the machine runs: the store's limit, and
+/// how many targets a build evaluates at once. [`machine_setting`] reads
+/// them.
+pub const SETTINGS: [&str; 2] = ["cache_limit", "evaluating"];
+
+/// What the machine's configuration `file` sets `key`, one of
+/// [`SETTINGS`], to, if it sets it: by its last line that does.
+#[must_use]
+pub fn machine_setting(file: Option<&str>, key: &str) -> Option<String> {
+    file.unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let line = line.split('#').next().unwrap_or_default();
+            let (named, value) = line.split_once('=')?;
+            (named.trim() == key).then(|| value.trim().to_owned())
+        })
+        .next_back()
 }
 
 /// How much memory the machine has, by `/proc/meminfo`, in bytes, if it

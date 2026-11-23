@@ -413,3 +413,44 @@ fn a_runtime_directory_that_cannot_be_used_leaves_the_budget_in_the_cache() {
             .any(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
     );
 }
+
+#[test]
+fn the_machine_s_configuration_sets_the_store_s_limit_and_how_many_evaluate() {
+    let dir = napping("configured", 0, 1);
+    let cache = tempfile::tempdir().unwrap();
+    let conf = cache.path().join("config/pekit/machine.conf");
+    fs::create_dir_all(conf.parent().unwrap()).unwrap();
+    // Each setting read: one that is wrong says where it is.
+    for (setting, says) in [
+        ("cache_limit = lots", "`cache_limit` in `"),
+        ("evaluating = some", "`evaluating` in `"),
+    ] {
+        fs::write(&conf, format!("jobs = 2\n{setting}\n")).unwrap();
+        let built = start(dir.path(), cache.path(), &["build", "naps"], &[])
+            .wait_with_output()
+            .unwrap();
+        let (_, err) = printed(&built);
+        assert!(!built.status.success(), "{err}");
+        assert!(err.contains(says) && err.contains("machine.conf"), "{err}");
+    }
+    // The environment's over the configuration's.
+    let built = start(
+        dir.path(),
+        cache.path(),
+        &["build", "naps"],
+        &[("PEKIT_EVALUATING", "1")],
+    )
+    .wait_with_output()
+    .unwrap();
+    assert!(built.status.success(), "{:?}", printed(&built));
+    // A limit the configuration sets keeps the store within it: with the
+    // default, this store is never evicted; with no room, it is.
+    let evicted = cache.path().join("store/eviction.json");
+    assert!(!evicted.exists());
+    fs::write(&conf, "cache_limit = 1\n").unwrap();
+    let built = start(dir.path(), cache.path(), &["build", "naps"], &[])
+        .wait_with_output()
+        .unwrap();
+    assert!(built.status.success(), "{:?}", printed(&built));
+    assert!(evicted.exists());
+}

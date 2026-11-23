@@ -59,21 +59,31 @@ use crate::store::{Digest, Store, TreeEntry, Used};
 pub const DEFAULT_LIMIT: u64 = 100 << 30;
 
 /// The limit `PEKIT_CACHE_LIMIT`, `setting`, gives the store: its default
-/// if it is unset, none if it is `0`.
+/// if it is unset or empty, none if it is `0`.
 ///
 /// # Errors
 ///
 /// That it is no size: a number of bytes, with a unit or none.
 pub fn limit_of(setting: Option<&str>) -> Result<Option<u64>, String> {
-    let Some(text) = setting else {
+    limit_named(setting, "`PEKIT_CACHE_LIMIT`")
+}
+
+/// The limit `setting`, what `name` sets, gives the store: its default if
+/// it is unset or empty, none if it is `0`.
+///
+/// # Errors
+///
+/// That it is no size: a number of bytes, with a unit or none.
+pub fn limit_named(setting: Option<&str>, name: &str) -> Result<Option<u64>, String> {
+    let Some(text) = setting.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(Some(DEFAULT_LIMIT));
     };
     match size_of(text) {
         Some(0) => Ok(None),
         Some(size) => Ok(Some(size)),
         None => Err(format!(
-            "`PEKIT_CACHE_LIMIT` is `{text}`, which is no size: write a number of bytes, \
-             such as `50GiB`, `500MB` or `0` for no limit"
+            "{name} is `{text}`, which is no size: write a number of bytes, such as `50GiB`, \
+             `500MB` or `0` for no limit"
         )),
     }
 }

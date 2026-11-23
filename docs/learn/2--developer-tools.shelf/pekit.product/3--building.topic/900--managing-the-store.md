@@ -23,6 +23,11 @@ limit of 20 GiB, set the variable in your shell's startup file:
 export PEKIT_CACHE_LIMIT=20GiB
 ```
 
+To set it for every build on the machine, whatever their environment, put
+`cache_limit = 20GiB` in `machine.conf` in pekit's configuration directory
+instead (see [Sharing the Machine](~pekit/sharing-the-machine)). The
+variable overrides the file.
+
 A limit is a number of bytes, with a unit or none: `KiB`, `MiB`, `GiB`,
 and `TiB` count in powers of 1024, and `KB`, `MB`, `GB`, and `TB` in powers
 of 1000. `0` means no limit.

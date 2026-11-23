@@ -70,7 +70,7 @@ else `CACHE/budget`.
 
 | Path | Holds |
 |---|---|
-| `CONFIG/machine.conf` | The budget's limits, `jobs`, `memory`, and `unseen`. Written by the user. |
+| `CONFIG/machine.conf` | The budget's limits, `jobs`, `memory`, and `unseen`, and the machine's `cache_limit` and `evaluating`. Written by the user. |
 | `BUDGET/job-<n>`, `BUDGET/memory-<n>` | The lock files of the budget's jobs and units of memory. |
 | `BUDGET/waiting`, `BUDGET/gate` | The lock files a waiting program holds. |
 | `BUDGET/fifo-<pid>-<n>` | A running program's jobserver. |

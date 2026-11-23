@@ -515,6 +515,11 @@ else
 How many targets a build evaluates at once, as
 .B \-\-evaluating
 says, which overrides it.
+Without it,
+.B evaluating
+in
+.I CONFIG/machine.conf
+sets it.
 .TP
 .B PEKIT_PROGRESS_SECS
 When standard error is no terminal, how often a build that runs longer writes a line of its progress, in seconds:
@@ -554,6 +559,11 @@ When a build ends with the store larger, and no other
 .B pekit
 process has the store open, the store is evicted to nine tenths of the limit, cheapest to make again for its size first.
 If another process has it open, nothing is evicted, and a store over its limit is warned of.
+Without it,
+.B cache_limit
+in
+.I CONFIG/machine.conf
+sets the limit.
 A value that is no size fails every command that builds.
 .TP
 .B PEKIT_STATE_DIR
@@ -798,7 +808,16 @@ and
 .B PEKIT_MACHINE_UNSEEN
 describe, with
 .B #
-starting a comment.
+starting a comment;
+.B cache_limit
+and
+.BR evaluating ,
+as
+.B PEKIT_CACHE_LIMIT
+and
+.B PEKIT_EVALUATING
+describe, for every build on the machine.
+The environment overrides each.
 A line that sets anything else fails every command that builds.
 .SH NOTES
 Do not change the files in the store, or files under

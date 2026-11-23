@@ -55,7 +55,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::workspace::Workspace;
 
 use crate::budget::{Budget, DEFAULT_UNSEEN, Limits, budget_dir, machine_memory};
-use crate::evict::limit_of;
+use crate::evict::limit_named;
 use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
@@ -1932,14 +1932,19 @@ fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
 }
 
 /// How many targets a build of `jobs` jobs evaluates at once: as `--evaluating`,
-/// `flag`, says, else as `PEKIT_EVALUATING`, `setting`, says, a number, `0`
+/// `flag`, says, else as `setting`, what `named` sets, says, a number, `0`
 /// for all, else, unset or empty, as many as `jobs` and at least 8 (see
 /// [Building](crate::engine#building)).
 ///
 /// # Errors
 ///
 /// That it is set to no number.
-fn evaluating_of(flag: Option<usize>, setting: Option<&str>, jobs: usize) -> Result<usize, String> {
+fn evaluating_of(
+    flag: Option<usize>,
+    setting: Option<&str>,
+    named: &str,
+    jobs: usize,
+) -> Result<usize, String> {
     if let Some(evaluating) = flag {
         return Ok(evaluating);
     }
@@ -1947,7 +1952,7 @@ fn evaluating_of(flag: Option<usize>, setting: Option<&str>, jobs: usize) -> Res
         None => Ok(jobs.max(8)),
         Some(setting) => setting.parse().map_err(|_| {
             format!(
-                "`PEKIT_EVALUATING={setting}` is no number of targets: write one, or `0` for all"
+                "{named} is `{setting}`, which is no number of targets: write one, or `0` for all"
             )
         }),
     }
@@ -1988,27 +1993,15 @@ fn warn_of_file_systems(outputs: &Path, store: &Path, terminal: &mut Terminal<'_
 /// names none.
 fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -> Option<Settings> {
     let cache = cache_dir();
-    let cache_limit = match limit_of(std::env::var("PEKIT_CACHE_LIMIT").ok().as_deref()) {
-        Ok(limit) => limit,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
-    let remote = match remote_of(&shared.remote) {
-        Ok(remote) => remote,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
-    let budget = match machine_budget(&cache) {
-        Ok(budget) => budget,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
+    let jobs = shared
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
+    let machine = machine_wide(shared.evaluating, &cache, jobs)
+        .map_err(|message| writeln!(terminal.err, "error: {message}"))
+        .ok()?;
+    let remote = remote_of(&shared.remote)
+        .map_err(|message| writeln!(terminal.err, "error: {message}"))
+        .ok()?;
     warn_of_file_systems(
         &loaded.root.join("pekit-out"),
         &cache.join("store"),
@@ -2042,19 +2035,12 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             })
         }
     };
-    let jobs = shared
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
-    let setting = std::env::var("PEKIT_EVALUATING").ok();
-    let evaluating = evaluating_of(shared.evaluating, setting.as_deref(), jobs)
-        .map_err(|message| writeln!(terminal.err, "error: {message}"))
-        .ok()?;
     Some(Settings {
         store: cache.join("store"),
         outputs: loaded.root.join("pekit-out"),
         scratch: cache.join("scratch"),
         jobs,
-        evaluating,
+        evaluating: machine.evaluating,
         // A strict build's steps see nothing of the host, so their results
         // are those of any machine of the platform, and keyed apart from
         // a build's that borrowed its tools.
@@ -2079,37 +2065,87 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         building_for,
         no_dynamic: shared.allows.no_dynamic,
         strict,
-        cache_limit,
+        cache_limit: machine.cache_limit,
         profile_gcsl: shared.gcsl_profile.is_some(),
         exposing: Exposing::AsNeeded,
         remote,
-        budget: Some(budget),
+        budget: Some(machine.budget),
         epoch: None,
     })
 }
 
-/// The machine's budget a build's programs wait for, of the limits the
-/// environment and the machine's configuration, `machine.conf` in the
-/// configuration directory, say (see [The budget](crate::budget#the-budget)),
-/// each program of a step metered by this program.
+/// How every build on the machine runs, as the environment, else the
+/// machine's configuration, `machine.conf` in the configuration directory,
+/// says (see [Commands](#commands)).
+struct MachineWide {
+    /// How large the store may be as a build ends, by `PEKIT_CACHE_LIMIT`,
+    /// else the configuration's `cache_limit`.
+    cache_limit: Option<u64>,
+    /// How many targets a build evaluates at once, by `--evaluating`, else
+    /// `PEKIT_EVALUATING`, else the configuration's `evaluating`.
+    evaluating: usize,
+    /// The machine's budget, by `PEKIT_MACHINE_*`, else the
+    /// configuration's `jobs`, `memory` and `unseen`.
+    budget: Arc<Budget>,
+}
+
+/// How every build on the machine runs, for one of `jobs` jobs, its
+/// `--evaluating` `flag`, with the cache directory `cache` (see
+/// [`MachineWide`]).
 ///
 /// # Errors
 ///
-/// That the configuration cannot be read or sets what is no limit, or the
-/// budget's directory cannot be made.
-fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
-    let var = |name: &str| std::env::var(name).ok();
+/// That the configuration cannot be read, or sets what is no setting, or
+/// the budget's directory cannot be made.
+fn machine_wide(flag: Option<usize>, cache: &Path, jobs: usize) -> Result<MachineWide, String> {
     let config = config_dir().join("machine.conf");
     let file = match std::fs::read_to_string(&config) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot read `{}`: {error}", config.display())),
     };
+    let var = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    };
+    let setting = |name: &str, key: &str| match var(name) {
+        Some(value) => (Some(value), format!("`{name}`")),
+        None => (
+            crate::budget::machine_setting(file.as_deref(), key),
+            format!("`{key}` in `{}`", config.display()),
+        ),
+    };
+    let (limit, named) = setting("PEKIT_CACHE_LIMIT", "cache_limit");
+    let cache_limit = limit_named(limit.as_deref(), &named)?;
+    let (number, named) = setting("PEKIT_EVALUATING", "evaluating");
+    let evaluating = evaluating_of(flag, number.as_deref(), &named, jobs)?;
+    let budget = machine_budget(cache, (&config, file.as_deref()))?;
+    Ok(MachineWide {
+        cache_limit,
+        evaluating,
+        budget,
+    })
+}
+
+/// The machine's budget, its limits as the environment, else the machine's
+/// configuration at `config`, its text `file` if it has one, says, in its
+/// directory under `$XDG_RUNTIME_DIR`, else the cache directory `cache`.
+///
+/// # Errors
+///
+/// That the configuration sets what is no limit, or the budget's directory
+/// cannot be made.
+fn machine_budget(
+    cache: &Path,
+    (config, file): (&Path, Option<&str>),
+) -> Result<Arc<Budget>, String> {
+    let var = |name: &str| std::env::var(name).ok();
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     // A machine that does not say gets a program of a kind never metered
     // for each job.
     let ram = machine_memory().unwrap_or(cores as u64 * DEFAULT_UNSEEN * 2);
-    let limits = Limits::of_machine(&var, file.as_deref(), (cores, ram)).map_err(|message| {
+    let limits = Limits::of_machine(&var, file, (cores, ram)).map_err(|message| {
         if file.is_some() {
             format!(
                 "{message}; the machine's configuration is `{}`",

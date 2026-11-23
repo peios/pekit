@@ -25,8 +25,11 @@ Each limit is read, in order of precedence, from:
    `/proc/meminfo`, and 1 GiB.
 
 `jobs` is a count above 0. `memory` and `unseen` are sizes, written as
-`PEKIT_CACHE_LIMIT`'s are, above 0. Anything else, or a line of
-`machine.conf` that sets no limit, fails every command that builds.
+`PEKIT_CACHE_LIMIT`'s are, above 0. `machine.conf` can also set
+`cache_limit` and `evaluating`, which are not limits of the budget but are
+read the same way, after `PEKIT_CACHE_LIMIT` and `PEKIT_EVALUATING`.
+Anything else, or a line of `machine.conf` that sets nothing it knows,
+fails every command that builds.
 
 ## Its files
 

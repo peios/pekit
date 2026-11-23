@@ -204,7 +204,7 @@ fn at_most_as_many_targets_as_evaluating_says_are_evaluated_at_once() {
     assert!(
         printed(&wrong)
             .1
-            .contains("`PEKIT_EVALUATING=some` is no number of targets"),
+            .contains("`PEKIT_EVALUATING` is `some`, which is no number of targets"),
         "{:?}",
         printed(&wrong)
     );
