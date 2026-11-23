@@ -66,7 +66,10 @@ on every build, the store keeps, for each workspace root, the *stamp* of
 each file it read: its device and inode, size, mode, and modification and
 change times, with the digest of its contents and whether it is
 executable. They are in the store's
-`seen/` directory, in a JSON file named by the SHA-256 of the root's path.
+`seen/` directory, in a file named by the SHA-256 of the root's path. The
+file is binary, not JSON, because a large workspace has a hundred
+thousand stamps and every build reads them all. Stamps that an older pekit
+kept as JSON are read once and replaced.
 
 A file whose stamp matches is taken to have the recorded digest, unread. A
 file whose stamp differs, or which is new, is read and hashed, and so is a
