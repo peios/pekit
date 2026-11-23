@@ -25,7 +25,7 @@ it names. A blob that nothing names any more is removed, and a removed tree
 lets go of its entries in turn. Trees share their subtrees. So the memory
 an eviction needs depends on how many blobs the store holds, together with
 how many entries its trees have. It doesn't depend on how much each record
-names. A store of 128,000 records and 37 GiB
+names. A store of 37 GiB in 128,000 records
 evicts in about 200 MiB.
 
 Before it removes any blob, an eviction removes every materialized tree and

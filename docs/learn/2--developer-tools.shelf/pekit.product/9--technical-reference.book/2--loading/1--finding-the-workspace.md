@@ -73,7 +73,8 @@ file whose stamp differs, or which is new, is read and hashed. A stamp taken
 in the same tick of the file system's clock as the build began, or later,
 isn't trusted: a file changed again within that tick would keep the same
 times. The next build reads such a file again. Stamps of files that are
-gone are dropped as the build ends.
+gone are dropped as the build ends. The file is written again only if its
+stamps changed.
 
 ## Files that change as they are read
 
