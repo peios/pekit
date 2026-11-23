@@ -547,6 +547,34 @@ pub struct Used {
     pub added: u64,
 }
 
+/// What the store would keep of the file at `path`, executable if
+/// `executable`, read and hashed where it is.
+///
+/// # Errors
+///
+/// That it cannot be read.
+fn hashed(path: &Path, executable: bool) -> io::Result<FileEntry> {
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut file = File::open(path)?;
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if let Some(chunk) = buffer.get(..read) {
+            hasher.update(chunk);
+        }
+        size += read as u64;
+    }
+    Ok(FileEntry {
+        digest: Digest::from_hasher(hasher),
+        size,
+        executable,
+    })
+}
+
 /// `written`, what writing the temporary file `temp` came to, with `temp`
 /// removed if it failed: a write cut short, by a full disk say, leaves
 /// nothing in the store's `tmp/` to fill it further.
@@ -784,6 +812,15 @@ impl Store {
         if ADOPTING.get() && meta.is_file() && meta.nlink() == 1 {
             return self.adopt_file(path, executable);
         }
+        // Hashed first: a file whose contents the store holds is read once
+        // and written nowhere, as a workspace's or a library's unchanged
+        // files are each build. One it lacks is read again as it is copied.
+        if meta.is_file() {
+            let entry = hashed(path, executable)?;
+            if self.blob_path(&entry.digest, executable).is_file() {
+                return Ok(entry);
+            }
+        }
         self.put_reader(&mut File::open(path)?, executable)
     }
 
@@ -805,27 +842,8 @@ impl Store {
     ///
     /// That it cannot be read, or the store written.
     fn adopt_file(&self, path: &Path, executable: bool) -> io::Result<FileEntry> {
-        let mut hasher = Sha256::new();
-        let mut size = 0u64;
-        let mut file = File::open(path)?;
-        let mut buffer = vec![0u8; 1 << 16];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            if let Some(chunk) = buffer.get(..read) {
-                hasher.update(chunk);
-            }
-            size += read as u64;
-        }
-        drop(file);
-        let digest = Digest::from_hasher(hasher);
-        let entry = FileEntry {
-            digest,
-            size,
-            executable,
-        };
+        let entry = hashed(path, executable)?;
+        let digest = entry.digest;
         if self.blob_path(&digest, executable).is_file() {
             return Ok(entry);
         }
