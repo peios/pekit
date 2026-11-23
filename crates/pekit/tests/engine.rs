@@ -354,6 +354,8 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
             "evaluated step copy",
             "keep copy",
             "Finished { step: \"copy\" }",
+            // And the target's end, once its value needs nothing more.
+            "TargetEnded { target: \"app/hello\", failed: false }",
         ]
     );
     // Times only grow, and a program ran within its own span.
