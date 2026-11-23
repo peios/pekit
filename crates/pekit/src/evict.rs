@@ -30,10 +30,11 @@
 //! - **The store's size** is its blobs' and its scratch directories'. Its
 //!   blobs' is kept in `size` ([`Ledger`]): what an eviction last measured,
 //!   walking every blob, a day ago at most, and the bytes of the blobs each
-//!   build wrote since, added as it ends. The blobs are walked only when
-//!   that, which can only be too large, is above the limit, or is older, or
-//!   is not there; a build that is ended before it adds what it wrote adds
-//!   nothing, which the next walk sets right.
+//!   build wrote since, added as each of its steps is recorded and as it
+//!   ends ([`ledger_written`]). The blobs are walked only when that, which
+//!   can only be too large, is above the limit, or is older, or is not
+//!   there; what a build killed wrote after its last step is added by
+//!   none, which the next walk sets right.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
 //!   so it evicts nothing while another process has the store; having it,
@@ -366,6 +367,17 @@ pub fn evict_alone(
     let evicted = evict_held(&store, limit);
     drop(gate);
     evicted
+}
+
+/// Adds the bytes of the blobs `store` wrote since this was last asked to
+/// the store's ledger, if it has one: as a build goes, so that one killed
+/// before it ends is counted for what it wrote.
+///
+/// # Errors
+///
+/// That the ledger cannot be read or written.
+pub fn ledger_written(store: &Store) -> io::Result<()> {
+    Ledger::add(store.root(), store.take_added())
 }
 
 /// What the ledger of the store at `root` last said its blobs came to, and

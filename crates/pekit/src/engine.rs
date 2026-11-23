@@ -3638,7 +3638,12 @@ impl Run<'_> {
         let receipt = self.read_receipt(step)?;
         self.keyed_by(id, receipt, read_keys(step));
         match stored(plain, &kept, &self.store) {
-            Ok(result) => self.keep_record(id, step, receipt, result)?,
+            Ok(result) => {
+                self.keep_record(id, step, receipt, result)?;
+                // The store's size counts what the step wrote as it goes:
+                // a build killed later is counted for it.
+                let _ = crate::evict::ledger_written(&self.store);
+            }
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
             // What the step's own code gave fails it, not the build.

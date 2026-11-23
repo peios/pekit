@@ -621,6 +621,17 @@ impl Store {
         }
     }
 
+    /// The bytes of the blobs this process wrote since it last asked,
+    /// taken: what [`crate::evict::ledger_written`] adds to the store's
+    /// size as a build goes.
+    #[must_use]
+    pub fn take_added(&self) -> u64 {
+        self.used
+            .lock()
+            .map(|mut used| std::mem::take(&mut used.added))
+            .unwrap_or_default()
+    }
+
     /// What the store was used for since it was opened, or since this was
     /// last asked, which it forgets.
     #[must_use]
