@@ -30,10 +30,11 @@
 //! - **The store's size** is its blobs' and its scratch directories'. Its
 //!   blobs' is kept in `size` ([`Ledger`]): what an eviction last measured,
 //!   walking every blob, a day ago at most, and the bytes of the blobs each
-//!   build wrote since, added as it ends. The blobs are walked only when
-//!   that, which can only be too large, is above the limit, or is older, or
-//!   is not there; a build that is ended before it adds what it wrote adds
-//!   nothing, which the next walk sets right.
+//!   build wrote since, added as each of its steps is recorded and as it
+//!   ends ([`ledger_written`]). The blobs are walked only when that, which
+//!   can only be too large, is above the limit, or is older, or is not
+//!   there; what a build killed wrote after its last step is added by
+//!   none, which the next walk sets right.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
 //!   so it evicts nothing while another process has the store; having it,
@@ -366,6 +367,17 @@ pub fn evict_alone(
     let evicted = evict_held(&store, limit);
     drop(gate);
     evicted
+}
+
+/// Adds the bytes of the blobs `store` wrote since this was last asked to
+/// the store's ledger, if it has one: as a build goes, so that one killed
+/// before it ends is counted for what it wrote.
+///
+/// # Errors
+///
+/// That the ledger cannot be read or written.
+pub fn ledger_written(store: &Store) -> io::Result<()> {
+    Ledger::add(store.root(), store.take_added())
 }
 
 /// What the ledger of the store at `root` last said its blobs came to, and
@@ -749,6 +761,7 @@ fn remove_scratch(dir: &Path) -> io::Result<bool> {
     }
     remove_tree(dir)?;
     let _ = fs::remove_file(dir.with_extension("size"));
+    let _ = fs::remove_file(dir.with_extension("dirty"));
     let _ = fs::remove_file(dir.with_extension("lock"));
     Ok(true)
 }
@@ -849,7 +862,7 @@ fn records_of(store: &Store, blobs: &Blobs) -> io::Result<RecordsSeen> {
             roots.dedup();
             let size = roots
                 .iter()
-                .map(|root| trees.size(store, *root, blobs))
+                .map(|root| trees.size(store, (*root, Kind::Unknown), blobs))
                 .sum();
             records.insert(
                 hex,
@@ -876,36 +889,59 @@ struct TreesSeen {
     sizes: HashMap<u32, u64>,
 }
 
+/// What a blob an eviction weighs is known to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A file's contents, as a tree's file entry names it.
+    File,
+    /// A tree, as a tree's directory entry names it.
+    Tree,
+    /// Either, as a record names it.
+    Unknown,
+}
+
 impl TreesSeen {
-    /// The size of the blob numbered `blob` of `blobs` and, if it is a
-    /// tree, of what it names at any depth, a file two of its directories
-    /// hold counted for each: its entries noted as it is read.
-    fn size(&mut self, store: &Store, blob: u32, blobs: &Blobs) -> u64 {
-        if let Some(size) = self.sizes.get(&blob) {
+    /// The size of the blob numbered `blob` of `blobs`, known to be `kind`,
+    /// and, if it is a tree, of what it names at any depth, a file two of
+    /// its directories hold counted for each: its entries noted as it is
+    /// read. Only a blob a record names is opened to find whether it is a
+    /// tree, and a tree is read without being kept by the store, so that an
+    /// eviction of a large store opens no file it need not, and holds no
+    /// more than each tree's entries' numbers.
+    fn size(&mut self, store: &Store, (blob, kind): (u32, Kind), blobs: &Blobs) -> u64 {
+        // Weighed already, but as a file when it is a tree too, one whose
+        // contents a file of the store happens to have: weighed again.
+        if let Some(size) = self.sizes.get(&blob)
+            && (kind != Kind::Tree || self.entries.contains_key(&blob))
+        {
             return *size;
         }
         let seen = blobs.get(blob);
-        // A tree's encoding begins so; a file's is not read to find it isn't one.
-        let tree = Some(seen.digest)
-            .filter(|digest| store.is_tree_blob(digest))
-            .and_then(|digest| store.read_tree(&digest).ok());
+        let tree = match kind {
+            Kind::File => None,
+            Kind::Tree => Some(seen.digest),
+            // A tree's encoding begins so; a file's is not read to find it isn't one.
+            Kind::Unknown => Some(seen.digest).filter(|digest| store.is_tree_blob(digest)),
+        }
+        .and_then(|digest| store.read_tree_once(&digest).ok());
         let mut size = seen.size;
         if let Some(tree) = tree {
-            let mut entries: Vec<u32> = tree
+            let mut entries: Vec<(u32, Kind)> = tree
                 .entries
                 .iter()
                 .filter_map(|entry| match entry {
-                    TreeEntry::File { file, .. } => blobs.number(&file.digest),
-                    TreeEntry::Dir { tree, .. } => blobs.number(tree),
+                    TreeEntry::File { file, .. } => Some((blobs.number(&file.digest)?, Kind::File)),
+                    TreeEntry::Dir { tree, .. } => Some((blobs.number(tree)?, Kind::Tree)),
                     TreeEntry::Link { .. } => None,
                 })
                 .collect();
-            entries.sort_unstable();
-            entries.dedup();
-            for entry in &entries {
-                size = size.saturating_add(self.size(store, *entry, blobs));
+            entries.sort_unstable_by_key(|&(number, _)| number);
+            entries.dedup_by_key(|&mut (number, _)| number);
+            for &entry in &entries {
+                size = size.saturating_add(self.size(store, entry, blobs));
             }
-            self.entries.insert(blob, entries.into_boxed_slice());
+            let numbers = entries.into_iter().map(|(number, _)| number).collect();
+            self.entries.insert(blob, numbers);
         }
         self.sizes.insert(blob, size);
         size

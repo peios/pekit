@@ -126,6 +126,47 @@ fn publish_strict_packs_strictly_then_publishes() {
 }
 
 #[test]
+fn publish_strict_publishes_each_recipe_whose_packages_all_pack_strictly() {
+    let ws = tempfile::tempdir().unwrap();
+    workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
+    write(
+        ws.path(),
+        &[
+            ("other/host.gcsl", HOST_PACKAGE),
+            ("other/data.txt", "data\n"),
+        ],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let to = format!("--to={}", store.path().display());
+    let published = pekit(
+        ws.path(),
+        cache.path(),
+        &["publish", "app/*", "other/*", &to, "--strict"],
+    );
+    let (out, err) = shown(&published);
+    // `other` is held back, and `app`, whose packages all packed, published.
+    assert!(!published.status.success(), "{out}");
+    assert!(
+        err.contains(
+            "error: a recipe is not published, since a package of it did not pack strictly: other\n"
+        ),
+        "{err}"
+    );
+    assert!(
+        out.contains("published app/dev.example.data with copy\n"),
+        "{out}"
+    );
+    assert!(
+        store
+            .path()
+            .join("dev.example.data-1.0/share/data.txt")
+            .is_file()
+    );
+    assert!(!store.path().join("dev.example.host-1.0").exists());
+}
+
+#[test]
 fn publish_strict_publishes_nothing_unless_every_package_packs_strictly() {
     let ws = tempfile::tempdir().unwrap();
     workspace_in(ws.path(), "pekitconf = {packagers = [copier()]}\n");
@@ -147,8 +188,15 @@ fn publish_strict_publishes_nothing_unless_every_package_packs_strictly() {
         ),
         "{err}"
     );
+    // A recipe's packages are published whole or not at all.
     assert!(
-        err.ends_with("error: nothing is published, since 1 of 2 packages did not pack strictly\n"),
+        err.contains(
+            "error: a recipe is not published, since a package of it did not pack strictly: app\n"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("`app/dev.example.data` is not published, since `app/dev.example.host` of its recipe did not pack strictly"),
         "{err}"
     );
     assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);

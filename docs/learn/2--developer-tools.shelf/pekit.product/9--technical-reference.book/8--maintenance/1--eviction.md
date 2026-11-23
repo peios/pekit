@@ -66,13 +66,13 @@ with which records it evicted.
 The store's size is its blobs' and its scratch directories'. Walking every
 blob on every build would cost too much, so the blobs' size is kept in
 `size`, a *ledger*: what an eviction last measured, walking every blob,
-plus the bytes of the blobs each build has written since, added as it ends
-under `size.lock`.
+plus the bytes of the blobs each build has written since, added under
+`size.lock` as each of its steps is recorded and as it ends.
 
 The blobs are walked again only when the ledger is above the limit, is a day
-old or older, or isn't there. The ledger can only be too large, never too
-small, so it never hides a store over its limit. A build ended before it
-adds what it wrote adds nothing, which the next walk sets right.
+old or older, or isn't there. A build killed part way has added what it
+wrote up to its last recorded step, so the ledger falls short by little
+more than one step's output, which the next walk sets right.
 
 ## When it runs
 

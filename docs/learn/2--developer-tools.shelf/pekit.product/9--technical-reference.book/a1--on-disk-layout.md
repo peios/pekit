@@ -51,8 +51,8 @@ else `CACHE/budget`.
 | `trees/<digest>`, `trees/<digest>-<bases>` | A materialized tree's instance. |
 | `complete/<digest>` | A mark that a tree has everything it names. |
 | `seen/<digest>.json` | The stamps of a workspace's files, by a digest of its root's path. |
-| `git/` | Bare clones of the repositories `fetch_git` fetched from. |
-| `scratch/<digest>` | A step's scratch directory, with `<digest>.lock` and `<digest>.size`. |
+| `git/` | Bare clones of the repositories `fetch_git` fetched from, each with a `.lock` beside it that a fetch into it holds. |
+| `scratch/<digest>` | A step's scratch directory, with `<digest>.lock`, `<digest>.size`, and `<digest>.dirty` while a run has it. |
 | `claims/<base>` | The lock file of the claim on a step, by its base receipt. |
 | `usage/` | A journal of what each build used. |
 | `eviction.json` | Each record's eviction priority, and what was evicted. |

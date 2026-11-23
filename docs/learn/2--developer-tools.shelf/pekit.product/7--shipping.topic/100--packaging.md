@@ -216,11 +216,12 @@ pekit publish 'pkgs/**' --to /srv/artifacts --strict
 ```
 
 pekit packs every package strictly, then publishes them, taking every pack
-from the store. If any package fails to pack strictly, pekit publishes
-none, and says how many failed:
+from the store. If a package fails to pack strictly, pekit publishes none of
+its recipe's packages, so that a recipe is published whole or not at all. It
+publishes the other recipes, says which it held back, and fails:
 
 ```text
-error: nothing is published, since 1 of 12 packages did not pack strictly
+error: a recipe is not published, since a package of it did not pack strictly: org.gnu.bash
 ```
 
 ## Replace a published version

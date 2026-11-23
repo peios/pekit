@@ -1660,15 +1660,16 @@ fn packed_as(
 
 /// `pekit publish --strict`'s build of `packages` of `loaded`'s workspace,
 /// as a release's is (see [`released`]): each packed strictly, with
-/// `settings` and `shared`; then, only if every one packed, each published
-/// as `packing` says, with the strict build's settings but allowing the
-/// targets' own effects, since publishing is one, already checked by that
-/// build, and its steps found in the store. A package that failed to pack
-/// publishes nothing, so that a family of packages, which ppk will not
-/// publish again at the same version, is published whole or not at all.
-/// The publishing's outcomes, with the packing's steps counted; `None`,
-/// each failure and the counts shown on `terminal`, if a package did not
-/// pack.
+/// `settings` and `shared`; then each of a recipe every one of whose
+/// packages named packed published as `packing` says, with the strict
+/// build's settings but allowing the targets' own effects, since publishing
+/// is one, already checked by that build, and its steps found in the store.
+/// A recipe a package of which failed to pack publishes nothing, so that a
+/// family of packages, which ppk will not publish again at the same
+/// version, is published whole or not at all; the other recipes publish.
+/// Each package's outcome, in order, with the packing's steps counted: a
+/// package held back fails, saying why; `None`, the failures shown on
+/// `terminal`, if the sources file does not record what is to be published.
 ///
 /// # Errors
 ///
@@ -1679,33 +1680,39 @@ fn published_strictly(
     shared: &Shared,
     terminal: &mut Terminal<'_>,
 ) -> Result<Option<Outcomes>, BuildError> {
-    let packed = build_targets(
+    let mut packed = build_targets(
         (loaded, packages, Doing::Pack(&Packing::Pack)),
         settings,
         shared,
         terminal,
     )?;
-    let failed: Vec<&BuildError> = packed
-        .targets
-        .iter()
-        .filter_map(|outcome| outcome.as_ref().err())
-        .collect();
-    if !failed.is_empty() {
-        for error in &failed {
-            let _ = write!(terminal.err, "{}", error.render(loaded));
+    let packed_targets = std::mem::take(&mut packed.targets);
+    let recipe = |package: &Target| crate::sources::recipe_of(&package.qualified());
+    let mut held: Vec<(String, String)> = Vec::new();
+    for (package, outcome) in packages.iter().zip(&packed_targets) {
+        if outcome.is_err() && !held.iter().any(|(each, _)| *each == recipe(package)) {
+            held.push((recipe(package), package.qualified()));
         }
+    }
+    let holds = |package: &Target| held.iter().any(|(each, _)| *each == recipe(package));
+    let publishable: Vec<Target> = packages
+        .iter()
+        .filter(|each| !holds(each))
+        .cloned()
+        .collect();
+    if !held.is_empty() {
+        let shown: Vec<&str> = held.iter().map(|(each, _)| shown_recipe(each)).collect();
         let _ = writeln!(
             terminal.err,
-            "error: nothing is published, since {} of {} packages did not pack strictly",
-            failed.len(),
-            packages.len()
+            "error: {} not published, since a package of {} did not pack strictly: {}",
+            if held.len() == 1 {
+                "a recipe is"
+            } else {
+                "recipes are"
+            },
+            if held.len() == 1 { "it" } else { "each" },
+            shown.join(", ")
         );
-        let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
-        return Ok(None);
-    }
-    if !sources_recorded((loaded, packages), settings, shared, terminal) {
-        let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
-        return Ok(None);
     }
     let publish = Settings {
         strict: false,
@@ -1723,17 +1730,80 @@ fn published_strictly(
         },
         ..shared.clone()
     };
-    let mut published = build_targets(
-        (loaded, packages, Doing::Pack(packing)),
-        &publish,
-        &publishing,
-        terminal,
-    )?;
-    published.ran += packed.ran;
-    published.cached = packed.cached;
-    published.programs_found += packed.programs_found;
-    published.found_remotely += packed.found_remotely;
-    Ok(Some(published))
+    let mut published = if publishable.is_empty() {
+        None
+    } else {
+        if !sources_recorded((loaded, &publishable), settings, shared, terminal) {
+            for error in packed_targets
+                .iter()
+                .filter_map(|outcome| outcome.as_ref().err())
+            {
+                let _ = write!(terminal.err, "{}", error.render(loaded));
+            }
+            let _ = writeln!(terminal.out, "{}", steps_counted(&packed));
+            return Ok(None);
+        }
+        let outcomes = build_targets(
+            (loaded, &publishable, Doing::Pack(packing)),
+            &publish,
+            &publishing,
+            terminal,
+        )?;
+        Some(outcomes)
+    };
+    let from_published = published
+        .as_mut()
+        .map(|outcomes| std::mem::take(&mut outcomes.targets))
+        .unwrap_or_default();
+    let targets = in_order(packages, (packed_targets, from_published), &held);
+    let mut outcomes = match published {
+        Some(mut published) => {
+            published.ran += packed.ran;
+            published.cached = packed.cached;
+            published.programs_found += packed.programs_found;
+            published.found_remotely += packed.found_remotely;
+            published
+        }
+        None => packed,
+    };
+    outcomes.targets = targets;
+    Ok(Some(outcomes))
+}
+
+/// What a target came to: its value, as plain data, or its failure.
+type TargetOutcome = Result<Plain, BuildError>;
+
+/// Each of `packages`' outcomes in order, of what they `packed` to and what
+/// those of them not `held`, by their recipes, came to as `published`: its
+/// publishing's, else its packing's failure, else why it was held back (see
+/// [`published_strictly`]). `held` names each recipe held back, and the
+/// package of it that failed.
+fn in_order(
+    packages: &[Target],
+    (packed, published): (Vec<TargetOutcome>, Vec<TargetOutcome>),
+    held: &[(String, String)],
+) -> Vec<TargetOutcome> {
+    let mut published = published.into_iter();
+    packages
+        .iter()
+        .zip(packed)
+        .map(|(package, outcome)| {
+            let recipe = crate::sources::recipe_of(&package.qualified());
+            match held.iter().find(|(each, _)| *each == recipe) {
+                None => published.next().unwrap_or_else(|| {
+                    Err(BuildError::Engine(
+                        "a package's publishing gave no outcome".to_owned(),
+                    ))
+                }),
+                Some(_) if outcome.is_err() => outcome,
+                Some((_, failed)) => Err(BuildError::Engine(format!(
+                    "`{}` is not published, since `{failed}` of its recipe did not pack \
+                     strictly",
+                    package.qualified()
+                ))),
+            }
+        })
+        .collect()
 }
 
 /// The packager's name and the directory of `packed`, a `packaging.Packed`.

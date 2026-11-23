@@ -37,10 +37,11 @@ does (`published_strictly`):
 
 1. **Pack strictly.** Every package selected is packed, as `pekit package
    --strict` packs it.
-2. **Gate.** If any package failed to pack, the command shows each failure
-   and fails, and publishes nothing. A packager such as ppk never publishes
-   a version twice with other contents, so a family of packages is
-   published whole or not at all.
+2. **Gate.** A recipe any of whose packages failed to pack is held back:
+   none of its packages is published, each fails, and so does the command.
+   A packager such as ppk never publishes a version twice with other
+   contents, so a recipe's family of packages is published whole or not at
+   all. The other recipes go on to be published.
 3. **Publish.** The packages are published with the strict pass's
    settings: no host tools, and the same platform key. The target's own
    effects are allowed, and every step is taken from the store, even with

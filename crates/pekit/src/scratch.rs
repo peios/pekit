@@ -17,7 +17,9 @@
 //! The directories are in the store's directory, under `scratch/`, each
 //! named by a digest of whose it is, with a lock file beside it that a run
 //! holds while it has the directory, its modification time when it was
-//! last held. `pekit clean --cache` removes them with the store.
+//! last held, and a `.dirty` file beside it while a run has it: a run
+//! killed before it let the directory go leaves it, and the next run to
+//! have the directory is given it empty, since it may be half written. `pekit clean --cache` removes them with the store.
 
 use std::fs::{self, File, TryLockError};
 use std::io;
@@ -68,8 +70,16 @@ impl Scratch {
                 .open(kept.join(format!("{name}.lock")))?;
             match lock.try_lock() {
                 Ok(()) => {
-                    let dir = kept.join(name);
+                    let dir = kept.join(&name);
+                    // A run that held it and was killed, before it could
+                    // let it go, may have left it half written: a truncated
+                    // object newer than its source, say. It starts empty.
+                    let dirty = dir.with_extension("dirty");
+                    if dirty.exists() {
+                        remove_tree(&dir)?;
+                    }
                     fs::create_dir_all(&dir)?;
+                    File::create(&dirty)?;
                     lock.set_modified(SystemTime::now())?;
                     return Ok(Self {
                         dir,
@@ -115,8 +125,10 @@ impl Drop for Scratch {
             return;
         }
         // Its size as this run leaves it, for an eviction to read rather
-        // than walk it: written before its lock is let go of.
+        // than walk it: written before its lock is let go of, and then that
+        // it was let go of whole.
         let size = size_under(&self.dir);
         let _ = fs::write(self.dir.with_extension("size"), size.to_string());
+        let _ = fs::remove_file(self.dir.with_extension("dirty"));
     }
 }

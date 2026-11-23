@@ -577,3 +577,24 @@ fn an_identity_is_what_a_step_is_apart_from_its_inputs_contents() {
     };
     assert!(receipt(of, &mut |_, _| Ok(Digest::of(b""))).is_err());
 }
+
+#[test]
+fn a_write_cut_short_leaves_nothing_in_the_store_s_temporary_directory() {
+    /// A source that gives `0` bytes, then fails, as a full disk's write does.
+    struct CutShort(usize);
+    impl std::io::Read for CutShort {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::other("cut short"));
+            }
+            self.0 -= 1;
+            buffer[0] = b'x';
+            Ok(1)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("store")).unwrap();
+    let error = store.put_reader(&mut CutShort(3), false).unwrap_err();
+    assert_eq!(error.to_string(), "cut short");
+    assert_eq!(fs::read_dir(store.root().join("tmp")).unwrap().count(), 0);
+}

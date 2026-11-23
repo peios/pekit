@@ -459,3 +459,17 @@ fn an_eviction_alone_waits_for_the_store_and_builds_wait_for_it() {
     assert!(pekit::evict::ledgered(&root).is_some());
     assert!(!pekit::evict::in_use(&root).unwrap());
 }
+
+#[test]
+fn what_a_build_writes_is_counted_as_it_goes_and_once() {
+    let state = tempfile::tempdir().unwrap();
+    ledger(state.path(), 1000, 0);
+    let store = Store::open(&state.path().join("store")).unwrap();
+    store.put_bytes(&[7u8; 5000]).unwrap();
+    pekit::evict::ledger_written(&store).unwrap();
+    assert_eq!(ledgered(state.path()), 6000);
+    // What is counted is not counted again, as the build ends.
+    pekit::evict::ledger_written(&store).unwrap();
+    pekit::evict::evict(&store, &store.used(), DEFAULT_LIMIT).unwrap();
+    assert_eq!(ledgered(state.path()), 6000);
+}
