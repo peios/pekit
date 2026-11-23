@@ -69,7 +69,9 @@ executable. They are in the store's
 `seen/` directory, in a JSON file named by the SHA-256 of the root's path.
 
 A file whose stamp matches is taken to have the recorded digest, unread. A
-file whose stamp differs, or which is new, is read and hashed. A stamp taken
+file whose stamp differs, or which is new, is read and hashed, and so is a
+file whose blob is gone from the store (see
+[Blobs and Trees](~pekit/blobs-and-trees)). A stamp taken
 in the same tick of the file system's clock as the build began, or later,
 isn't trusted: a file changed again within that tick would keep the same
 times. The next build reads such a file again. Stamps of files that are

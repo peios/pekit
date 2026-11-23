@@ -657,3 +657,66 @@ fn a_file_whose_contents_the_store_holds_is_written_nowhere() {
         "other\n"
     );
 }
+
+#[test]
+fn a_file_trusted_by_its_stamp_whose_blob_is_gone_is_put_again() {
+    let (store, dir) = store();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    fs::write(tree.join("a"), "a\n").unwrap();
+    fs::write(tree.join("sub/b"), "b\n").unwrap();
+    // Past the clock's tick the files were written in, so that their
+    // stamps are kept.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let never = |_: &Path, _: &fs::Metadata| false;
+    let mut seen = Seen::default();
+    let mut put = || store.put_tree_seen(&tree, &mut seen, &never).unwrap();
+    let first = put().unwrap();
+    // Each file read, none trusted, so nothing is looked for or marked.
+    let complete = store.root().join("complete").join(first.hex());
+    assert!(!complete.exists());
+    // Each trusted by its stamp, its blob looked for as the walk ends:
+    // found, the tree is marked complete, and is so known the next time.
+    assert_eq!(put(), Some(first));
+    assert!(complete.exists());
+    assert_eq!(put(), Some(first));
+    // An eviction forgets every mark before it removes a blob: the walk
+    // looks for each, and puts a gone one back from its file.
+    store.forget_complete().unwrap();
+    let blob = store.blob_path(&Digest::of(b"b\n"), false);
+    fs::remove_file(&blob).unwrap();
+    assert_eq!(put(), Some(first));
+    assert_eq!(fs::read_to_string(&blob).unwrap(), "b\n");
+    assert!(complete.exists());
+}
+
+#[test]
+fn a_file_not_what_its_stamp_said_is_read_again_and_the_tree_walked_again() {
+    let (store, dir) = store();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("a"), "a\n").unwrap();
+    fs::write(tree.join("b"), "b\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let never = |_: &Path, _: &fs::Metadata| false;
+    let mut seen = Seen::default();
+    let first = store
+        .put_tree_seen(&tree, &mut seen, &never)
+        .unwrap()
+        .unwrap();
+    // Stamps that say `a` and `b` hold what they do not, and whose blobs
+    // the store lacks: as the walk looks for the blobs it reads each file,
+    // finds it other, forgets its stamp, and walks again.
+    let said = serde_json::to_string(&seen).unwrap();
+    let lie = said
+        .replace(&Digest::of(b"a\n").hex(), &Digest::of(b"lie\n").hex())
+        .replace(&Digest::of(b"b\n").hex(), &Digest::of(b"fib\n").hex());
+    assert_ne!(lie, said);
+    let mut lying: Seen = serde_json::from_str(&lie).unwrap();
+    let again = store
+        .put_tree_seen(&tree, &mut lying, &never)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again, first);
+    assert_eq!(serde_json::to_string(&lying).unwrap(), said);
+}

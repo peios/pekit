@@ -90,6 +90,16 @@ fn a_workspace_s_stamps_are_kept_between_builds() {
     let text = fs::read_to_string(stamps.path()).unwrap();
     assert!(text.contains("name.txt"), "{text}");
     assert!(text.contains("dir/x"), "{text}");
+    // A build that finds every stamp as it was writes none.
+    let node = || {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = fs::metadata(stamps.path()).unwrap();
+        (meta.ino(), meta.mtime(), meta.mtime_nsec())
+    };
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let before = node();
+    build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!(node(), before);
     // A file gone is forgotten.
     fs::remove_file(dir.path().join("app/name.txt")).unwrap();
     write(dir.path(), &[("app/other.txt", "o\n")]);
