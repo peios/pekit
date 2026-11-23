@@ -111,6 +111,10 @@ restore the lock's libraries (`lock::restore`):
   replaced from the pinned commit and its record updated. Outer libraries
   are handled before libraries inside them; after an outer export, each
   pinned library inside it is exported and recorded at that commit too.
+  Putting a library into the store reads only the files whose stamps
+  changed, as with a workspace's files (see
+  [Finding the Workspace](~pekit/finding-the-workspace)). The stamps of
+  library files are kept apart, in `seen/<digest>-libraries.json`.
 - A differing library whose tree does not match its record, or has no
   record, is left alone and reported with a recovery hint: preserve any
   edits, remove `.gcsl/libraries/<path>/`, and pekit puts back the pin.
