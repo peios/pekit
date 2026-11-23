@@ -37,6 +37,14 @@ the disk unless `PEKIT_NO_SYNC` is set, and renamed to its digest's name
 (`Store::put_file`). A blob is read-only. A blob under its digest's name is
 therefore whole even after a power loss, and is trusted as it's found.
 
+A file that is pekit's own to discard is *adopted* instead
+(`Store::adopting`): a step's results, which its staging directory holds
+until it is removed, an unpacked archive, and a checked-out commit. Such a
+file with one link is hashed where it is. If the store holds its contents,
+nothing is written. Otherwise the file is linked into `tmp/`, flushed, and
+renamed into place, so it becomes the blob without being copied. A
+workspace's files are never adopted, since someone might change them later.
+
 A tree is put at once (`Store::put_tree_mounted`,
 `Store::put_tree_seen_at`). Each new blob it holds, and each of its trees'
 encodings, is written whole into `tmp/` as the tree is walked. Then 16

@@ -121,7 +121,12 @@ pub fn unpack(
     remove_tree(&dir).map_err(|error| fail(error.to_string()))?;
     fs::create_dir_all(&dir).map_err(|error| fail(error.to_string()))?;
     let unpacked = extract(store, archive, strip, &dir)
-        .and_then(|()| store.put_tree(&dir).map_err(|error| error.to_string()));
+        // What was unpacked is the store's to take: it is removed next.
+        .and_then(|()| {
+            store
+                .adopting(|| store.put_tree(&dir))
+                .map_err(|error| error.to_string())
+        });
     let _ = remove_tree(&dir);
     let tree = unpacked.map_err(fail)?;
     store
