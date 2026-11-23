@@ -632,3 +632,28 @@ fn a_file_the_store_adopts_is_its_blob_and_one_it_holds_writes_nothing() {
     assert_eq!(fs::metadata(&again).unwrap().permissions().mode(), before);
     assert_eq!(fs::read_dir(store.root().join("tmp")).unwrap().count(), 0);
 }
+
+#[test]
+fn a_file_whose_contents_the_store_holds_is_written_nowhere() {
+    let (store, dir) = store();
+    let first = dir.path().join("first.txt");
+    fs::write(&first, "same\n").unwrap();
+    let kept = store.put_file(&first).unwrap();
+    // A file of the same contents, elsewhere, as a workspace's file is put
+    // again each build: hashed, and nothing made in the store's `tmp/`.
+    let again = dir.path().join("again.txt");
+    fs::write(&again, "same\n").unwrap();
+    let tmp = store.root().join("tmp");
+    let before = fs::metadata(&tmp).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(store.put_file(&again).unwrap(), kept);
+    assert_eq!(fs::metadata(&tmp).unwrap().modified().unwrap(), before);
+    // One of other contents is copied in, as ever.
+    let other = dir.path().join("other.txt");
+    fs::write(&other, "other\n").unwrap();
+    let put = store.put_file(&other).unwrap();
+    assert_eq!(
+        fs::read_to_string(store.held_blob(&put.digest).unwrap().0).unwrap(),
+        "other\n"
+    );
+}
