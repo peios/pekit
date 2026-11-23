@@ -232,7 +232,10 @@ fn checked_out(store: &Store, repo: &Path, (commit, dir): (&str, &Path)) -> Resu
     if !ran.status.success() {
         return Err(String::from_utf8_lossy(&ran.stderr).trim().to_owned());
     }
-    store.put_tree(dir).map_err(|error| error.to_string())
+    // What was checked out is the store's to take: it is removed next.
+    store
+        .adopting(|| store.put_tree(dir))
+        .map_err(|error| error.to_string())
 }
 
 /// The environment that gives git configuration besides a repository's

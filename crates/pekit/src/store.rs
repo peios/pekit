@@ -88,7 +88,7 @@
 //! it was stamped, and so keeping its stamp, is not seen; a writer that
 //! renames each file into place, as ppk does, is always seen.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -429,6 +429,18 @@ thread_local! {
     /// flushed or put in place, while it puts a tree at once (see [Putting
     /// a tree at once](#putting-a-tree-at-once)).
     static AT_ONCE: RefCell<Option<Vec<Unsettled>>> = const { RefCell::new(None) };
+    /// Whether this thread puts files the store may take as its own (see
+    /// [`Store::adopting`]).
+    static ADOPTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Puts this thread back to adopting as it was, as it is dropped.
+struct Adopting(bool);
+
+impl Drop for Adopting {
+    fn drop(&mut self) {
+        ADOPTING.set(self.0);
+    }
 }
 
 /// A blob written whole into `tmp/`, not yet flushed or in place.
@@ -767,8 +779,63 @@ impl Store {
     ///
     /// That it cannot be read, or the store written.
     pub fn put_file(&self, path: &Path) -> io::Result<FileEntry> {
-        let executable = fs::metadata(path)?.permissions().mode() & 0o111 != 0;
+        let meta = fs::metadata(path)?;
+        let executable = meta.permissions().mode() & 0o111 != 0;
+        if ADOPTING.get() && meta.is_file() && meta.nlink() == 1 {
+            return self.adopt_file(path, executable);
+        }
         self.put_reader(&mut File::open(path)?, executable)
+    }
+
+    /// Runs `put`, which puts what is the store's to take into it, such as a
+    /// step's results, about to be removed with its staging: a file of one
+    /// link that `put` puts is hashed where it is, and, unless the store
+    /// holds its contents, which writes nothing, linked into place as its
+    /// blob rather than copied (see [`Store::put_file`]). Never for a file
+    /// someone may change after, as a workspace's are: it would be the blob.
+    pub fn adopting<T>(&self, put: impl FnOnce() -> T) -> T {
+        let _was = Adopting(ADOPTING.replace(true));
+        put()
+    }
+
+    /// Puts the file at `path`, of one link and executable if `executable`,
+    /// into the store as the store's own (see [`Store::adopting`]).
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be read, or the store written.
+    fn adopt_file(&self, path: &Path, executable: bool) -> io::Result<FileEntry> {
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut file = File::open(path)?;
+        let mut buffer = vec![0u8; 1 << 16];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            if let Some(chunk) = buffer.get(..read) {
+                hasher.update(chunk);
+            }
+            size += read as u64;
+        }
+        drop(file);
+        let digest = Digest::from_hasher(hasher);
+        let entry = FileEntry {
+            digest,
+            size,
+            executable,
+        };
+        if self.blob_path(&digest, executable).is_file() {
+            return Ok(entry);
+        }
+        let temp = self.temp_path();
+        if fs::hard_link(path, &temp).is_err() {
+            // On another file system than the store's: copied.
+            return self.put_reader(&mut File::open(path)?, executable);
+        }
+        self.finish(temp, digest, executable, false)?;
+        Ok(entry)
     }
 
     /// [`Store::put_file`], a file of a materialised tree not read, but

@@ -142,6 +142,17 @@ pub fn keep_files<S: BuildHasher>(
     host: &dyn Fn(&str) -> PathBuf,
     mounted: &HashMap<PathBuf, Digest, S>,
 ) -> Result<HashMap<String, Kept>, StoreError> {
+    // A step's files are the store's to take: its staging is removed next.
+    store.adopting(|| keep_files_adopted(plain, store, host, mounted))
+}
+
+/// [`keep_files`], the store taking the files as its own.
+fn keep_files_adopted<S: BuildHasher>(
+    plain: &Plain,
+    store: &Store,
+    host: &dyn Fn(&str) -> PathBuf,
+    mounted: &HashMap<PathBuf, Digest, S>,
+) -> Result<HashMap<String, Kept>, StoreError> {
     let mut kept = HashMap::new();
     for (path, dir) in plain.files() {
         if kept.contains_key(path) {

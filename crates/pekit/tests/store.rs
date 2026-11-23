@@ -598,3 +598,37 @@ fn a_write_cut_short_leaves_nothing_in_the_store_s_temporary_directory() {
     assert_eq!(error.to_string(), "cut short");
     assert_eq!(fs::read_dir(store.root().join("tmp")).unwrap().count(), 0);
 }
+
+#[test]
+fn a_file_the_store_adopts_is_its_blob_and_one_it_holds_writes_nothing() {
+    use std::os::unix::fs::MetadataExt as _;
+    let (store, dir) = store();
+    let node = |path: &Path| {
+        let meta = fs::metadata(path).unwrap();
+        (meta.dev(), meta.ino())
+    };
+    let blob = |digest: &Digest| store.held_blob(digest).unwrap().0;
+    // A workspace's file is copied: it is never the blob.
+    let source = dir.path().join("source.txt");
+    fs::write(&source, "kept\n").unwrap();
+    let copied = store.put_file(&source).unwrap();
+    assert_ne!(node(&source), node(&blob(&copied.digest)));
+    assert_ne!(
+        fs::metadata(&source).unwrap().permissions().mode() & 0o200,
+        0
+    );
+    // A step's result, adopted: it is the blob, linked, not copied.
+    let output = dir.path().join("output.txt");
+    fs::write(&output, "made\n").unwrap();
+    let adopted = store.adopting(|| store.put_file(&output)).unwrap();
+    assert_eq!(node(&output), node(&blob(&adopted.digest)));
+    assert_eq!(fs::read_to_string(blob(&adopted.digest)).unwrap(), "made\n");
+    // One of contents the store holds writes nothing, and is left as it is.
+    let again = dir.path().join("again.txt");
+    fs::write(&again, "made\n").unwrap();
+    let before = fs::metadata(&again).unwrap().permissions().mode();
+    assert_eq!(store.adopting(|| store.put_file(&again)).unwrap(), adopted);
+    assert_ne!(node(&again), node(&blob(&adopted.digest)));
+    assert_eq!(fs::metadata(&again).unwrap().permissions().mode(), before);
+    assert_eq!(fs::read_dir(store.root().join("tmp")).unwrap().count(), 0);
+}

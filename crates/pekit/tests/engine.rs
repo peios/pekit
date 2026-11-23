@@ -376,6 +376,7 @@ fn a_build_tells_each_step_s_life_and_each_program_it_runs() {
             "Discovered { step: \"copy\" }",
             "Cached { step: \"shout\" }",
             "Cached { step: \"copy\" }",
+            "TargetEnded { target: \"app/hello\", failed: false }",
         ]
     );
 }
