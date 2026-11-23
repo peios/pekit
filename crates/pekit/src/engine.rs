@@ -935,6 +935,7 @@ fn prepare_roots(
                     done: None,
                     stopped_at: Vec::new(),
                     waits: None,
+                    holes: None,
                 },
                 Err(error) => Root {
                     call: None,
@@ -944,6 +945,7 @@ fn prepare_roots(
                     done: Some(Err(BuildError::Invoke(error))),
                     stopped_at: Vec::new(),
                     waits: None,
+                    holes: None,
                 },
             }
         })
@@ -1623,6 +1625,9 @@ struct Root {
     stopped_at: Vec<NodeId>,
     /// In a query, the step whose result it stopped for, if it did.
     waits: Option<NodeId>,
+    /// The holes its value had when last walked, while each is still
+    /// waiting: its value is walked again only once one is given.
+    holes: Option<Vec<NodeId>>,
 }
 
 /// Where a target's unit is.
@@ -1893,7 +1898,24 @@ impl Run<'_> {
             match &root.main {
                 Main::Paused(nodes) => demands.extend(nodes.iter().copied()),
                 Main::Holding(value) => {
-                    let holes = self.graph.holes(value);
+                    // Its value is walked again only once a hole it had is
+                    // given: one of thousands of targets, each waiting on a
+                    // step, would be walked whole each time a job ends.
+                    let waiting = |id: &NodeId| {
+                        self.graph
+                            .node(*id)
+                            .is_some_and(|node| *node.state() == NodeState::Waiting)
+                    };
+                    let holes = match &root.holes {
+                        Some(holes) if !holes.is_empty() && holes.iter().all(waiting) => {
+                            holes.clone()
+                        }
+                        _ => {
+                            let holes = self.graph.holes(value);
+                            root.holes = Some(holes.clone());
+                            holes
+                        }
+                    };
                     if self.query {
                         root.done = Some(Ok(value.clone()));
                         root.stopped_at = holes;
