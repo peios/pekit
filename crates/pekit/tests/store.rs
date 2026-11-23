@@ -720,3 +720,58 @@ fn a_file_not_what_its_stamp_said_is_read_again_and_the_tree_walked_again() {
     assert_eq!(again, first);
     assert_eq!(serde_json::to_string(&lying).unwrap(), said);
 }
+
+#[test]
+fn a_tree_read_ahead_on_several_threads_is_the_tree_walked_alone() {
+    let (store, dir) = store();
+    let tree = dir.path().join("tree");
+    // Wide and deep enough that its stamps are taken on several threads:
+    // a directory of a thousand files, and twenty of a hundred each.
+    let wide = tree.join("wide");
+    fs::create_dir_all(&wide).unwrap();
+    for at in 0..1000 {
+        fs::write(wide.join(format!("{at}")), format!("{at}\n")).unwrap();
+    }
+    for dir in 0..20 {
+        let deep = tree.join(format!("deep/{dir}/in"));
+        fs::create_dir_all(&deep).unwrap();
+        for at in 0..100 {
+            fs::write(deep.join(format!("{at}")), format!("{dir}.{at}\n")).unwrap();
+        }
+    }
+    std::os::unix::fs::symlink("wide/1", tree.join("link")).unwrap();
+    let alone = store.put_tree(&tree).unwrap();
+    let never = |_: &Path, _: &fs::Metadata| false;
+    let mut seen = Seen::default();
+    let ahead = store.put_tree_seen(&tree, &mut seen, &never).unwrap();
+    assert_eq!(ahead, Some(alone));
+    // And so it is walked again, its files trusted by their stamps.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(
+        store.put_tree_seen(&tree, &mut seen, &never).unwrap(),
+        Some(alone)
+    );
+    assert_eq!(
+        store.put_tree_seen(&tree, &mut seen, &never).unwrap(),
+        Some(alone)
+    );
+}
+
+#[test]
+fn a_walk_of_what_is_no_directory_fails_as_it_did() {
+    let (store, dir) = store();
+    let never = |_: &Path, _: &fs::Metadata| false;
+    let file = dir.path().join("file");
+    fs::write(&file, "f").unwrap();
+    assert!(
+        store
+            .put_tree_seen(&file, &mut Seen::default(), &never)
+            .is_err()
+    );
+    let gone = dir.path().join("gone");
+    assert!(
+        store
+            .put_tree_seen(&gone, &mut Seen::default(), &never)
+            .is_err()
+    );
+}
