@@ -229,9 +229,8 @@ pack every
 .I PACKAGE
 strictly first, then publish them as
 .B release
-does, allowing the packagers' own effects and finding the strict build's steps; if any
-.I PACKAGE
-fails to pack strictly, publish none.
+does, allowing the packagers' own effects and finding the strict build's steps.
+A recipe one of whose packages named fails to pack strictly publishes none of them, so that a recipe's packages are published whole or not at all; the other recipes publish, and the command fails.
 If the workspace has a
 .IR pekit.sources ,
 publish none unless it records what each recipe of the packages is built from, as
