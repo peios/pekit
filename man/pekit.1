@@ -138,7 +138,9 @@ is relative to the workspace's root.
 A definition selected more than once is built once.
 .PP
 Several targets are one build: a step two of them reach runs once.
-A target that fails does not stop the others.
+A target that fails does not stop the others, unless
+.B \-\-fail\-fast
+says to.
 .SH COMMANDS
 .TP
 .B build
@@ -361,6 +363,9 @@ In place of
 the default is as many as
 .BR \-\-jobs ,
 and at least 8.
+.TP
+.B \-\-fail\-fast
+Stop at the first target that fails: start nothing more, let what is running end, and fail each target not finished, naming the one that failed first.
 .TP
 .B \-\-no\-dynamic
 Fail a target at the point it waits for a step's result.
