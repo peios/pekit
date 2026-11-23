@@ -535,6 +535,16 @@ pub struct Used {
     pub added: u64,
 }
 
+/// `written`, what writing the temporary file `temp` came to, with `temp`
+/// removed if it failed: a write cut short, by a full disk say, leaves
+/// nothing in the store's `tmp/` to fill it further.
+fn or_removed<T>(temp: &Path, written: io::Result<T>) -> io::Result<T> {
+    if written.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    written
+}
+
 impl Store {
     /// The store in the directory `root`, its directories made if they are
     /// not there.
@@ -773,20 +783,21 @@ impl Store {
         let temp = self.temp_path();
         let mut hasher = Sha256::new();
         let mut size = 0u64;
-        {
+        let copied = (|| -> io::Result<()> {
             let mut out = File::create(&temp)?;
             let mut buffer = vec![0u8; 1 << 16];
             loop {
                 let read = source.read(&mut buffer)?;
                 if read == 0 {
-                    break;
+                    return Ok(());
                 }
                 let chunk = &buffer[..read];
                 hasher.update(chunk);
                 out.write_all(chunk)?;
                 size += read as u64;
             }
-        }
+        })();
+        or_removed(&temp, copied)?;
         let digest = Digest::from_hasher(hasher);
         self.finish(temp, digest, executable, false)?;
         Ok(FileEntry {
@@ -870,7 +881,7 @@ impl Store {
             return Ok(digest);
         }
         let temp = self.temp_path();
-        File::create(&temp)?.write_all(bytes)?;
+        or_removed(&temp, File::create(&temp)?.write_all(bytes))?;
         self.finish(temp, digest, false, true)?;
         Ok(digest)
     }
@@ -1061,9 +1072,10 @@ impl Store {
             }
             let source = self.blob_of_mode(entry)?;
             let temp = self.temp_path();
-            fs::copy(&source, &temp)?;
             let mode = if entry.executable { 0o555 } else { 0o444 };
-            fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+            let copied = fs::copy(&source, &temp)
+                .and_then(|_| fs::set_permissions(&temp, fs::Permissions::from_mode(mode)));
+            or_removed(&temp, copied)?;
             // A copy another process made first is as good.
             if fs::hard_link(&temp, &path).is_ok()
                 && let Ok(mut used) = self.used.lock()
@@ -1154,7 +1166,7 @@ impl Store {
             ));
         }
         let temp = self.temp_path();
-        fs::copy(&other, &temp)?;
+        or_removed(&temp, fs::copy(&other, &temp))?;
         self.settle(&temp, &entry.digest, entry.executable)?;
         Ok(wanted)
     }
@@ -1756,10 +1768,11 @@ impl Store {
             fs::create_dir_all(parent)?;
         }
         let temp = self.temp_path();
-        let mut out = File::create(&temp)?;
-        out.write_all(bytes)?;
-        out.sync_all()?;
-        drop(out);
+        let written = File::create(&temp).and_then(|mut out| {
+            out.write_all(bytes)?;
+            out.sync_all()
+        });
+        or_removed(&temp, written)?;
         fs::rename(temp, target)?;
         self.note_record(key);
         Ok(())
