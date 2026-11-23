@@ -138,7 +138,10 @@ impl Stamp {
 /// (see [Trees seen before](#trees-seen-before)).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Seen {
-    /// Each file's stamp, and what the store keeps of it.
+    /// Each file's stamp, and what the store keeps of it: kept in its
+    /// paths' order, so that stamps that did not change are the same bytes
+    /// ([`keep_stamps`]).
+    #[serde(serialize_with = "in_order")]
     files: HashMap<PathBuf, (Stamp, FileEntry)>,
     /// The directories that cannot change.
     #[serde(skip)]
@@ -545,6 +548,35 @@ pub struct Used {
     pub scratch: HashSet<String>,
     /// The bytes of the blobs it wrote.
     pub added: u64,
+}
+
+/// `files` serialized in its keys' order.
+fn in_order<S: serde::Serializer>(
+    files: &HashMap<PathBuf, (Stamp, FileEntry)>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let ordered: std::collections::BTreeMap<&PathBuf, &(Stamp, FileEntry)> = files.iter().collect();
+    serde::Serialize::serialize(&ordered, serializer)
+}
+
+/// Keeps `seen`, stamps of files, at `path`, unless it holds them already:
+/// a large workspace's run to tens of megabytes, mostly as the last build
+/// left them.
+///
+/// # Errors
+///
+/// That `path` cannot be written.
+pub fn keep_stamps(path: &Path, seen: &Seen) -> io::Result<()> {
+    let bytes = serde_json::to_vec(seen).map_err(io::Error::other)?;
+    if fs::read(path).is_ok_and(|kept| kept == bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", crate::sweep::token()));
+    fs::write(&temp, bytes)?;
+    fs::rename(&temp, path)
 }
 
 /// What the store would keep of the file at `path`, executable if

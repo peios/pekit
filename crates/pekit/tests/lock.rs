@@ -465,6 +465,36 @@ fn lock_reads_what_git_writes_after_the_end_of_an_archive() {
 }
 
 #[test]
+fn a_library_changed_after_a_build_checked_it_is_found_changed() {
+    if !has_git() {
+        skip("no `git`");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    repository_and_workspace(dir.path());
+    let ws = dir.path().join("ws");
+    let cache = tempfile::tempdir().unwrap();
+    assert!(pekit(&ws, cache.path(), &["lock"], None).status.success());
+    // Checked as its pin has it, its files' stamps kept.
+    let strict = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    assert!(strict.status.success(), "{:?}", shown(&strict));
+    // Then changed in place, to as many bytes: it is read again, and differs.
+    let file = ws.join(".gcsl/libraries/example.org/libs/util/util.gcsl");
+    let text = fs::read_to_string(&file).unwrap();
+    let changed = text.replacen("}!\"", "}?\"", 1);
+    assert_ne!(changed, text);
+    assert_eq!(changed.len(), text.len());
+    fs::write(&file, changed).unwrap();
+    let again = pekit(&ws, cache.path(), &["build", "hi", "--strict"], None);
+    let (_, err) = shown(&again);
+    assert!(!again.status.success());
+    assert!(
+        err.contains("`.gcsl/libraries/example.org/libs/util` differs"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_strict_build_fails_on_libraries_the_lock_does_not_pin() {
     if !has_git() {
         skip("no `git`");
