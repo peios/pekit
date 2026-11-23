@@ -781,6 +781,10 @@ fn build_roots(
     });
     // Then room, if less than the floor is free, all the build used done
     // with (see [Room on the disk](#room-on-the-disk)).
+    if settings.cache_limit.is_none() && settings.keep_free.is_some() {
+        // What the build used is weighed by eviction as used.
+        let _ = crate::evict::journal_used(&run.store);
+    }
     if let Some(floor) = settings.keep_free
         && let Some(free) = run.free_now().filter(|free| *free < floor)
         && let Ok(Room::Made(made)) =
@@ -1593,6 +1597,13 @@ struct Run<'a> {
     room: RoomWatch,
 }
 
+/// Whether `error` is of a file system with no room left, or no more of a
+/// quota.
+fn is_full(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::StorageFull
+        || matches!(error.raw_os_error(), Some(code) if code == rustix::io::Errno::NOSPC.raw_os_error() || code == rustix::io::Errno::DQUOT.raw_os_error())
+}
+
 /// The least room made for a step that failed for want of it before it
 /// runs again (see [Room on the disk](#room-on-the-disk)).
 const ROOM_FOR_A_RETRY: u64 = 10 << 30;
@@ -1616,7 +1627,14 @@ struct RoomWatch {
     parked: Vec<(NodeId, StepRun, Diagnostic)>,
     /// Each step run again for want of room, which is not run again for it.
     retried: HashSet<NodeId>,
+    /// Whether the last try made no room, so that the floor holds steps
+    /// again only once more than it has been free since.
+    spent: bool,
 }
+
+/// So little free that a step that fails then failed for want of room,
+/// whatever its error says.
+const ALL_BUT_FULL: u64 = 64 << 20;
 
 /// The step that holds a name (see [`Run::claim_name`]).
 struct Held {
@@ -1786,8 +1804,8 @@ impl Run<'_> {
             {
                 return self.stop_after(&failed);
             }
-            self.watch_room()?;
-            let mut progressed = self.start_needed(&demands)?;
+            let roomed = self.watch_room()?;
+            let mut progressed = self.start_needed(&demands)? | roomed;
             // A target whose code ended this round makes room for another.
             progressed |= admitted | self.admit();
             progressed |= self.advance_steps()?;
@@ -3775,6 +3793,17 @@ impl Run<'_> {
         plain: &Plain,
         kept: Result<HashMap<String, Kept>, StoreError>,
     ) -> Result<(), BuildError> {
+        // Files the store had no room for: the step fails for want of room,
+        // and runs once more once room is made (see [Room on the
+        // disk](#room-on-the-disk)).
+        if let Err(StoreError::Io { path, error }) = &kept
+            && is_full(error)
+            && self.steps.contains_key(&id)
+            && !self.room.retried.contains(&id)
+        {
+            let message = format!("`{path}` of the step's result could not be kept: {error}");
+            return self.failed(id, Diagnostic::error(message, Span::new(0, 0)));
+        }
         let Some(mut step) = self.steps.remove(&id) else {
             return Ok(());
         };
@@ -3799,6 +3828,14 @@ impl Run<'_> {
         // Its files are kept whatever it holds: later steps are given them.
         let kept = match kept {
             Ok(kept) => kept,
+            Err(StoreError::Io { path, error }) if is_full(&error) => {
+                let message = format!(
+                    "`{path}` of the step's result could not be kept: {error}; {}",
+                    self.short_of_room()
+                );
+                self.unrecordable(id, message);
+                return Ok(());
+            }
             Err(StoreError::Io { path, error }) => {
                 let message =
                     format!("the step's result names `{path}`, which it did not make: {error}");
@@ -4222,8 +4259,7 @@ impl Run<'_> {
         let said = std::iter::once(&failure.message)
             .chain(&failure.notes)
             .any(|text| SAID.iter().any(|said| text.contains(said)));
-        let floor = self.settings.keep_free.unwrap_or(0).max(1 << 30);
-        said || self.free_now().is_some_and(|free| free < floor)
+        said || self.free_now().is_some_and(|free| free < ALL_BUT_FULL)
     }
 
     /// What a step that failed for want of room is told: how much is free.
@@ -4253,31 +4289,40 @@ impl Run<'_> {
             && self.background == 0
             && self.looking.is_empty()
             && self.claiming.is_empty()
+            && self.uploads == 0
     }
 
     /// Holds new steps once less than the floor is free, and makes room once
     /// nothing of the build runs (see [Room on the
-    /// disk](#room-on-the-disk)).
+    /// disk](#room-on-the-disk)): whether it made room, or tried to, which
+    /// moves on what waits for it.
     ///
     /// # Errors
     ///
     /// That a step held for room cannot be run again.
-    fn watch_room(&mut self) -> Result<(), BuildError> {
+    fn watch_room(&mut self) -> Result<bool, BuildError> {
         if let Some(floor) = self.settings.keep_free
             && !self.room.holding
             && self
                 .room
                 .tried
                 .is_none_or(|tried| tried.elapsed() >= ROOM_AGAIN_AFTER)
-            && self.free_now().is_some_and(|free| free < floor)
+            && let Some(free) = self.free_now()
         {
-            self.room.holding = true;
-            self.room.wanted = self.room.wanted.max(floor);
+            // Room it could not make is tried for again only once more
+            // than the floor has been free since.
+            if free >= floor {
+                self.room.spent = false;
+            } else if !self.room.spent {
+                self.room.holding = true;
+                self.room.wanted = self.room.wanted.max(floor);
+            }
         }
         if self.room.holding && self.idle() {
             self.make_room()?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Makes the room the build waits for, keeping what it has used, and
@@ -4323,6 +4368,7 @@ impl Run<'_> {
             self.emit(EventKind::Warned { message });
         }
         let room = matches!(made, None | Some(Ok(Room::Made(_))));
+        self.room.spent = !room;
         for (id, step, mut failure) in std::mem::take(&mut self.room.parked) {
             if room {
                 let again = (step.retries, step.failed_once);
@@ -4343,6 +4389,7 @@ impl Run<'_> {
         self.room.holding = false;
         self.room.wanted = 0;
         self.room.tried = Some(Instant::now());
+        self.room.spent = true;
         let message = format!(
             "the disk of the store has {} free, less than the build wants free, but it can make \
              room only once its steps end, which wait for others: it starts them regardless",

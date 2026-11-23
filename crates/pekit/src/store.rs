@@ -1196,6 +1196,13 @@ impl Store {
     #[must_use]
     pub fn blob_path(&self, digest: &Digest, executable: bool) -> PathBuf {
         self.touch(digest);
+        self.cas_path(digest, executable)
+    }
+
+    /// [`Store::blob_path`], the blob not noted as this process's to use:
+    /// for an eviction, which looks at every blob.
+    #[must_use]
+    pub fn cas_path(&self, digest: &Digest, executable: bool) -> PathBuf {
         let hex = digest.hex();
         let name = if executable {
             format!("{hex}.x")
@@ -2181,7 +2188,14 @@ impl Store {
         {
             return Ok(tree);
         }
-        let bytes = self.read_blob(digest)?;
+        // Read as an eviction reads it, not noted as this process's to use.
+        let plain = self.cas_path(digest, false);
+        let path = if plain.is_file() {
+            plain
+        } else {
+            self.cas_path(digest, true)
+        };
+        let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
@@ -2428,7 +2442,7 @@ impl Store {
     pub fn is_tree_blob(&self, digest: &Digest) -> bool {
         const BEGINNING: &[u8] = b"{\"entries\":";
         let mut start = [0u8; BEGINNING.len()];
-        File::open(self.blob_path(digest, false))
+        File::open(self.cas_path(digest, false))
             .and_then(|mut file| file.read_exact(&mut start))
             .is_ok_and(|()| start == BEGINNING)
     }

@@ -227,6 +227,56 @@ fn a_step_that_runs_out_of_room_runs_once_more_then_says_so() {
 }
 
 #[test]
+fn a_step_that_fails_otherwise_short_of_the_floor_runs_once() {
+    let text = "#[hermetic] fn broken() -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"exit 3\"])\n\
+                \x20   working_dir().file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = broken() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let options = Options {
+        keep_free: Some(u64::MAX / 4),
+        ..Options::default()
+    };
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", options);
+    let error = built.unwrap_err();
+    assert!(!error.contains("not enough space"), "{error}");
+    let attempts = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Started { .. }))
+        .count();
+    assert_eq!(attempts, 1, "{events:?}");
+}
+
+#[test]
+fn a_step_run_again_for_room_is_given_what_it_was() {
+    // A step given an earlier step's output, which fails as a full disk
+    // does, each time: run again, it is staged with that output again.
+    let text = format!(
+        "{SHOUT}#[hermetic] fn full(src: File) -> File {{\n\
+         \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {{src.path}} > /dev/null && dd if=/dev/zero of=/dev/full bs=1 count=1\"])\n\
+         \x20   working_dir().file(\"out.txt\")\n\
+         }}\n\
+         def build hello() {{ out = full(shout(file(\"name.txt\"))) }}\n"
+    );
+    let dir = workspace(&text, &[("name.txt", "hi\n")]);
+    let state = tempfile::tempdir().unwrap();
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
+    let error = built.unwrap_err();
+    assert!(error.contains("No space left on device"), "{error}");
+    assert!(error.contains("not enough space: "), "{error}");
+    let full: Vec<u32> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Started { step, attempt } if step.starts_with("full") => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(full, [0, 1], "{events:?}");
+}
+
+#[test]
 fn a_build_short_of_its_floor_makes_room_says_so_and_goes_on() {
     let text = format!("{SHOUT}def build hello() {{ out = shout(file(\"name.txt\")) }}\n");
     let dir = workspace(&text, &[("name.txt", "hi\n")]);

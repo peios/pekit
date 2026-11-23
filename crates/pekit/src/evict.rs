@@ -574,6 +574,19 @@ fn journal(root: &Path, used: &Used) -> io::Result<()> {
     )
 }
 
+/// Journals what `store` was used for since it was opened, and adds what it
+/// wrote to its ledger, as [`evict`] does first: for a build that ends with
+/// no limit to evict to.
+///
+/// # Errors
+///
+/// That the journal or the ledger cannot be written.
+pub fn journal_used(store: &Store) -> io::Result<()> {
+    let used = store.used();
+    journal(store.root(), &used)?;
+    Ledger::add(store.root(), used.added)
+}
+
 /// Evicts from `store`, which this process has open, during its build,
 /// until `bytes` more are free, keeping all `keep` says the build has used
 /// (see [Room on the disk](crate::engine#room-on-the-disk)): only if no other
@@ -723,7 +736,7 @@ fn evict_to(
         let seen = blobs.get(blob);
         for (there, executable) in [(seen.plain, false), (seen.executable, true)] {
             if there {
-                let _ = fs::remove_file(store.blob_path(&seen.digest, executable));
+                let _ = fs::remove_file(store.cas_path(&seen.digest, executable));
             }
         }
         *total = total.saturating_sub(seen.size);
