@@ -195,6 +195,7 @@ fn strict_refusal(job: &EffectJob) -> Option<String> {
         Builtin::Fetch
         | Builtin::FetchTool
         | Builtin::FetchGit
+        | Builtin::FetchGitTool
         | Builtin::ArchiveUnpack
         | Builtin::KeychainString
         | Builtin::KeychainFile => None,
@@ -2261,6 +2262,8 @@ impl Run<'_> {
                         sha256: text(1).to_ascii_lowercase(),
                     });
                 }
+                // A tool's, `fetch_tool`'s and `fetch_git_tool`'s, is no
+                // source of what the build makes.
                 Builtin::FetchGit => {
                     set.git.insert(GitTree {
                         url: text(0),
@@ -2638,16 +2641,18 @@ impl Run<'_> {
         match job.builtin() {
             // A fetch is pekit's to answer, and never a step's.
             Builtin::Fetch | Builtin::FetchTool if step.is_some() => Err(engine(&IN_A_STEP)),
-            Builtin::FetchGit if step.is_some() => Err(engine(&git_fetch::IN_A_STEP)),
-            // A tool's fetch is fetched as any other: the mark is only for
-            // collecting a package's source.
+            Builtin::FetchGit | Builtin::FetchGitTool if step.is_some() => {
+                Err(engine(&git_fetch::IN_A_STEP))
+            }
+            // A tool's fetch, of a file or a git repository, is fetched as
+            // any other: the mark is only for collecting a package's source.
             Builtin::Fetch | Builtin::FetchTool => Ok(Some(Work::Fetch {
                 url: text(0),
                 sha256: text(1),
                 store: self.store.clone(),
                 span,
             })),
-            Builtin::FetchGit => Ok(Some(Work::FetchGit {
+            Builtin::FetchGit | Builtin::FetchGitTool => Ok(Some(Work::FetchGit {
                 url: text(0),
                 commit: text(1),
                 store: self.store.clone(),
@@ -2682,6 +2687,7 @@ impl Run<'_> {
             Builtin::Fetch
             | Builtin::FetchTool
             | Builtin::FetchGit
+            | Builtin::FetchGitTool
             | Builtin::ArchiveUnpack
             | Builtin::KeychainString
             | Builtin::File

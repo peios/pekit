@@ -38,7 +38,7 @@ A tool isn't source:
 
 - What a registered toolchain is made from: its definition's fetches, and
   everything fetched to make it, such as the source of a tool it compiles.
-- A fetch marked `tool = true` (see [Fetching
+- A fetch or a `fetch_git` marked `tool = true` (see [Fetching
   Files](~pekit/fetching-files#mark-a-tool)).
 - A path that leads out of the workspace, such as a link to a repository
   of packages that build roots are taken from.
