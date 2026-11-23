@@ -52,7 +52,9 @@
 //! first run until its code ends, while it holds its working state, so
 //! another starts as one ends, and one that waits only for its steps no
 //! longer counts. A build of many targets then needs the memory of a few
-//! of them at once, not of all. Under
+//! of them at once, not of all. With [`OnFailure::Stop`], the build
+//! stops once a target fails: it starts nothing more, lets what is running
+//! end, and fails each target it has not finished. Under
 //! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
 //! dependency, fails there.
 
@@ -359,11 +361,25 @@ pub struct Settings {
     /// How many targets may be evaluated at once, `0` for all of them (see
     /// [Building](#building)).
     pub evaluating: usize,
+    /// What the build does once a target fails (see [Building](#building)).
+    pub on_failure: OnFailure,
     /// When the build's [events](crate::events#events) are timed from: when
     /// it began, if none. A command of several builds, `pekit release`'s
     /// say, times them all from its first, so that they fall on one
     /// timeline.
     pub epoch: Option<Instant>,
+}
+
+/// What a build does once one of its targets fails (see
+/// [Building](#building)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OnFailure {
+    /// Goes on building the others, each of which fails alone.
+    #[default]
+    KeepGoing,
+    /// Stops: starts nothing more, lets what is running end, and fails
+    /// every target it has not finished.
+    Stop,
 }
 
 /// What becomes of a step whose receipt has a record (see
@@ -1676,6 +1692,15 @@ impl Run<'_> {
             if self.roots.iter().all(|root| root.done.is_some()) {
                 return Ok(());
             }
+            if self.settings.on_failure == OnFailure::Stop
+                && let Some(failed) = self
+                    .roots
+                    .iter()
+                    .find(|root| matches!(root.done, Some(Err(_))))
+                    .map(|root| root.dir.clone())
+            {
+                return self.stop_after(&failed);
+            }
             let mut progressed = self.start_needed(&demands)?;
             // A target whose code ended this round makes room for another.
             progressed |= admitted | self.admit();
@@ -1727,6 +1752,36 @@ impl Run<'_> {
                 ));
             }
         }
+    }
+
+    /// Stops the build after the target `failed` failed, under
+    /// `--fail-fast`: nothing more is started, the jobs running end, and
+    /// every target not done fails, saying why.
+    ///
+    /// # Errors
+    ///
+    /// That the pool's threads stopped, or what ending a job failed with of
+    /// pekit's own.
+    fn stop_after(&mut self, failed: &str) -> Result<(), BuildError> {
+        while !self.in_flight.is_empty() || self.background > 0 {
+            let Some(ran) = self.pool.next() else {
+                return Err(BuildError::Engine(
+                    "the threads effects run on stopped".to_owned(),
+                ));
+            };
+            self.finished(ran)?;
+        }
+        for root in &mut self.roots {
+            if root.done.is_none() {
+                root.done = Some(Err(BuildError::Engine(format!(
+                    "`{}` was not finished: `{failed}` failed first, and `--fail-fast` stops a \
+                     build at its first failure",
+                    root.dir
+                ))));
+            }
+        }
+        self.tell_ended();
+        Ok(())
     }
 
     /// Tells, of each root that is done, that it ended, once.

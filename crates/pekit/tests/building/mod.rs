@@ -76,6 +76,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         remote: None,
         budget: budget(state),
         evaluating: 0,
+        on_failure: pekit::engine::OnFailure::KeepGoing,
         epoch: None,
     }
 }

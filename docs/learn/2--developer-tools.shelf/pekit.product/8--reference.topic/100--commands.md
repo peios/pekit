@@ -47,6 +47,7 @@ the same options for how they build:
 | `--rebuild` | Runs every step, reusing nothing from the store. | [Reuse and the Store](~pekit/reuse-and-the-store) |
 | `--check-reproducible` | Runs every step twice and compares the outputs. | [Checking That a Build Is Reproducible](~pekit/checking-reproducibility) |
 | `--strict` | Builds as a release does. | [Hermetic and Strict Builds](~pekit/hermetic-and-strict-builds) |
+| `--fail-fast` | Stops the build at the first target that fails. | [Naming Targets](~pekit/naming-targets) |
 | `--no-dynamic` | Fails a target that waits for a step's result. | [Targets and Steps](~pekit/targets-and-steps#waiting-for-a-step-s-result) |
 | `--trace` | Writes a timeline of the build. | [Profiling a Build](~pekit/profiling-a-build) |
 | `--gcsl-profile` | Writes a profile of the build's GCSL code. | [Profiling a Build](~pekit/profiling-a-build) |

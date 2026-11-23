@@ -65,7 +65,9 @@ pekit build hello 'pkgs/**'
 Several targets are one build. A step that two of them need runs once,
 and their steps run at the same time. A definition that several names or
 globs select is built once. A target that fails doesn't stop the others,
-and pekit exits with status 1 if any did.
+and pekit exits with status 1 if any did. To stop at the first failure
+instead, give `--fail-fast`: pekit starts nothing more, lets what is
+running finish, and reports each target it didn't finish.
 
 With several targets, pekit reports each one, then the steps for the
 whole build:

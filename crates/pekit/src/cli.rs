@@ -60,7 +60,7 @@ use crate::evict::limit_named;
 use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
-    target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
+    target_view, BuildError, OnFailure, Outcomes, Packing, Reuse, Settings, build_all_observed,
     package_all_observed, program_command, query_all_observed, requires_strict,
     run_script_observed,
 };
@@ -326,6 +326,10 @@ struct Shared {
     /// `PEKIT_EVALUATING`; as many as `--jobs`, and at least 8, by default.
     #[arg(long, value_name = "N")]
     evaluating: Option<usize>,
+    /// Stop at the first target that fails, rather than build the others:
+    /// what is running ends, and nothing more starts.
+    #[arg(long)]
+    fail_fast: bool,
     /// Write a Chrome trace of the build to this file.
     #[arg(long, value_name = "FILE")]
     trace: Option<PathBuf>,
@@ -981,6 +985,7 @@ fn released(
     let shared = |check_reproducible| Shared {
         jobs: args.jobs,
         evaluating: None,
+        fail_fast: false,
         trace: args.trace.clone(),
         gcsl_profile: None,
         profile: "release".to_owned(),
@@ -2237,6 +2242,11 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         scratch: cache.join("scratch"),
         jobs,
         evaluating: machine.evaluating,
+        on_failure: if shared.fail_fast {
+            OnFailure::Stop
+        } else {
+            OnFailure::KeepGoing
+        },
         // A strict build's steps see nothing of the host, so their results
         // are those of any machine of the platform, and keyed apart from
         // a build's that borrowed its tools.

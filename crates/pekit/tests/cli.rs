@@ -349,6 +349,40 @@ fn a_copy_out_a_build_made_is_left_unless_it_changed() {
 }
 
 #[test]
+fn fail_fast_stops_a_build_at_its_first_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let build = "#[hermetic] fn run(script: String) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", script])\n\
+                 \x20   working_dir().file(\"out\")\n\
+                 }\n\
+                 def build bad() { out = run(\"exit 1\") }\n\
+                 def build slow() { out = run(\"sleep 2; echo slow > out\") }\n";
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", build)],
+    );
+    let app = dir.path().join("app");
+    let cache = tempfile::tempdir().unwrap();
+    let stopped = pekit(&app, cache.path(), &["build", "bad", "slow", "--fail-fast"]);
+    let (out, err) = printed(&stopped);
+    assert!(!stopped.status.success());
+    assert!(
+        err.contains("`app/slow` was not finished: `app/bad` failed first"),
+        "{err}"
+    );
+    assert!(!out.contains("built app/slow"), "{out}");
+    // Without it, the others are built.
+    let cache = tempfile::tempdir().unwrap();
+    let went_on = pekit(&app, cache.path(), &["build", "bad", "slow"]);
+    assert!(!went_on.status.success());
+    assert!(
+        printed(&went_on).0.contains("built app/slow"),
+        "{:?}",
+        printed(&went_on)
+    );
+}
+
+#[test]
 fn a_step_whose_result_is_no_data_fails_its_target_alone() {
     let dir = tempfile::tempdir().unwrap();
     write(
