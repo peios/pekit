@@ -105,6 +105,29 @@ pekit takes lent jobs back as soon as another program waits for the
 budget. A step that sets `MAKEFLAGS` or `CARGO_MAKEFLAGS` itself keeps its
 own value. Neither variable is part of a step's key.
 
+## Memory for evaluating targets
+
+The budget covers the programs that steps run. pekit itself also uses
+memory while it evaluates a target's code, before and between its steps.
+The code of a large target, such as a Rust package with hundreds of crates,
+can need a few hundred megabytes while it runs.
+
+pekit evaluates at most a few targets at once, by default as many as `--jobs`
+and at least 8, and starts the next as one finishes. A target stops counting
+once its code has run to the end and it waits only for its steps, so its steps
+still run alongside the next targets' code. A build of hundreds of targets
+then needs the memory of a few at once rather than of all of them, and takes
+about as long, since pekit evaluates code on one thread either way.
+
+To change the limit, give `--evaluating` or set `PEKIT_EVALUATING`:
+
+```sh
+pekit package --evaluating 4 'app/**'
+```
+
+A lower number uses less memory. `0` evaluates every target named at once,
+which suits a build of a few targets on a machine with memory to spare.
+
 ## A step two builds need at once
 
 Two worktrees at the same commit need the same steps, and both would run

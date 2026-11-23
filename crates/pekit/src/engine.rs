@@ -46,7 +46,12 @@
 //! whichever targets reach it (see [Identities](crate::receipt#identities)),
 //! and each target's results are linked under its own name too
 //! ([`target_view`]). A target that fails, in its evaluation or by a step
-//! it needs, fails alone. Under
+//! it needs, fails alone. At most [`Settings::evaluating`] targets are
+//! evaluated at once, in the order given: a target is evaluating from its
+//! first run until its code ends, while it holds its working state, so
+//! another starts as one ends, and one that waits only for its steps no
+//! longer counts. A build of many targets then needs the memory of a few
+//! of them at once, not of all. Under
 //! `--no-dynamic`, a target whose unit stops for a step's result, a dynamic
 //! dependency, fails there.
 
@@ -349,6 +354,9 @@ pub struct Settings {
     /// budget](crate::budget#the-budget)): none if this build's pool alone
     /// bounds them.
     pub budget: Option<Arc<Budget>>,
+    /// How many targets may be evaluated at once, `0` for all of them (see
+    /// [Building](#building)).
+    pub evaluating: usize,
     /// When the build's [events](crate::events#events) are timed from: when
     /// it began, if none. A command of several builds, `pekit release`'s
     /// say, times them all from its first, so that they fall on one
@@ -850,6 +858,7 @@ fn new_run<'a>(
         found_remotely: 0,
         remote_failed: None,
         uploads: 0,
+        admitted: 0,
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -1476,6 +1485,9 @@ struct Run<'a> {
     /// How many uploads to the remote cache are on the pool, which the
     /// build's end waits for.
     uploads: usize,
+    /// How many of the roots, in order, may be evaluated (see
+    /// [`Run::admit`]).
+    admitted: usize,
 }
 
 /// The step that holds a name (see [`Run::claim_name`]).
@@ -1621,6 +1633,7 @@ impl Run<'_> {
     /// to is its root's.
     fn drive(&mut self) -> Result<(), BuildError> {
         loop {
+            let admitted = self.admit();
             // The memoised calls ended, and runs another unit waits for,
             // before this round's runs: a round that ends one, or finds one,
             // has moved on what a waiting unit waits for, though no step or
@@ -1633,6 +1646,8 @@ impl Run<'_> {
                 return Ok(());
             }
             let mut progressed = self.start_needed(&demands)?;
+            // A target whose code ended this round makes room for another.
+            progressed |= admitted | self.admit();
             progressed |= self.advance_steps()?;
             if !self.in_flight.is_empty() || self.background > 0 {
                 let Some(ran) = self.pool.next() else {
@@ -1681,6 +1696,35 @@ impl Run<'_> {
                 ));
             }
         }
+    }
+
+    /// Lets more roots be evaluated, in order, so that at most
+    /// [`Settings::evaluating`] are evaluating: admitted, not done, and
+    /// not yet ended with a value that waits only for its steps (see
+    /// [Building](#building)). Returns whether it let any.
+    fn admit(&mut self) -> bool {
+        let limit = match self.settings.evaluating {
+            0 => usize::MAX,
+            limit => limit,
+        };
+        let evaluating =
+            |root: &Root| root.done.is_none() && !matches!(root.main, Main::Holding(_));
+        let mut live = self
+            .roots
+            .iter()
+            .take(self.admitted)
+            .filter(|root| evaluating(root))
+            .count();
+        let was = self.admitted;
+        while live < limit
+            && let Some(root) = self.roots.get(self.admitted)
+        {
+            if evaluating(root) {
+                live += 1;
+            }
+            self.admitted += 1;
+        }
+        self.admitted > was
     }
 
     /// The error of a build whose targets and steps wait for each other's
@@ -1739,7 +1783,7 @@ impl Run<'_> {
         let no_dynamic = self.settings.no_dynamic;
         let query = self.query;
         let mut evaluated = Vec::new();
-        for root in &mut self.roots {
+        for root in self.roots.iter_mut().take(self.admitted) {
             if root.done.is_some() || !matches!(root.main, Main::Runnable) {
                 continue;
             }
