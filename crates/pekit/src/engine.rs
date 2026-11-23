@@ -1243,13 +1243,7 @@ fn workspace_stamps(store: &Store, root: &Path) -> Seen {
 fn keep_workspace_stamps(store: &Store, root: &Path, seen: &Seen) -> io::Result<()> {
     let mut kept = seen.clone();
     kept.retain_present();
-    let path = stamps_path(store, root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temp = path.with_extension(format!("tmp-{}", crate::sweep::token()));
-    fs::write(&temp, serde_json::to_vec(&kept).map_err(io::Error::other)?)?;
-    fs::rename(&temp, &path)
+    crate::store::keep_stamps(&stamps_path(store, root), &kept)
 }
 
 /// An engine error from an I/O failure.

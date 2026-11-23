@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git_export::{self, ExportError};
 use crate::layers::remove_tree;
-use crate::store::{Digest, Store};
+use crate::store::{Digest, Seen, Store};
 
 /// The lock's file, at the workspace's root.
 pub const LOCK_FILE: &str = "pekit.lock";
@@ -399,6 +399,10 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
     pins.sort_by(|left, right| left.path.cmp(&right.path));
     let mut exported: Vec<&str> = Vec::new();
     let mut differ = Vec::new();
+    // Each library's files as they were last read, so that one unchanged
+    // is not read again: a catalog pins a hundred libraries, of a hundred
+    // thousand files, checked each build.
+    let mut seen = library_stamps(store, root);
     for pin in pins {
         let dir = root.join(LIBRARIES_DIR).join(&pin.path);
         if !dir.is_dir() || exported.iter().any(|path| inside(&pin.path, path)) {
@@ -406,7 +410,7 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
             exported.push(&pin.path);
             continue;
         }
-        let tree = tree_of(root, store, &pin.path)?;
+        let tree = tree_of(root, store, &pin.path, &mut seen)?;
         if tree.hex() == pin.tree {
             // A library just as its pin has it is what an export would
             // write, whoever wrote it, so it is recorded as one: an export
@@ -433,7 +437,39 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
             ));
         }
     }
+    // Stamps that can't be kept are libraries read again next time.
+    seen.retain_present();
+    let _ = keep_library_stamps(store, root, &seen);
     Ok(differ)
+}
+
+/// Where the stamps of the files of the libraries of the workspace at
+/// `root` are kept, in `store`'s `seen/`, beside the workspace's own.
+fn library_stamps_path(store: &Store, root: &Path) -> PathBuf {
+    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
+    store
+        .root()
+        .join("seen")
+        .join(format!("{name}-libraries.json"))
+}
+
+/// The stamps of the files of the libraries of the workspace at `root` as
+/// the last check of them kept them, or none.
+fn library_stamps(store: &Store, root: &Path) -> Seen {
+    fs::read(library_stamps_path(store, root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps `seen`, the stamps of the files of the libraries of the workspace
+/// at `root`, for the next check.
+///
+/// # Errors
+///
+/// That the store cannot be written.
+fn keep_library_stamps(store: &Store, root: &Path, seen: &Seen) -> io::Result<()> {
+    crate::store::keep_stamps(&library_stamps_path(store, root), seen)
 }
 
 /// What makes a strict build's libraries other than the lock of the
@@ -567,10 +603,14 @@ fn nested(pin: &Pinned, others: &[Pinned]) -> Result<(), LockError> {
 }
 
 /// The digest of the tree of the library `path` as exported under the
-/// workspace at `root`, put into `store`.
-fn tree_of(root: &Path, store: &Store, path: &str) -> Result<Digest, LockError> {
+/// workspace at `root`, put into `store`, reading only what `seen` does not
+/// know unchanged.
+fn tree_of(root: &Path, store: &Store, path: &str, seen: &mut Seen) -> Result<Digest, LockError> {
     let dir = root.join(LIBRARIES_DIR).join(path);
-    store.put_tree(&dir).map_err(|error| io_error(&dir, &error))
+    store
+        .put_tree_seen(&dir, seen, &|_, _| false)
+        .map_err(|error| io_error(&dir, &error))?
+        .ok_or_else(|| LockError::Io(format!("`{}` cannot be read whole", dir.display())))
 }
 
 /// Exports the library `pin` at its commit into the workspace at `root`,
