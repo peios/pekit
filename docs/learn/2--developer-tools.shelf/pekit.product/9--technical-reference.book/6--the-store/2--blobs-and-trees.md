@@ -59,6 +59,12 @@ changed in the same tick of the file system's clock as it was stamped. So a
 stamp taken in the tick a put begins in, or later, by the clock of the
 tree's own file system, isn't trusted, as git treats its index.
 
+For each file taken by its stamp, the store checks for its blob once the
+walk is over, unless the tree is already marked complete. A gone blob is
+put back from its file. When every blob is found, the tree is marked
+complete, so walking the same tree again checks for none. These marks
+accumulate until an eviction removes them all.
+
 A file that is a hard link to a blob this process linked, by its device and
 inode, is that blob, and isn't read. A file that is read is hashed before
 it is copied, and isn't copied if its blob is there. A directory known not

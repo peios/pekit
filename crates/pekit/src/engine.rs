@@ -750,7 +750,8 @@ fn build_roots(
     })?;
     // A stamp cache that can't be kept is a workspace read again next time,
     // and copies that can't be are copied again.
-    let _ = keep_workspace_stamps(&run.store, &run.loaded.root, &run.workspace_seen.0);
+    let seen = std::mem::take(&mut run.workspace_seen.0);
+    let _ = keep_workspace_stamps(&run.store, &run.loaded.root, seen);
     let _ = run.copies.keep(&settings.outputs);
     // What a killed build left that can't be removed is left for the next.
     let _ = crate::sweep::sweep_stale(&run.store, &settings.scratch);
@@ -1240,10 +1241,9 @@ fn workspace_stamps(store: &Store, root: &Path) -> Seen {
 /// # Errors
 ///
 /// That the store cannot be written.
-fn keep_workspace_stamps(store: &Store, root: &Path, seen: &Seen) -> io::Result<()> {
-    let mut kept = seen.clone();
-    kept.retain_present();
-    crate::store::keep_stamps(&stamps_path(store, root), &kept)
+fn keep_workspace_stamps(store: &Store, root: &Path, mut seen: Seen) -> io::Result<()> {
+    seen.retain_present();
+    crate::store::keep_stamps(&stamps_path(store, root), &seen)
 }
 
 /// An engine error from an I/O failure.

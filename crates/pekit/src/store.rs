@@ -50,7 +50,10 @@
 //! the change, unless it was changed in the same tick of the file system's
 //! clock as it was stamped, which a stamp taken in the tick a put begins in,
 //! or after, by the clock of the tree's own file system, is not trusted
-//! for: as git keeps its index. A file that is a
+//! for: as git keeps its index. A file trusted by its stamp has its blob
+//! looked for once the walk is over, and only if the tree is not marked
+//! complete; all found, the tree is marked so, and the next walk to come to
+//! the same tree looks for none. A file that is a
 //! link to a blob this process linked, by its device and inode, is that
 //! blob, and is not read. A file read is hashed before it is copied, and
 //! not copied if its blob is there. A directory said to be fixed, such as a
@@ -139,8 +142,7 @@ impl Stamp {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Seen {
     /// Each file's stamp, and what the store keeps of it: kept in its
-    /// paths' order, so that stamps that did not change are the same bytes
-    /// ([`keep_stamps`]).
+    /// paths' order, so that the same stamps are kept as the same bytes.
     #[serde(serialize_with = "in_order")]
     files: HashMap<PathBuf, (Stamp, FileEntry)>,
     /// The directories that cannot change.
@@ -154,6 +156,14 @@ pub struct Seen {
     /// trees](trees#materialised-trees)).
     #[serde(skip)]
     mounted: HashMap<PathBuf, Digest>,
+    /// Each file a walk found there since this was read, whose stamp is
+    /// known to be of a file present.
+    #[serde(skip)]
+    visited: HashSet<PathBuf>,
+    /// Whether a file's stamp was added, changed or forgotten since this
+    /// was read, so that it is to be kept again.
+    #[serde(skip)]
+    edited: bool,
 }
 
 impl Seen {
@@ -163,9 +173,33 @@ impl Seen {
         self.fixed = fixed;
     }
 
-    /// Forgets each file that is no longer there.
+    /// Forgets each file that is no longer there: one a walk did not find
+    /// since this was read is looked for.
     pub fn retain_present(&mut self) {
-        self.files.retain(|path, _| path.exists());
+        let (count, visited) = (self.files.len(), &self.visited);
+        self.files
+            .retain(|path, _| visited.contains(path) || path.exists());
+        self.edited |= self.files.len() != count;
+    }
+
+    /// Forgets each file no walk found since this was read: of trees each
+    /// walked whole, those no longer there.
+    pub fn retain_visited(&mut self) {
+        let (count, visited) = (self.files.len(), &self.visited);
+        self.files.retain(|path, _| visited.contains(path));
+        self.edited |= self.files.len() != count;
+    }
+
+    /// Notes that the file at `path`, there, has the stamp and contents
+    /// `known`.
+    fn note(&mut self, path: &Path, known: (Stamp, FileEntry)) {
+        self.visited.insert(path.to_path_buf());
+        self.edited |= self.files.insert(path.to_path_buf(), known) != Some(known);
+    }
+
+    /// Forgets the stamp of the file at `path`.
+    fn forget(&mut self, path: &Path) {
+        self.edited |= self.files.remove(path).is_some();
     }
 
     /// Says that the directories said to be fixed could have changed.
@@ -222,6 +256,55 @@ struct Walk<'a> {
     /// What the walk saw, if it is to be looked at again (see [Trees read
     /// while they change](#trees-read-while-they-change)).
     watch: Option<Watch>,
+    /// Each file taken by its stamp to hold what it held, its blob not yet
+    /// looked for (see [Trees seen before](#trees-seen-before)).
+    trusted: Vec<(PathBuf, FileEntry)>,
+    /// Each tree taken as put before, unwalked: a fixed directory's, or a
+    /// mounted one's.
+    unwalked: Vec<Digest>,
+}
+
+impl Walk<'_> {
+    /// A walk of what `seen` knows, begun at `now`.
+    fn new<'a>(
+        (seen, now): (&'a mut Seen, (i64, i64)),
+        refuse: &'a dyn Fn(&Path, &fs::Metadata) -> bool,
+        left_out: &'a [PathBuf],
+        watch: Option<Watch>,
+    ) -> Walk<'a> {
+        Walk {
+            seen,
+            refuse,
+            now,
+            left_out,
+            watch,
+            trusted: Vec::new(),
+            unwalked: Vec::new(),
+        }
+    }
+
+    /// Forgets what the walk found, to walk again.
+    fn restart(&mut self) {
+        self.trusted.clear();
+        self.unwalked.clear();
+        self.seen.dirs.clear();
+        if let Some(watch) = &mut self.watch {
+            *watch = Watch::default();
+        }
+    }
+}
+
+/// Whether the files a walk trusted by their stamps have their blobs (see
+/// [`Store::trusted_held`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// Known so without looking: none was trusted, or the tree is
+    /// complete.
+    Known,
+    /// Looked for, and each found or put again.
+    Checked,
+    /// One is not what its stamp said: the tree is to be walked again.
+    Again,
 }
 
 /// What a read of a tree, or a file, that another process may be changing
@@ -559,18 +642,18 @@ fn in_order<S: serde::Serializer>(
     serde::Serialize::serialize(&ordered, serializer)
 }
 
-/// Keeps `seen`, stamps of files, at `path`, unless it holds them already:
-/// a large workspace's run to tens of megabytes, mostly as the last build
-/// left them.
+/// Keeps `seen`, stamps of files, at `path`, if any was added, changed or
+/// forgotten since it was read: a large workspace's run to tens of
+/// megabytes, mostly as the last build left them.
 ///
 /// # Errors
 ///
 /// That `path` cannot be written.
 pub fn keep_stamps(path: &Path, seen: &Seen) -> io::Result<()> {
-    let bytes = serde_json::to_vec(seen).map_err(io::Error::other)?;
-    if fs::read(path).is_ok_and(|kept| kept == bytes) {
+    if !seen.edited {
         return Ok(());
     }
+    let bytes = serde_json::to_vec(seen).map_err(io::Error::other)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -714,6 +797,15 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Whether the tree `digest` is known complete, by what this process
+    /// found or by its mark, without a walk.
+    fn marked_complete(&self, digest: &Digest) -> bool {
+        self.complete
+            .lock()
+            .is_ok_and(|complete| complete.contains(digest))
+            || self.complete_path(digest).exists()
+    }
+
     /// Whether the store holds every content of the tree `digest`, at any
     /// depth: marked so in `complete/` once it is found to.
     #[must_use]
@@ -736,7 +828,11 @@ impl Store {
     /// Marks the tree `digest` complete.
     fn mark_complete(&self, digest: &Digest) -> io::Result<()> {
         fs::create_dir_all(self.root.join("complete"))?;
-        File::create(self.complete_path(digest)).map(drop)
+        File::create(self.complete_path(digest))?;
+        if let Ok(mut complete) = self.complete.lock() {
+            complete.insert(*digest);
+        }
+        Ok(())
     }
 
     /// Removes every mark that a tree is complete, as an eviction does
@@ -759,12 +855,7 @@ impl Store {
     /// if it does: by what this process found, or by its mark, or by a walk
     /// of the tree.
     fn complete_by(&self, digest: &Digest) -> Option<Found> {
-        if self
-            .complete
-            .lock()
-            .is_ok_and(|complete| complete.contains(digest))
-            || self.complete_path(digest).exists()
-        {
+        if self.marked_complete(digest) {
             if let Ok(mut complete) = self.complete.lock() {
                 complete.insert(*digest);
             }
@@ -1406,18 +1497,12 @@ impl Store {
         refuse: &dyn Fn(&Path, &fs::Metadata) -> bool,
         left_out: &[PathBuf],
     ) -> io::Result<Option<Digest>> {
-        let mut walk = Walk {
-            seen,
-            refuse,
-            now,
-            left_out,
-            watch: None,
-        };
+        let mut walk = Walk::new((seen, now), refuse, left_out, None);
         let meta = fs::symlink_metadata(path)?;
         if refuse(path, &meta) {
             return Ok(None);
         }
-        self.at_once(|| self.tree_seen(path, &mut walk))
+        self.put_walked(path, &mut walk)
     }
 
     /// [`Store::put_tree_seen_without`] of a tree another process may be
@@ -1440,18 +1525,69 @@ impl Store {
         if refuse(path, &meta) {
             return Ok(Steady::Read(None));
         }
-        let mut walk = Walk {
-            seen,
-            refuse,
-            now,
-            left_out,
-            watch: Some(Watch::default()),
-        };
-        let put = self.at_once(|| self.tree_seen(path, &mut walk));
+        let mut walk = Walk::new((seen, now), refuse, left_out, Some(Watch::default()));
+        let put = self.put_walked(path, &mut walk);
         match walk.watch.and_then(|watch| watch.changed(left_out)) {
             Some(changed) => Ok(Steady::Changed(changed)),
             None => put.map(Steady::Read),
         }
+    }
+
+    /// The tree at `path` put into the store, as `walk` has it, at once
+    /// (see [Putting a tree at once](#putting-a-tree-at-once)), and the
+    /// blobs of the files it trusted by their stamps looked for: the tree
+    /// walked again if one is not what its stamp said, and marked complete
+    /// if they were looked for and found.
+    fn put_walked(&self, path: &Path, walk: &mut Walk<'_>) -> io::Result<Option<Digest>> {
+        // Part of a put under way, what this one writes is in place only
+        // once that one ends: too soon to mark the tree complete.
+        let settles = AT_ONCE.with(|at_once| at_once.borrow().is_none());
+        loop {
+            let walked = self.at_once(|| {
+                let Some(tree) = self.tree_seen(path, walk)? else {
+                    return Ok(None);
+                };
+                Ok(Some((tree, self.trusted_held(walk, &tree)?)))
+            })?;
+            match walked {
+                None => return Ok(None),
+                Some((_, Held::Again)) => walk.restart(),
+                Some((tree, held)) => {
+                    if settles
+                        && held == Held::Checked
+                        && walk.unwalked.iter().all(|tree| self.holds_tree(tree))
+                    {
+                        let _ = self.mark_complete(&tree);
+                    }
+                    return Ok(Some(tree));
+                }
+            }
+        }
+    }
+
+    /// Whether each file `walk` trusted by its stamp has its blob, the
+    /// tree `tree`: known if the tree is complete, or looked for, and a
+    /// blob gone put again from its file. [`Held::Again`] if a file is not
+    /// what its stamp said, each such then forgotten.
+    fn trusted_held(&self, walk: &mut Walk<'_>, tree: &Digest) -> io::Result<Held> {
+        if walk.trusted.is_empty() {
+            return Ok(Held::Known);
+        }
+        if self.marked_complete(tree) {
+            walk.trusted.clear();
+            return Ok(Held::Known);
+        }
+        let mut held = Held::Checked;
+        for (path, entry) in std::mem::take(&mut walk.trusted) {
+            if self.blob_path(&entry.digest, entry.executable).is_file() {
+                continue;
+            }
+            if self.put_file_once(&path)? != entry {
+                walk.seen.forget(&path);
+                held = Held::Again;
+            }
+        }
+        Ok(held)
     }
 
     /// [`Store::put_tree_seen`] of `path`, as `walk` has it.
@@ -1489,6 +1625,7 @@ impl Store {
                 TreeEntry::Link { name, target }
             } else if kind.is_dir() {
                 if let Some(tree) = walk.seen.mounted.get(&at).or(walk.seen.dirs.get(&at)) {
+                    walk.unwalked.push(*tree);
                     TreeEntry::Dir { name, tree: *tree }
                 } else {
                     if (walk.refuse)(&at, &meta) {
@@ -1528,15 +1665,18 @@ impl Store {
     ) -> io::Result<FileEntry> {
         let meta = fs::metadata(path)?;
         let never = |_: &Path, _: &fs::Metadata| false;
-        let mut walk = Walk {
-            seen,
-            refuse: &never,
-            now,
-            left_out: &[],
-            watch: None,
-        };
-        self.file_seen(path, &meta, &mut walk)?
-            .ok_or_else(|| io::Error::other("refused"))
+        let mut walk = Walk::new((seen, now), &never, &[], None);
+        let entry = self
+            .file_seen(path, &meta, &mut walk)?
+            .ok_or_else(|| io::Error::other("refused"))?;
+        if walk.trusted.is_empty() || self.blob_path(&entry.digest, entry.executable).is_file() {
+            return Ok(entry);
+        }
+        let put = self.put_file_once(path)?;
+        if put != entry {
+            walk.seen.forget(path);
+        }
+        Ok(put)
     }
 
     /// [`Store::put_file_seen_at`] of a file another process may be
@@ -1574,20 +1714,24 @@ impl Store {
             return Ok(Some(entry));
         }
         let stamp = Stamp::of(meta);
+        // Its blob is looked for once the walk is over, and only if the
+        // tree is not known complete.
         if let Some((known, entry)) = walk.seen.files.get(path)
             && *known == stamp
-            && self.blob_path(&entry.digest, entry.executable).is_file()
         {
-            return Ok(Some(*entry));
+            let entry = *entry;
+            walk.seen.visited.insert(path.to_path_buf());
+            walk.trusted.push((path.to_path_buf(), entry));
+            return Ok(Some(entry));
         }
         if (walk.refuse)(path, meta) {
             return Ok(None);
         }
         let entry = self.put_file_once(path)?;
         if stamp.changed < walk.now {
-            walk.seen.files.insert(path.to_path_buf(), (stamp, entry));
+            walk.seen.note(path, (stamp, entry));
         } else {
-            walk.seen.files.remove(path);
+            walk.seen.forget(path);
         }
         Ok(Some(entry))
     }

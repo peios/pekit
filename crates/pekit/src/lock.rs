@@ -437,8 +437,10 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
             ));
         }
     }
-    // Stamps that can't be kept are libraries read again next time.
-    seen.retain_present();
+    // Every library still there was walked whole, but those just exported,
+    // so stamps not walked are of files gone, or replaced. Stamps that
+    // can't be kept are libraries read again next time.
+    seen.retain_visited();
     let _ = keep_library_stamps(store, root, &seen);
     Ok(differ)
 }
