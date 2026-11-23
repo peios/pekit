@@ -63,6 +63,9 @@ pekit \- build, test, run, and package GCSL build files as cached, sandboxed ste
 .RB [ \-\-limit
 .IR SIZE ]
 .br
+.B pekit store verify
+.RB [ \-\-repair ]
+.br
 .B pekit
 .RB [ \-h | \-\-help | \-V | \-\-version ]
 .SH DESCRIPTION
@@ -313,6 +316,16 @@ A build evicts only when it ends with no other
 using the store;
 .B store evict
 waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
+.TP
+.B store verify
+Read every blob of the store and hash it again, and list each whose contents are not those its name says, and each that is not read-only, which can be changed through any link to it.
+Builds can run meanwhile.
+Exits 1 if it finds any.
+With
+.BR \-\-repair ,
+it makes each blob that is not read-only so, and removes each whose contents are wrong, so that whatever needs it is fetched or built again; it waits for the store as
+.B store evict
+does.
 .SH OPTIONS
 .B build ,
 .BR test ,

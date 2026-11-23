@@ -343,6 +343,25 @@ pub fn evict_alone(
     limit: u64,
     waiting: &mut dyn FnMut(),
 ) -> io::Result<Option<Evicted>> {
+    alone(root, scratch, waiting, |store| evict_held(store, limit))
+}
+
+/// `work` done on the store at `root`, its scratch directory `scratch`,
+/// once no other process has it, waiting, `waiting` told once if it waits,
+/// while it holds the store's gate, so that a build that would open the
+/// store meanwhile waits for it rather than keeping it from it; what killed
+/// builds left removed first, as a build that ends alone does
+/// ([`evict_alone`]).
+///
+/// # Errors
+///
+/// That the store's locks cannot be taken, or what `work` fails with.
+pub fn alone<T>(
+    root: &Path,
+    scratch: &Path,
+    waiting: &mut dyn FnMut(),
+    work: impl FnOnce(&Store) -> io::Result<T>,
+) -> io::Result<T> {
     fs::create_dir_all(root)?;
     let mut told = false;
     let mut take = |file: &File| match file.try_lock() {
@@ -364,9 +383,9 @@ pub fn evict_alone(
     // No process holds a claim, or is using what one left.
     let _ = remove_tree(&root.join("claims"));
     let _ = crate::sweep::sweep_held(&root.join("tmp"), scratch);
-    let evicted = evict_held(&store, limit);
+    let done = work(&store);
     drop(gate);
-    evicted
+    done
 }
 
 /// Adds the bytes of the blobs `store` wrote since this was last asked to

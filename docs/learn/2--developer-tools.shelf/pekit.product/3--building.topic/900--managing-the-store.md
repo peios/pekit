@@ -138,3 +138,28 @@ the changed file to later steps. Leave these files read-only.
 
 The files each target gives are the exception: pekit copies them, so you
 can change them freely.
+
+## Verify the store
+
+If a store file might have been changed, for example by a `chmod -R` over
+`pekit-out/`, or after a disk fault, verify the store:
+
+```sh
+pekit store verify
+```
+
+It reads every file the store keeps and hashes it again, and lists each
+whose contents aren't those its name says, and each that isn't read-only.
+Builds can run meanwhile. On a large store this takes minutes, reading on
+up to eight threads, and it reports how far it is every few seconds.
+
+To repair what it finds:
+
+```sh
+pekit store verify --repair
+```
+
+It makes each file that isn't read-only so again, and removes each whose
+contents are wrong, so that the next build fetches or builds again what
+needed it. Like `pekit store evict`, it waits for the builds that are
+using the store to end, and builds that start meanwhile wait for it.
