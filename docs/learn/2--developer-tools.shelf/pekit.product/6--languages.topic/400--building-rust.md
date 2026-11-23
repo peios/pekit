@@ -368,16 +368,38 @@ A crate from a git repository is pinned by the commit `Cargo.lock` records
 for it. `rust.vendored` fetches the repository at that commit with
 `fetch_git`, once for every crate it holds. It gives each crate's directory
 as the repository has it, so a crate that takes another of the same
-repository by its path still finds it.
+repository by its path still finds it. A crate whose manifest takes values
+from its workspace's, such as `version.workspace = true`, or names a
+sibling crate's path, has its manifest written for it to build on its own.
 
-These crates are errors:
+A crate from anywhere else is an error, since nothing pins it.
 
-- A git crate whose manifest takes values from its workspace's, such as
-  `version.workspace = true`. Its manifest would need rewriting to build on
-  its own.
-- A git crate from a repository the workspace also imports a library from,
-  at another commit than `pekit.lock` pins the library at.
-- A crate from anywhere else, since nothing pins it.
+## Git crates of a pinned library
+
+If `pekit.lock` pins a library from the same repository as a git crate,
+`Cargo.lock` must pin the crate at the library's commit, because the
+library's settings for the crate and the crate must match. A crate at
+another commit is an error that names both commits, so update one lock to
+match the other.
+
+A distribution that builds others' workspaces can set the context
+`crates_at_pins` instead. Each such crate is then built at the library's
+commit, not at the commit `Cargo.lock` records, so a fix to one crate of a
+repository reaches every workspace that pins its library without a change
+to each workspace's `Cargo.lock`:
+
+```gcsl
+let vendor = rust.vendored(file("Cargo.lock")) with { crates_at_pins = true }
+```
+
+`rust.overrides_report(vendor)` lists each crate built at another commit
+than its lock records, one line each, `NAME URL LOCKED -> PINNED`, for a
+packager to record.
+
+Cargo takes the crate only while the lock still describes it. If the
+crate has another version at the library's commit, the build fails and
+says to update the lock with `cargo update -p NAME`. If its dependencies
+changed, Cargo's own check of the lock fails.
 
 ## Targets and flags
 

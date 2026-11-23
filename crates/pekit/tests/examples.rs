@@ -1450,23 +1450,146 @@ fn a_git_crate_is_given_what_it_reads_beside_its_directory() {
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "hello from beside\n");
 }
 
+/// Commits `files` in the git repository at `origin`, each a path and its
+/// text: the new commit's name.
+fn commit_in(origin: &Path, files: &[(&str, &str)]) -> String {
+    for (path, text) in files {
+        fs::write(origin.join(path), text).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let ran = Command::new("git")
+            .arg("-C")
+            .arg(origin)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    };
+    git(&["commit", "--quiet", "-am", "next"]);
+    git(&["rev-parse", "HEAD"])
+}
+
+/// Pins, in the workspace at `dir`'s `pekit.lock`, the library
+/// `example.org/greeting` from `url` at `commit`, its directory there, so
+/// that nothing is fetched to restore it.
+fn pin_greeting(dir: &Path, (url, commit): (&str, &str)) {
+    fs::create_dir_all(dir.join(".gcsl/libraries/example.org/greeting")).unwrap();
+    fs::write(
+        dir.join("pekit.lock"),
+        format!(
+            "{{\"libraries\": [{{\"path\": \"example.org/greeting\", \"git\": \"{url}.git\", \
+             \"dir\": \"\", \"commit\": \"{commit}\", \"tree\": \"\"}}]}}\n"
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
-fn a_git_crate_must_be_at_the_commit_its_repository_s_library_is_pinned_at() {
+fn a_git_crate_is_built_at_the_commit_its_repository_s_library_is_pinned_at() {
+    let rust = rust_downloads();
+    let names: Vec<&str> = DOWNLOADS.iter().map(|(name, _)| *name).collect();
+    let Some(state) = seeded(&names).filter(|_| rust_here(&rust)) else {
+        skip("Rust or the crates are not on this machine");
+        return;
+    };
+    let store = Store::open(&state.path().join("store")).unwrap();
+    for path in &rust {
+        store.put_file(path).unwrap();
+    }
+    let (origin, url, locked) = greeting_repository();
+    // The library is pinned at a later commit than `Cargo.lock` pins the
+    // crate at, the crates' versions the same.
+    let pinned = commit_in(
+        origin.path(),
+        &[(
+            "words/src/lib.rs",
+            "pub const HELLO: &str = \"hello from the pin\";\n",
+        )],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    greeting_app_built(
+        dir.path(),
+        (&url, &locked),
+        "def build app() {\n\
+         \x20   let vendor = rust.vendored(file(\"app/Cargo.lock\")) with { crates_at_pins = true }\n\
+         \x20   = rust.cargo_build(dir(\"app\"), vendor, bins = [\"app\"])\n\
+         }\n\
+         def build overrides() {\n\
+         \x20   = rust.overrides_report(rust.vendored(file(\"app/Cargo.lock\")) with { crates_at_pins = true })\n\
+         }\n",
+    );
+    pin_greeting(dir.path(), (&url, &pinned));
+    let built = build_in(dir.path(), state.path(), "app").unwrap();
+    let Plain::Dir { path, .. } = &built.value else {
+        panic!("not a directory: {:?}", built.value);
+    };
+    let program = built_file(dir.path(), &format!("{path}/app"));
+    let ran = Command::new(&program).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "hello from the pin\n");
+    // What was built at the pin is told, crate by crate.
+    let report = build_in(dir.path(), state.path(), "overrides").unwrap();
+    assert_eq!(
+        report.value,
+        Plain::Str(format!(
+            "greeting {url} {locked} -> {pinned}\nwords {url} {locked} -> {pinned}\n"
+        ))
+    );
+}
+
+#[test]
+fn a_git_crate_of_another_version_at_its_library_s_pin_is_refused() {
+    let (origin, url, locked) = greeting_repository();
+    let pinned = commit_in(
+        origin.path(),
+        &[(
+            "greeting/Cargo.toml",
+            "[package]\nname = \"greeting\"\nversion = \"0.2.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nwords = { path = \"../words\" }\n",
+        )],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    greeting_app_built(
+        dir.path(),
+        (&url, &locked),
+        "def build app() {\n\
+         \x20   let vendor = rust.vendored(file(\"app/Cargo.lock\")) with { crates_at_pins = true }\n\
+         \x20   = rust.cargo_build(dir(\"app\"), vendor, bins = [\"app\"])\n\
+         }\n",
+    );
+    pin_greeting(dir.path(), (&url, &pinned));
+    let state = tempfile::tempdir().unwrap();
+    let error = build_in(dir.path(), state.path(), "app").unwrap_err();
+    assert!(
+        error.contains(&format!(
+            "`Cargo.lock` pins `greeting` 0.1.0 at `{locked}` of `{url}`, but `pekit.lock` pins a \
+             library of the same repository at `{pinned}`, where `greeting` is 0.2.0"
+        )),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_git_crate_must_be_at_its_library_s_pin_unless_built_at_pins() {
     let (_origin, url, commit) = greeting_repository();
     let dir = tempfile::tempdir().unwrap();
     greeting_app(dir.path(), (&url, &commit));
     // The lock pins a library from the crate's repository at another
     // commit; the library is there, so nothing is fetched to restore it.
     let other = "0".repeat(40);
-    fs::create_dir_all(dir.path().join(".gcsl/libraries/example.org/greeting")).unwrap();
-    fs::write(
-        dir.path().join("pekit.lock"),
-        format!(
-            "{{\"libraries\": [{{\"path\": \"example.org/greeting\", \"git\": \"{url}.git\", \
-             \"dir\": \"\", \"commit\": \"{other}\", \"tree\": \"\"}}]}}\n"
-        ),
-    )
-    .unwrap();
+    pin_greeting(dir.path(), (&url, &other));
     let state = tempfile::tempdir().unwrap();
     let error = build_in(dir.path(), state.path(), "app").unwrap_err();
     assert!(
