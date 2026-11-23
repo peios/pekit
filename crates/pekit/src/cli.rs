@@ -110,6 +110,24 @@ enum Command {
     Sources(PackageArgs),
     /// Build a package from `HEAD` strictly, publish it, and tag it.
     Release(ReleaseArgs),
+    /// Look after the store: how large it is, or evict it now.
+    #[command(subcommand)]
+    Store(StoreCommand),
+}
+
+/// `pekit store`'s commands (see [Commands](#commands)).
+#[derive(Debug, Subcommand)]
+enum StoreCommand {
+    /// Show where the store is, how large, its limit, and whether a build
+    /// has it.
+    Stats,
+    /// Evict the store to within its limit now: waiting for the builds that
+    /// have it to end, while builds that start meanwhile wait for this.
+    Evict {
+        /// The size to evict to, in place of the store's limit.
+        #[arg(long, value_name = "SIZE")]
+        limit: Option<String>,
+    },
 }
 
 /// `pekit release`'s arguments (see [Commands](#commands)).
@@ -498,6 +516,7 @@ pub fn run(
         Command::Lock(args) => lock_command(&args, cwd, terminal),
         Command::Sources(args) => sources_command(&args, cwd, terminal),
         Command::Release(args) => release_command(&args, cwd, terminal),
+        Command::Store(command) => store_command(&command, terminal),
     }
 }
 
@@ -1855,6 +1874,103 @@ fn emptied_but_lock(store: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `pekit store`: the store's state, as `command` asks, or its eviction.
+fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCode {
+    let cache = cache_dir();
+    let root = cache.join("store");
+    let limit = match command {
+        StoreCommand::Evict { limit: Some(limit) } => limit_named(Some(limit), "`--limit`"),
+        StoreCommand::Evict { limit: None } | StoreCommand::Stats => {
+            MachineConf::read().and_then(|conf| conf.cache_limit())
+        }
+    };
+    let limit = match limit {
+        Ok(limit) => limit,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let shown_limit = limit.map_or_else(|| "none".to_owned(), shown_size);
+    match command {
+        StoreCommand::Stats => {
+            let _ = writeln!(terminal.out, "store: {}", root.display());
+            let size = match crate::evict::ledgered(&root) {
+                Some((bytes, walked)) => format!(
+                    "{}, by its ledger, last walked {}",
+                    shown_size(bytes),
+                    shown_ago(walked)
+                ),
+                None => "not measured yet: an eviction measures it".to_owned(),
+            };
+            let _ = writeln!(terminal.out, "size: {size}");
+            let _ = writeln!(terminal.out, "limit: {shown_limit}");
+            let evicted = std::fs::metadata(root.join("eviction.json"))
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or_else(|| "never".to_owned(), |when| shown_ago(when.as_secs()));
+            let _ = writeln!(terminal.out, "last evicted: {evicted}");
+            let used = match crate::evict::in_use(&root) {
+                Ok(true) => "by another pekit",
+                Ok(false) => "by none",
+                Err(_) => "cannot be told",
+            };
+            let _ = writeln!(terminal.out, "in use: {used}");
+            ExitCode::SUCCESS
+        }
+        StoreCommand::Evict { .. } => {
+            let Some(limit) = limit else {
+                let _ = writeln!(terminal.out, "the store has no limit: nothing to evict");
+                return ExitCode::SUCCESS;
+            };
+            let err = &mut *terminal.err;
+            let mut waiting = || {
+                let _ = writeln!(
+                    err,
+                    "waiting for the builds that have the store to end; builds that start \
+                     meanwhile wait for this"
+                );
+            };
+            match crate::evict::evict_alone(&root, &cache.join("scratch"), limit, &mut waiting) {
+                Ok(Some(evicted)) => {
+                    let _ = writeln!(
+                        terminal.out,
+                        "evicted {}: the store is {}, within {shown_limit}",
+                        shown_size(evicted.before.saturating_sub(evicted.after)),
+                        shown_size(evicted.after)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(None) => {
+                    let _ = writeln!(
+                        terminal.out,
+                        "nothing to evict: the store is within {shown_limit}"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    let _ = writeln!(terminal.err, "error: cannot evict the store: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+/// How long ago `seconds`, since the Unix epoch, was, as a person reads it.
+fn shown_ago(seconds: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs());
+    match now.saturating_sub(seconds) {
+        ago if ago < 120 => "just now".to_owned(),
+        ago if ago < 2 * 3600 => format!("{} minutes ago", ago / 60),
+        ago if ago < 2 * 86_400 => format!("{} hours ago", ago / 3600),
+        ago => format!("{} days ago", ago / 86_400),
+    }
+}
+
 /// Whether the test whose result is `result`, a `TestResult`, passed, and
 /// its failure's message; `None` for a value of another shape.
 fn test_result(result: &Plain) -> Option<(bool, &str)> {
@@ -2098,34 +2214,68 @@ struct MachineWide {
 /// That the configuration cannot be read, or sets what is no setting, or
 /// the budget's directory cannot be made.
 fn machine_wide(flag: Option<usize>, cache: &Path, jobs: usize) -> Result<MachineWide, String> {
-    let config = config_dir().join("machine.conf");
-    let file = match std::fs::read_to_string(&config) {
-        Ok(text) => Some(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot read `{}`: {error}", config.display())),
-    };
-    let var = |name: &str| {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    };
-    let setting = |name: &str, key: &str| match var(name) {
-        Some(value) => (Some(value), format!("`{name}`")),
-        None => (
-            crate::budget::machine_setting(file.as_deref(), key),
-            format!("`{key}` in `{}`", config.display()),
-        ),
-    };
-    let (limit, named) = setting("PEKIT_CACHE_LIMIT", "cache_limit");
-    let cache_limit = limit_named(limit.as_deref(), &named)?;
-    let (number, named) = setting("PEKIT_EVALUATING", "evaluating");
+    let conf = MachineConf::read()?;
+    let cache_limit = conf.cache_limit()?;
+    let (number, named) = conf.setting("PEKIT_EVALUATING", "evaluating");
     let evaluating = evaluating_of(flag, number.as_deref(), &named, jobs)?;
-    let budget = machine_budget(cache, (&config, file.as_deref()))?;
+    let budget = machine_budget(cache, (&conf.path, conf.text.as_deref()))?;
     Ok(MachineWide {
         cache_limit,
         evaluating,
         budget,
     })
+}
+
+/// The machine's configuration, `machine.conf` in the configuration
+/// directory, as read (see [`MachineWide`]).
+struct MachineConf {
+    /// Where it is.
+    path: PathBuf,
+    /// What it says, if it is there.
+    text: Option<String>,
+}
+
+impl MachineConf {
+    /// The machine's configuration.
+    ///
+    /// # Errors
+    ///
+    /// That it is there but cannot be read.
+    fn read() -> Result<Self, String> {
+        let path = config_dir().join("machine.conf");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
+        };
+        Ok(Self { path, text })
+    }
+
+    /// What the environment's `name` sets, else the configuration's `key`,
+    /// if either sets it, and how to name where it was set.
+    fn setting(&self, name: &str, key: &str) -> (Option<String>, String) {
+        match std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => (Some(value), format!("`{name}`")),
+            None => (
+                crate::budget::machine_setting(self.text.as_deref(), key),
+                format!("`{key}` in `{}`", self.path.display()),
+            ),
+        }
+    }
+
+    /// How large the store may be: `PEKIT_CACHE_LIMIT`, else
+    /// `cache_limit`, else the default; `None` for no limit.
+    ///
+    /// # Errors
+    ///
+    /// That the limit set is no size.
+    fn cache_limit(&self) -> Result<Option<u64>, String> {
+        let (limit, named) = self.setting("PEKIT_CACHE_LIMIT", "cache_limit");
+        limit_named(limit.as_deref(), &named)
+    }
 }
 
 /// The machine's budget, its limits as the environment, else the machine's

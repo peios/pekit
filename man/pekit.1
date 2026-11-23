@@ -57,6 +57,12 @@ pekit \- build, test, run, and package GCSL build files as cached, sandboxed ste
 .B pekit clean
 .RB [ \-\-cache ]
 .br
+.B pekit store stats
+.br
+.B pekit store evict
+.RB [ \-\-limit
+.IR SIZE ]
+.br
 .B pekit
 .RB [ \-h | \-\-help | \-V | \-\-version ]
 .SH DESCRIPTION
@@ -289,6 +295,23 @@ Each is written as it is recorded, so a recipe that fails, or a stop, keeps the 
 .B clean
 Remove
 .IR pekit-out/ .
+.TP
+.B store stats
+Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, and whether another
+.B pekit
+has it open.
+.TP
+.B store evict
+Evict the store to within its limit, or
+.I SIZE
+with
+.BR \-\-limit ,
+now.
+A build evicts only when it ends with no other
+.B pekit
+using the store;
+.B store evict
+waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
 .SH OPTIONS
 .B build ,
 .BR test ,

@@ -543,16 +543,42 @@ impl Store {
     ///
     /// That the directories cannot be made.
     pub fn open(root: &Path) -> io::Result<Self> {
-        for part in ["cas", "records", "tmp"] {
-            fs::create_dir_all(root.join(part))?;
-        }
-        let held = File::options()
+        fs::create_dir_all(root)?;
+        // An eviction that waits for the store alone holds its gate, so
+        // that no build opens it meanwhile: this one waits for it there.
+        let gate = Self::lock_file(root, "gate")?;
+        gate.lock_shared()?;
+        let held = Self::lock_file(root, "lock")?;
+        // An eviction running elsewhere is waited for.
+        held.lock_shared()?;
+        drop(gate);
+        Self::with_held(root, held)
+    }
+
+    /// The file `name` in the store's directory `root`, opened to be locked,
+    /// made if it is not there.
+    ///
+    /// # Errors
+    ///
+    /// That it cannot be opened.
+    pub(crate) fn lock_file(root: &Path, name: &str) -> io::Result<File> {
+        File::options()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(root.join("lock"))?;
-        // An eviction running elsewhere is waited for.
-        held.lock_shared()?;
+            .open(root.join(name))
+    }
+
+    /// The store in the directory `root`, which `held`, its lock, holds as
+    /// the caller took it, its directories made if they are not there.
+    ///
+    /// # Errors
+    ///
+    /// That the directories cannot be made.
+    pub(crate) fn with_held(root: &Path, held: File) -> io::Result<Self> {
+        for part in ["cas", "records", "tmp"] {
+            fs::create_dir_all(root.join(part))?;
+        }
         Ok(Self {
             root: root.to_path_buf(),
             linked: Arc::default(),

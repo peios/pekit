@@ -39,6 +39,34 @@ eviction waits until no other pekit process is using the store, so a build
 that runs while another is running leaves it to a later build. If the store
 is over its limit then, pekit warns that nothing was evicted.
 
+## See and evict the store
+
+`pekit store stats` shows where the store is, how large it was when it was
+last measured, its limit, when it was last evicted, and whether another
+pekit process is using it:
+
+```text
+store: /home/me/.cache/pekit/store
+size: 402.3 GiB, by its ledger, last walked 3 hours ago
+limit: 400.0 GiB
+last evicted: 2 days ago
+in use: by another pekit
+```
+
+A build evicts only when it ends with no other pekit process using the
+store, so on a machine where builds overlap, the store can grow past its
+limit, and each build warns of it. `pekit store evict` evicts it now
+instead. It waits for the builds that are using the store to end, and a
+build that starts meanwhile waits for the eviction rather than holding
+it off:
+
+```sh
+pekit store evict
+```
+
+`--limit` evicts to another size than the store's limit, such as
+`--limit 300GiB` to make room ahead of a large build.
+
 ## Move the store
 
 The store is in pekit's cache directory. To keep it on another disk, set
