@@ -161,11 +161,16 @@ pub fn sweep_seen(seen: &Path) -> io::Result<()> {
                 continue;
             };
             if !Path::new(std::ffi::OsStr::from_bytes(&root)).is_dir() {
-                remove(&format!("{digest}.json"))?;
-                remove(&format!("{digest}-libraries.json"))?;
+                for kept in ["", "-libraries"] {
+                    remove(&format!("{digest}{kept}.stamps"))?;
+                    remove(&format!("{digest}{kept}.json"))?;
+                }
                 remove(&name)?;
             }
-        } else if let Some(stem) = name.strip_suffix(".json") {
+        } else if let Some(stem) = name
+            .strip_suffix(".stamps")
+            .or_else(|| name.strip_suffix(".json"))
+        {
             let digest = stem.strip_suffix("-libraries").unwrap_or(stem);
             // Gone already, with the stamps of a workspace gone, is no
             // stamps of any.

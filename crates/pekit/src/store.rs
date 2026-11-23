@@ -59,6 +59,20 @@
 //! not copied if its blob is there. A directory said to be fixed, such as a
 //! sealed composition, is walked once until it is said to have changed.
 //!
+//! # Stamps kept
+//!
+//! A build keeps the stamps of a workspace's files, and of its libraries'
+//! files, in the store's `seen/` ([`stamps_path`]), to read again before
+//! the next: a hundred thousand of them for a catalog, which a build reads
+//! whole before it can walk anything. So they are kept as bytes, not text:
+//! `PKSTAMP1`, how many there are, and each in its path's order, the length
+//! its path shares with the one before and the rest of it, then its stamp,
+//! its contents' digest and size, and whether it is executable, each number
+//! little-endian. Stamps that cannot be read, from a pekit that kept them
+//! otherwise, say, are none, and a build that finds none reads each file
+//! again. Those an older pekit kept as JSON beside them are read once and
+//! kept anew.
+//!
 //! # Reading ahead
 //!
 //! A walk spends most of its time asking the file system for each entry's
@@ -777,11 +791,110 @@ fn in_order<S: serde::Serializer>(
 
 /// Where the store at `store` keeps stamps of the workspace at `root`, in
 /// `seen/`, by a digest of its path: its own files' if `suffix` is empty,
-/// and its libraries' if it is `-libraries`.
+/// and its libraries' if it is `-libraries` (see [Stamps
+/// kept](#stamps-kept)).
 #[must_use]
 pub fn stamps_path(store: &Path, root: &Path, suffix: &str) -> PathBuf {
     let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
-    store.join("seen").join(format!("{name}{suffix}.json"))
+    store.join("seen").join(format!("{name}{suffix}.stamps"))
+}
+
+/// What begins a file of stamps kept (see [Stamps kept](#stamps-kept)).
+const STAMPS_MAGIC: &[u8; 8] = b"PKSTAMP1";
+
+/// The bytes of each file's stamp and contents of `files`, in its paths'
+/// order (see [Stamps kept](#stamps-kept)).
+fn stamps_encoded(files: &HashMap<PathBuf, (Stamp, FileEntry)>) -> Vec<u8> {
+    let mut ordered: Vec<(&[u8], &(Stamp, FileEntry))> = files
+        .iter()
+        .map(|(path, known)| (path.as_os_str().as_encoded_bytes(), known))
+        .collect();
+    ordered.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut bytes = Vec::with_capacity(16 + ordered.len() * 128);
+    bytes.extend_from_slice(STAMPS_MAGIC);
+    bytes.extend_from_slice(&(ordered.len() as u64).to_le_bytes());
+    let mut last: &[u8] = &[];
+    for (path, (stamp, entry)) in ordered {
+        let shared = path.iter().zip(last).take_while(|(a, b)| a == b).count();
+        let rest = &path[shared..];
+        for number in [shared, rest.len()] {
+            bytes.extend_from_slice(&u32::try_from(number).unwrap_or(u32::MAX).to_le_bytes());
+        }
+        bytes.extend_from_slice(rest);
+        for number in [stamp.node.0, stamp.node.1, stamp.size] {
+            bytes.extend_from_slice(&number.to_le_bytes());
+        }
+        bytes.extend_from_slice(&stamp.mode.to_le_bytes());
+        for number in [
+            stamp.modified.0,
+            stamp.modified.1,
+            stamp.changed.0,
+            stamp.changed.1,
+        ] {
+            bytes.extend_from_slice(&number.to_le_bytes());
+        }
+        bytes.extend_from_slice(&entry.digest.0);
+        bytes.extend_from_slice(&entry.size.to_le_bytes());
+        bytes.push(u8::from(entry.executable));
+        last = path;
+    }
+    bytes
+}
+
+/// The stamps `bytes` hold, as [`stamps_encoded`] writes them; `None` if
+/// they are no such bytes, or cut short.
+fn stamps_decoded(bytes: &[u8]) -> Option<HashMap<PathBuf, (Stamp, FileEntry)>> {
+    struct Reader<'a>(&'a [u8]);
+    impl<'a> Reader<'a> {
+        fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+            let (taken, rest) = self.0.split_at_checked(count)?;
+            self.0 = rest;
+            Some(taken)
+        }
+        fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
+            self.take(N)?.try_into().ok()
+        }
+        fn u32(&mut self) -> Option<u32> {
+            self.array().map(u32::from_le_bytes)
+        }
+        fn u64(&mut self) -> Option<u64> {
+            self.array().map(u64::from_le_bytes)
+        }
+        fn i64(&mut self) -> Option<i64> {
+            self.array().map(i64::from_le_bytes)
+        }
+    }
+    let mut reader = Reader(bytes);
+    if reader.take(STAMPS_MAGIC.len())? != STAMPS_MAGIC {
+        return None;
+    }
+    let count = usize::try_from(reader.u64()?).ok()?;
+    let mut files = HashMap::with_capacity(count.min(bytes.len() / 64));
+    let mut path: Vec<u8> = Vec::new();
+    for _ in 0..count {
+        let shared = reader.u32()? as usize;
+        let rest = reader.u32()? as usize;
+        path.truncate(shared);
+        path.extend_from_slice(reader.take(rest)?);
+        let stamp = Stamp {
+            node: (reader.u64()?, reader.u64()?),
+            size: reader.u64()?,
+            mode: reader.u32()?,
+            modified: (reader.i64()?, reader.i64()?),
+            changed: (reader.i64()?, reader.i64()?),
+        };
+        let entry = FileEntry {
+            digest: Digest(reader.array()?),
+            size: reader.u64()?,
+            executable: reader.take(1)? == [1],
+        };
+        // Written by this process's kind from paths it read, so the same
+        // kind of bytes as any path.
+        let os = std::os::unix::ffi::OsStrExt::from_bytes(path.as_slice());
+        let os: &std::ffi::OsStr = os;
+        files.insert(PathBuf::from(os), (stamp, entry));
+    }
+    reader.0.is_empty().then_some(files)
 }
 
 /// The stamps the store at `store` keeps of the workspace at `root`, as
@@ -798,10 +911,24 @@ pub fn read_stamps(store: &Path, root: &Path, suffix: &str) -> Seen {
             .and_then(|()| fs::write(&temp, root.as_os_str().as_encoded_bytes()))
             .and_then(|()| fs::rename(&temp, &noted));
     }
-    fs::read(path)
+    if let Some(files) = fs::read(&path)
+        .ok()
+        .and_then(|bytes| stamps_decoded(&bytes))
+    {
+        return Seen {
+            files,
+            ..Seen::default()
+        };
+    }
+    // Kept as JSON by an older pekit: read, and kept anew as the next build
+    // ends, the JSON then removed.
+    let json = path.with_extension("json");
+    let mut seen: Seen = fs::read(&json)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    seen.edited |= json.exists();
+    seen
 }
 
 /// Keeps `seen`, stamps of files, at `path`, if any was added, changed or
@@ -815,13 +942,18 @@ pub fn keep_stamps(path: &Path, seen: &Seen) -> io::Result<()> {
     if !seen.edited {
         return Ok(());
     }
-    let bytes = serde_json::to_vec(seen).map_err(io::Error::other)?;
+    let bytes = stamps_encoded(&seen.files);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let temp = path.with_extension(format!("tmp-{}", crate::sweep::token()));
     fs::write(&temp, bytes)?;
-    fs::rename(&temp, path)
+    fs::rename(&temp, path)?;
+    // What an older pekit kept, as JSON, is this now.
+    match fs::remove_file(path.with_extension("json")) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// What the store would keep of the file at `path`, executable if

@@ -51,8 +51,8 @@ else `CACHE/budget`.
 | `records/<xx>/<key>` | A record, as JSON: a step's, a program's, a manifest, a fetch's, an unpacking's, or a git commit's. |
 | `trees/<digest>`, `trees/<digest>-<bases>` | A materialized tree's instance. |
 | `complete/<digest>` | A mark that a tree has everything it names. |
-| `seen/<digest>.json` | The stamps of a workspace's files, by a digest of its root's path. |
-| `seen/<digest>-libraries.json` | The stamps of the files of a workspace's locked libraries. |
+| `seen/<digest>.stamps` | The stamps of a workspace's files, by a digest of its root's path, in a binary form. |
+| `seen/<digest>-libraries.stamps` | The stamps of the files of a workspace's locked libraries. |
 | `seen/<digest>.root` | The path of the workspace whose stamps these are. |
 | `git/` | Bare clones of the repositories `fetch_git` fetched from, each with a `.lock` beside it that a fetch into it holds. |
 | `scratch/<digest>` | A step's scratch directory, with `<digest>.lock`, `<digest>.size`, and `<digest>.dirty` while a run has it. |

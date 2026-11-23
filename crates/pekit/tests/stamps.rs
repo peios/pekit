@@ -83,12 +83,22 @@ fn a_workspace_s_stamps_are_kept_between_builds() {
     let kept: Vec<_> = fs::read_dir(state.path().join("store/seen"))
         .unwrap()
         .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "stamps"))
         .collect();
     let [stamps] = &kept[..] else {
         panic!("{kept:?}");
     };
-    let text = fs::read_to_string(stamps.path()).unwrap();
+    // What is kept, shown as JSON.
+    let root = dir.path().canonicalize().unwrap();
+    let read = || {
+        serde_json::to_string(&pekit::store::read_stamps(
+            &state.path().join("store"),
+            &root,
+            "",
+        ))
+        .unwrap()
+    };
+    let text = read();
     assert!(text.contains("name.txt"), "{text}");
     assert!(text.contains("dir/x"), "{text}");
     // A build that finds every stamp as it was writes none.
@@ -112,7 +122,7 @@ fn a_workspace_s_stamps_are_kept_between_builds() {
         )],
     );
     build_in(dir.path(), state.path(), "both").unwrap();
-    let text = fs::read_to_string(stamps.path()).unwrap();
+    let text = read();
     assert!(!text.contains("name.txt"), "{text}");
     // The workspace has no file of its own left behind.
     assert!(
@@ -141,11 +151,13 @@ fn the_stamps_of_a_workspace_gone_are_removed() {
     // Its path is noted beside its stamps.
     let noted = names();
     assert_eq!(noted.len(), 2, "{noted:?}");
-    let [json, root] = &noted[..] else {
+    let [root, kept] = &noted[..] else {
         panic!("{noted:?}");
     };
     assert!(
-        Path::new(json).extension().is_some_and(|ext| ext == "json")
+        Path::new(kept)
+            .extension()
+            .is_some_and(|ext| ext == "stamps")
             && Path::new(root).extension().is_some_and(|ext| ext == "root"),
         "{noted:?}"
     );
@@ -175,8 +187,32 @@ fn the_stamps_of_a_workspace_gone_are_removed() {
     let other = workspace("two\n");
     build_in(other.path(), state.path(), "both").unwrap();
     let left = names();
-    assert!(!left.contains(json) && !left.contains(root), "{left:?}");
+    assert!(!left.contains(kept) && !left.contains(root), "{left:?}");
     assert!(!left.contains(&"0123.json".to_owned()), "{left:?}");
     assert!(left.contains(&"4567.json".to_owned()), "{left:?}");
     assert_eq!(left.len(), 3, "{left:?}");
+}
+
+#[test]
+fn stamps_an_older_pekit_kept_as_json_are_read_and_kept_anew() {
+    let dir = workspace("one\n");
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let store = state.path().join("store");
+    let root = dir.path().canonicalize().unwrap();
+    let kept = pekit::store::stamps_path(&store, &root, "");
+    // As an older pekit kept them: JSON, beside where they are kept now.
+    let stamps = pekit::store::read_stamps(&store, &root, "");
+    let json = kept.with_extension("json");
+    fs::write(&json, serde_json::to_vec(&stamps).unwrap()).unwrap();
+    fs::remove_file(&kept).unwrap();
+    assert_eq!(
+        serde_json::to_string(&pekit::store::read_stamps(&store, &root, "")).unwrap(),
+        serde_json::to_string(&stamps).unwrap()
+    );
+    // The next build keeps them anew, and the JSON is gone.
+    let again = build_in(dir.path(), state.path(), "both").unwrap();
+    assert_eq!((again.ran, again.cached), (0, 1));
+    assert!(kept.is_file());
+    assert!(!json.exists());
 }
