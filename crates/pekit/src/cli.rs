@@ -130,6 +130,16 @@ enum StoreCommand {
         #[arg(long, value_name = "SIZE")]
         limit: Option<String>,
     },
+    /// Read every blob of the store and hash it again, and report each
+    /// whose contents are not as its name says, or that is not read-only.
+    Verify {
+        /// Make each blob that is not read-only so, and remove each whose
+        /// contents are not as its name says: waiting for the builds that
+        /// have the store to end, while builds that start meanwhile wait
+        /// for this.
+        #[arg(long)]
+        repair: bool,
+    },
 }
 
 /// `pekit release`'s arguments (see [Commands](#commands)).
@@ -1964,6 +1974,7 @@ fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCod
     let cache = cache_dir();
     let root = cache.join("store");
     let limit = match command {
+        StoreCommand::Verify { repair } => return verify_command(&cache, *repair, terminal),
         StoreCommand::Evict { limit: Some(limit) } => limit_named(Some(limit), "`--limit`"),
         StoreCommand::Evict { limit: None } | StoreCommand::Stats => {
             MachineConf::read().and_then(|conf| conf.cache_limit())
@@ -2040,7 +2051,84 @@ fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCod
                 }
             }
         }
+        // Verified above, needing no limit.
+        StoreCommand::Verify { .. } => ExitCode::SUCCESS,
     }
+}
+
+/// `pekit store verify`: every blob of the store under `cache` read and
+/// hashed again, and what is wrong with any shown, and repaired if `repair`
+/// (see [Verifying](crate::verify#verifying)).
+fn verify_command(cache: &Path, repair: bool, terminal: &mut Terminal<'_>) -> ExitCode {
+    let root = cache.join("store");
+    let err = std::cell::RefCell::new(&mut *terminal.err);
+    let mut progress = |done: u64, bytes: u64, of: usize| {
+        let _ = writeln!(
+            err.borrow_mut(),
+            "verified {done} of {of} blobs, {}",
+            shown_size(bytes)
+        );
+    };
+    let verified = if repair {
+        let mut waiting = || {
+            let _ = writeln!(
+                err.borrow_mut(),
+                "waiting for the builds that have the store to end; builds that start \
+                 meanwhile wait for this"
+            );
+        };
+        crate::evict::alone(&root, &cache.join("scratch"), &mut waiting, |store| {
+            let verified = crate::verify::verify(&root, &mut progress)?;
+            crate::verify::repair(store, &verified)?;
+            Ok(verified)
+        })
+    } else {
+        Store::open(&root).and_then(|_held| crate::verify::verify(&root, &mut progress))
+    };
+    let verified = match verified {
+        Ok(verified) => verified,
+        Err(error) => {
+            let _ = writeln!(terminal.err, "error: cannot verify the store: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let out = &mut *terminal.out;
+    let _ = writeln!(
+        out,
+        "verified {} blobs, {}",
+        verified.blobs,
+        shown_size(verified.bytes)
+    );
+    for path in &verified.damaged {
+        let done = if repair { ", removed" } else { "" };
+        let _ = writeln!(out, "damaged: {}{done}", path.display());
+    }
+    for path in &verified.exposed {
+        let done = if repair { ", made read-only" } else { "" };
+        let _ = writeln!(out, "not read-only: {}{done}", path.display());
+    }
+    for path in &verified.unknown {
+        let _ = writeln!(out, "no blob: {}", path.display());
+    }
+    if verified.sound() {
+        let _ = writeln!(out, "every blob is whole and read-only");
+        return ExitCode::SUCCESS;
+    }
+    if repair && verified.unknown.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    if !repair && verified.unknown.is_empty() {
+        let _ = writeln!(
+            terminal.err,
+            "error: the store has blobs to repair: `pekit store verify --repair` repairs them"
+        );
+    } else {
+        let _ = writeln!(
+            terminal.err,
+            "error: the store's `cas/` holds files that are no blob's, left alone"
+        );
+    }
+    ExitCode::FAILURE
 }
 
 /// How long ago `seconds`, since the Unix epoch, was, as a person reads it.

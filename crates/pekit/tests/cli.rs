@@ -5,7 +5,7 @@ mod elsewhere;
 mod skipping;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use skipping::skip;
@@ -319,6 +319,75 @@ fn the_store_command_shows_the_store_and_evicts_it_now() {
         printed(&wrong)
             .1
             .contains("`--limit` is `lots`, which is no size")
+    );
+}
+
+#[test]
+fn the_store_command_verifies_every_blob_and_repairs_what_it_finds() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let store = |args: &[&str]| {
+        let mut all = vec!["store", "verify"];
+        all.extend_from_slice(args);
+        pekit(dir.path(), cache.path(), &all)
+    };
+    assert!(
+        pekit(dir.path(), cache.path(), &["build", "app/hello"])
+            .status
+            .success()
+    );
+    let sound = store(&[]);
+    let (out, err) = printed(&sound);
+    assert!(sound.status.success(), "{err}");
+    assert!(out.contains("every blob is whole and read-only"), "{out}");
+    // One blob made writable, and another changed in place.
+    let mut blobs: Vec<PathBuf> = fs::read_dir(cache.path().join("store/cas"))
+        .unwrap()
+        .flatten()
+        .flat_map(|shard| fs::read_dir(shard.path()).unwrap().flatten())
+        .map(|blob| blob.path())
+        .collect();
+    blobs.sort();
+    let [exposed, damaged, ..] = &blobs[..] else {
+        panic!("{blobs:?}");
+    };
+    let mode = |path: &Path, mode: u32| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(exposed, 0o644);
+    let was = fs::metadata(damaged).unwrap().permissions().mode() & 0o777;
+    mode(damaged, 0o644);
+    fs::write(damaged, "damaged\n").unwrap();
+    mode(damaged, was);
+    let found = store(&[]);
+    let (out, err) = printed(&found);
+    assert!(!found.status.success());
+    assert!(
+        out.contains(&format!("damaged: {}\n", damaged.display())),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("not read-only: {}\n", exposed.display())),
+        "{out}"
+    );
+    assert!(err.contains("`pekit store verify --repair`"), "{err}");
+    let repaired = store(&["--repair"]);
+    let (out, err) = printed(&repaired);
+    assert!(repaired.status.success(), "{err}");
+    assert!(out.contains(", removed\n"), "{out}");
+    assert!(out.contains(", made read-only\n"), "{out}");
+    assert!(!damaged.exists());
+    assert_eq!(
+        fs::metadata(exposed).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    assert!(printed(&store(&[])).0.contains("every blob is whole"));
+    // What needed the blob removed is built again.
+    assert!(
+        pekit(dir.path(), cache.path(), &["build", "app/hello"])
+            .status
+            .success()
     );
 }
 

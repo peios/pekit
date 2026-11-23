@@ -32,6 +32,7 @@ These are the commands, in the order you're likely to meet them:
 | `pekit clean` | Removes `pekit-out/`, and with `--cache` the store. | [Managing the Store](~pekit/managing-the-store) |
 | `pekit store stats` | Shows the store's size, its limit, and whether a build is using it. | [Managing the Store](~pekit/managing-the-store#see-and-evict-the-store) |
 | `pekit store evict` | Evicts the store to within its limit now. | [Managing the Store](~pekit/managing-the-store#see-and-evict-the-store) |
+| `pekit store verify` | Hashes every file of the store again, and with `--repair` repairs what is wrong. | [Managing the Store](~pekit/managing-the-store#verify-the-store) |
 
 ## Options the building commands share
 
