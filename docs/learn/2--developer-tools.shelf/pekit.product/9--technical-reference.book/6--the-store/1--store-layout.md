@@ -14,7 +14,7 @@ holds:
 | `records/<xx>/` | Step records, program records, manifests, and the records of fetches, unpacks, and git commits, by their keys. |
 | `trees/` | Materialized trees, made once as directories of links to blobs. |
 | `complete/` | A mark for each tree found to have everything it names, at any depth. |
-| `seen/` | For each workspace root, the stamps of the files a build read. |
+| `seen/` | For each workspace root, the stamps of the files a build read, and the root's path. |
 | `git/` | Bare clones of the repositories `fetch_git` fetched from. |
 | `scratch/` | The scratch directories of steps marked `#[scratch]`, with their lock and size files. |
 | `claims/` | A lock file for each step a build claimed. See [Claims](~pekit/claims). |

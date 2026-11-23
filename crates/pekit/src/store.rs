@@ -262,8 +262,17 @@ const PER_THREAD: usize = 256;
 /// there are [`PER_THREAD`] of them, to [`MOST_THREADS`] and the machine's
 /// processors (see [Reading ahead](#reading-ahead)).
 fn in_parallel<T: Sync, U: Send>(items: &[T], each: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    in_parallel_by(items, PER_THREAD, each)
+}
+
+/// [`in_parallel`], each thread given at least `per` of `items`.
+pub(crate) fn in_parallel_by<T: Sync, U: Send>(
+    items: &[T],
+    per: usize,
+    each: impl Fn(&T) -> U + Sync,
+) -> Vec<U> {
     let processors = std::thread::available_parallelism().map_or(1, usize::from);
-    let threads = (items.len() / PER_THREAD).clamp(1, MOST_THREADS.min(processors));
+    let threads = (items.len() / per.max(1)).clamp(1, MOST_THREADS.min(processors));
     if threads == 1 {
         return items.iter().map(each).collect();
     }
