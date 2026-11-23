@@ -135,6 +135,38 @@ fn deps_lists_each_step_a_target_reaches_and_what_each_reads() {
 }
 
 #[test]
+fn a_query_writes_its_trace_and_its_gcsl_profile() {
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let trace = dir.path().join("trace.json");
+    let profile = dir.path().join("profile.txt");
+    let queried = pekit(
+        dir.path(),
+        cache.path(),
+        &[
+            "query",
+            "deps",
+            "app/chain",
+            &format!("--trace={}", trace.display()),
+            &format!("--gcsl-profile={}", profile.display()),
+        ],
+    );
+    assert!(queried.status.success(), "{:?}", shown(&queried));
+    let trace: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
+    let evaluated = trace["traceEvents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["cat"] == "evaluation" && event["name"] == "app/chain");
+    assert!(evaluated, "{trace:#}");
+    let profile = fs::read_to_string(profile).unwrap();
+    assert!(
+        profile.starts_with("GCSL profile of the build"),
+        "{profile}"
+    );
+}
+
+#[test]
 fn rdeps_lists_the_targets_that_read_a_file() {
     let dir = workspace();
     let cache = tempfile::tempdir().unwrap();

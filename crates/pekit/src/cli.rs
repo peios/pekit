@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use gcsl::eval::plain::Plain;
+use gcsl::eval::profile::ProfileReport;
 use gcsl::workspace::Workspace;
 
 use crate::budget::{Budget, DEFAULT_UNSEEN, Limits, budget_dir, machine_memory};
@@ -60,7 +61,8 @@ use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
     target_view, BuildError, Outcomes, Packing, Reuse, Settings, build_all_observed,
-    package_all_observed, program_command, query_all, requires_strict, run_script_observed,
+    package_all_observed, program_command, query_all_observed, requires_strict,
+    run_script_observed,
 };
 use crate::query::TargetDeps;
 use crate::events::{Event, EventKind};
@@ -855,7 +857,15 @@ fn query(
         }
     };
     let settings = settings_for(shared, &loaded, terminal)?;
-    match query_all(&mut loaded, &targets, &settings) {
+    // Its trace and its profile, as a build's are written.
+    let (mut trace, mut profile) = (Trace::new(), GcslProfile::new());
+    let queried = query_all_observed(&mut loaded, &targets, &settings, &mut |event| {
+        trace.add(event);
+        profile.add(event);
+    });
+    let reports = loaded.workspace.profile_report().into_iter().collect();
+    write_reports(shared, (&trace, profile, reports), &loaded, terminal);
+    match queried {
         Ok(queried) => Some((loaded, queried)),
         Err(error) => {
             let _ = write!(terminal.err, "{}", error.render(&loaded));
@@ -2483,6 +2493,29 @@ fn build_targets(
         progress.clear(terminal.err);
     }
     drop(logged);
+    write_reports(shared, (&trace, profile, reports), loaded, terminal);
+    *COMMAND_TRACE.lock().unwrap_or_else(PoisonError::into_inner) = Some((trace, epoch));
+    let outcomes = outcomes?;
+    warn_of_eviction(&outcomes, terminal);
+    warn_of_remote(&outcomes, terminal);
+    for name in &outcomes.flaky {
+        let _ = writeln!(
+            terminal.err,
+            "warning: step `{name}` passed only when it was run again: it is flaky"
+        );
+    }
+    Ok(outcomes)
+}
+
+/// Writes the trace `trace` and the GCSL profile `profile`, with the
+/// workspace's `reports`, where `shared` says, if it says, warning on
+/// `terminal` of each that cannot be written.
+fn write_reports(
+    shared: &Shared,
+    (trace, mut profile, reports): (&Trace, GcslProfile, Vec<ProfileReport>),
+    loaded: &Loaded,
+    terminal: &mut Terminal<'_>,
+) {
     if let Some(path) = &shared.gcsl_profile {
         for report in reports {
             profile.add_report(report);
@@ -2507,17 +2540,6 @@ fn build_targets(
             );
         }
     }
-    *COMMAND_TRACE.lock().unwrap_or_else(PoisonError::into_inner) = Some((trace, epoch));
-    let outcomes = outcomes?;
-    warn_of_eviction(&outcomes, terminal);
-    warn_of_remote(&outcomes, terminal);
-    for name in &outcomes.flaky {
-        let _ = writeln!(
-            terminal.err,
-            "warning: step `{name}` passed only when it was run again: it is flaky"
-        );
-    }
-    Ok(outcomes)
 }
 
 /// A build's progress, as a terminal shows it: one line, rewritten at each
