@@ -1552,6 +1552,26 @@ impl Store {
         Ok(tree)
     }
 
+    /// The tree `digest`, as [`Store::read_tree`] gives it, but not kept for
+    /// later: what an eviction, which reads every tree of the store once,
+    /// reads them by, so that it holds no more than it needs of them.
+    ///
+    /// # Errors
+    ///
+    /// That the store does not hold it, or holds no tree under it.
+    pub fn read_tree_once(&self, digest: &Digest) -> io::Result<Tree> {
+        if let Some(tree) = self
+            .trees
+            .lock()
+            .ok()
+            .and_then(|trees| trees.get(digest).cloned())
+        {
+            return Ok(tree);
+        }
+        let bytes = self.read_blob(digest)?;
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+
     /// Whether the file at `at` is a link to the blob of `entry`, as
     /// [`Store::materialise_file`] makes it where it can.
     #[must_use]

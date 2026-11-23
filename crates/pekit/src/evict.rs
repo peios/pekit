@@ -862,7 +862,7 @@ fn records_of(store: &Store, blobs: &Blobs) -> io::Result<RecordsSeen> {
             roots.dedup();
             let size = roots
                 .iter()
-                .map(|root| trees.size(store, *root, blobs))
+                .map(|root| trees.size(store, (*root, Kind::Unknown), blobs))
                 .sum();
             records.insert(
                 hex,
@@ -889,36 +889,59 @@ struct TreesSeen {
     sizes: HashMap<u32, u64>,
 }
 
+/// What a blob an eviction weighs is known to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A file's contents, as a tree's file entry names it.
+    File,
+    /// A tree, as a tree's directory entry names it.
+    Tree,
+    /// Either, as a record names it.
+    Unknown,
+}
+
 impl TreesSeen {
-    /// The size of the blob numbered `blob` of `blobs` and, if it is a
-    /// tree, of what it names at any depth, a file two of its directories
-    /// hold counted for each: its entries noted as it is read.
-    fn size(&mut self, store: &Store, blob: u32, blobs: &Blobs) -> u64 {
-        if let Some(size) = self.sizes.get(&blob) {
+    /// The size of the blob numbered `blob` of `blobs`, known to be `kind`,
+    /// and, if it is a tree, of what it names at any depth, a file two of
+    /// its directories hold counted for each: its entries noted as it is
+    /// read. Only a blob a record names is opened to find whether it is a
+    /// tree, and a tree is read without being kept by the store, so that an
+    /// eviction of a large store opens no file it need not, and holds no
+    /// more than each tree's entries' numbers.
+    fn size(&mut self, store: &Store, (blob, kind): (u32, Kind), blobs: &Blobs) -> u64 {
+        // Weighed already, but as a file when it is a tree too, one whose
+        // contents a file of the store happens to have: weighed again.
+        if let Some(size) = self.sizes.get(&blob)
+            && (kind != Kind::Tree || self.entries.contains_key(&blob))
+        {
             return *size;
         }
         let seen = blobs.get(blob);
-        // A tree's encoding begins so; a file's is not read to find it isn't one.
-        let tree = Some(seen.digest)
-            .filter(|digest| store.is_tree_blob(digest))
-            .and_then(|digest| store.read_tree(&digest).ok());
+        let tree = match kind {
+            Kind::File => None,
+            Kind::Tree => Some(seen.digest),
+            // A tree's encoding begins so; a file's is not read to find it isn't one.
+            Kind::Unknown => Some(seen.digest).filter(|digest| store.is_tree_blob(digest)),
+        }
+        .and_then(|digest| store.read_tree_once(&digest).ok());
         let mut size = seen.size;
         if let Some(tree) = tree {
-            let mut entries: Vec<u32> = tree
+            let mut entries: Vec<(u32, Kind)> = tree
                 .entries
                 .iter()
                 .filter_map(|entry| match entry {
-                    TreeEntry::File { file, .. } => blobs.number(&file.digest),
-                    TreeEntry::Dir { tree, .. } => blobs.number(tree),
+                    TreeEntry::File { file, .. } => Some((blobs.number(&file.digest)?, Kind::File)),
+                    TreeEntry::Dir { tree, .. } => Some((blobs.number(tree)?, Kind::Tree)),
                     TreeEntry::Link { .. } => None,
                 })
                 .collect();
-            entries.sort_unstable();
-            entries.dedup();
-            for entry in &entries {
-                size = size.saturating_add(self.size(store, *entry, blobs));
+            entries.sort_unstable_by_key(|&(number, _)| number);
+            entries.dedup_by_key(|&mut (number, _)| number);
+            for &entry in &entries {
+                size = size.saturating_add(self.size(store, entry, blobs));
             }
-            self.entries.insert(blob, entries.into_boxed_slice());
+            let numbers = entries.into_iter().map(|(number, _)| number).collect();
+            self.entries.insert(blob, numbers);
         }
         self.sizes.insert(blob, size);
         size
