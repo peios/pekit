@@ -770,8 +770,22 @@ pub fn query_all(
     targets: &[Target],
     settings: &Settings,
 ) -> Result<Vec<Result<TargetDeps, BuildError>>, BuildError> {
-    let mut events = |_: &Event| {};
-    let mut run = new_run(loaded, targets, settings, (None, Vec::new()), &mut events)?;
+    query_all_observed(loaded, targets, settings, &mut |_| {})
+}
+
+/// [`query_all`], telling `events` each [event](crate::events#events) as it
+/// happens: each run of a target's code, and each of its effects.
+///
+/// # Errors
+///
+/// What [`query_all`] fails with.
+pub fn query_all_observed(
+    loaded: &mut Loaded,
+    targets: &[Target],
+    settings: &Settings,
+    events: &mut dyn FnMut(&Event),
+) -> Result<Vec<Result<TargetDeps, BuildError>>, BuildError> {
+    let mut run = new_run(loaded, targets, settings, (None, Vec::new()), events)?;
     run.query = true;
     run.drive()?;
     let mut found = Vec::with_capacity(targets.len());
