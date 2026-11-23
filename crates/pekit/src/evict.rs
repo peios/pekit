@@ -749,6 +749,7 @@ fn remove_scratch(dir: &Path) -> io::Result<bool> {
     }
     remove_tree(dir)?;
     let _ = fs::remove_file(dir.with_extension("size"));
+    let _ = fs::remove_file(dir.with_extension("dirty"));
     let _ = fs::remove_file(dir.with_extension("lock"));
     Ok(true)
 }

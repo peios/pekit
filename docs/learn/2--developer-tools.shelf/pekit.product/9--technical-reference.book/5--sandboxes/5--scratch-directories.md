@@ -25,7 +25,9 @@ empty directory, and pekit relies on that.
 Scratch directories are in the store's directory, under `scratch/`, each
 named by a digest of whose it is. Beside each is a lock file, which a run
 holds while it uses the directory, and whose modification time is when it
-was last held, and a size file, which eviction reads.
+was last held, and a size file, which eviction reads. While a run has the
+directory, a `.dirty` file is beside it too, removed as the run lets the
+directory go.
 
 ## When a run gets an empty one
 
@@ -35,6 +37,11 @@ A run gets an empty directory of its own, removed when it ends, when:
   scratch directory kept.
 - Another run, of this process or another, holds the step's directory, so
   that no run waits for one.
+
+A run is also given the step's directory empty when a `.dirty` file is
+beside it: the run that last had it was killed before it let it go, and might
+have left it half written, a truncated object file newer than its source
+say, which a tool would take as up to date.
 
 A program of the step found in the store leaves the directory as it is.
 

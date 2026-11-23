@@ -83,6 +83,25 @@ fn a_step_s_scratch_directory_is_kept_between_its_runs() {
 }
 
 #[test]
+fn a_scratch_directory_a_killed_run_left_starts_empty() {
+    let dir = workspace("one\n");
+    let state = tempfile::tempdir().unwrap();
+    build_in(dir.path(), state.path(), "both").unwrap();
+    let [kept] = &kept(state.path())[..] else {
+        panic!("{:?}", kept(state.path()));
+    };
+    // A run let it go whole: no mark of one that may not have.
+    assert!(!kept.with_extension("dirty").exists());
+    // As a run killed while it held the directory leaves it.
+    fs::write(kept.with_extension("dirty"), "").unwrap();
+    write(dir.path(), &[("app/name.txt", "two\n")]);
+    build_in(dir.path(), state.path(), "both").unwrap();
+    // Given it empty, the step counts its first run again.
+    assert_eq!(out(dir.path()), "1\ntwo\n");
+    assert!(!kept.with_extension("dirty").exists());
+}
+
+#[test]
 fn a_scratch_directory_keys_nothing() {
     let dir = workspace("one\n");
     let state = tempfile::tempdir().unwrap();
