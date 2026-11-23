@@ -115,9 +115,11 @@ pub fn fetch_git(
     let fail = |reason: String| format!("`fetch_git` could not fetch `{pin}` of `{url}`: {reason}");
     let path = repository_path(store, url);
     // Fetches of one repository take turns: a build fetches several crates
-    // of one repository at once, into one bare repository.
+    // of one repository at once, into one bare repository, and so may two
+    // builds that share the store, each holding the repository's lock file.
     let lock = lock_of(&path);
     let _turn = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let _held = held_file(&path).map_err(|error| fail(error.to_string()))?;
     // Another fetch of the commit may have recorded it while this waited.
     if let Ok(Some(FetchedGit { tree, .. })) = store.record::<FetchedGit>(&key)
         && store.holds_tree(&tree)
@@ -187,6 +189,26 @@ fn lock_of(repo: &Path) -> Arc<Mutex<()>> {
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut locks = locks.lock().unwrap_or_else(PoisonError::into_inner);
     Arc::clone(locks.entry(repo.to_path_buf()).or_default())
+}
+
+/// The lock file beside the repository at `repo`, held exclusively until it
+/// is dropped: what a fetch into the repository by another process waits
+/// for.
+///
+/// # Errors
+///
+/// That it cannot be made or locked.
+fn held_file(repo: &Path) -> std::io::Result<fs::File> {
+    if let Some(parent) = repo.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(repo.with_extension("lock"))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Whether the repository `repo` holds the commit `commit`.
