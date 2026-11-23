@@ -1242,6 +1242,36 @@ fn keep_workspace_stamps(store: &Store, root: &Path, mut seen: Seen) -> io::Resu
     crate::store::keep_stamps(&stamps_path(store, root), &seen)
 }
 
+/// Puts what `store` keeps of the output `path` under the output directory
+/// `outputs`, hard-linked and read-only, in place of what an earlier build
+/// left there, so that what is not hermetic reads it.
+fn write_exposure(store: &Store, outputs: &Path, path: &str, kept: Kept) -> Result<(), BuildError> {
+    let Some(at) = output_path(outputs, path) else {
+        return Ok(());
+    };
+    // Left as it is if it is that already, as a build that changed nothing
+    // finds each unpacked toolchain.
+    let already = match kept {
+        Kept::Dir(tree) => store.is_materialised(&tree, &at),
+        Kept::File(entry) => store.is_linked(&entry, &at),
+    };
+    if already {
+        return Ok(());
+    }
+    let placed = (|| {
+        if fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_dir()) {
+            remove_tree(&at)?;
+        } else if fs::symlink_metadata(&at).is_ok() {
+            fs::remove_file(&at)?;
+        }
+        match kept {
+            Kept::File(entry) => store.materialise_file(&entry, &at),
+            Kept::Dir(tree) => store.materialise_tree(&tree, &at),
+        }
+    })();
+    placed.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))
+}
+
 /// An engine error from an I/O failure.
 fn engine(error: &dyn std::fmt::Display) -> BuildError {
     BuildError::Engine(error.to_string())
@@ -2769,40 +2799,31 @@ impl Run<'_> {
     ///
     /// That one cannot be written.
     fn expose_waiting(&mut self) -> Result<(), BuildError> {
+        // Each with those inside it, in order; each such family touches
+        // nothing of another's, so they are made at once.
+        let mut families: Vec<Vec<(String, Kept)>> = Vec::new();
         for (path, kept) in self.exposures.take_all() {
-            self.write_exposure(&path, kept)?;
+            match families
+                .iter_mut()
+                .find(|family| family.first().is_some_and(|(root, _)| within(&path, root)))
+            {
+                Some(family) => family.push((path, kept)),
+                None => families.push(vec![(path, kept)]),
+            }
         }
-        Ok(())
+        let (store, outputs) = (&self.store, self.settings.outputs.as_path());
+        crate::store::in_parallel_by(&families, 1, |family| {
+            family
+                .iter()
+                .try_for_each(|(path, kept)| write_exposure(store, outputs, path, *kept))
+        })
+        .into_iter()
+        .collect()
     }
 
-    /// Puts what the store keeps of the output `path` under the output
-    /// directory, hard-linked and read-only, in place of what an earlier
-    /// build left there, so that what is not hermetic reads it.
+    /// [`write_exposure`] of the output `path` of this build.
     fn write_exposure(&self, path: &str, kept: Kept) -> Result<(), BuildError> {
-        let Some(at) = output_path(&self.settings.outputs, path) else {
-            return Ok(());
-        };
-        // Left as it is if it is that already, as a build that changed
-        // nothing finds each unpacked toolchain.
-        let already = match kept {
-            Kept::Dir(tree) => self.store.is_materialised(&tree, &at),
-            Kept::File(entry) => self.store.is_linked(&entry, &at),
-        };
-        if already {
-            return Ok(());
-        }
-        let placed = (|| {
-            if fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_dir()) {
-                remove_tree(&at)?;
-            } else if fs::symlink_metadata(&at).is_ok() {
-                fs::remove_file(&at)?;
-            }
-            match kept {
-                Kept::File(entry) => self.store.materialise_file(&entry, &at),
-                Kept::Dir(tree) => self.store.materialise_tree(&tree, &at),
-            }
-        })();
-        placed.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))
+        write_exposure(&self.store, &self.settings.outputs, path, kept)
     }
 
     /// Gives the node `id` `outcome` at once, the step that waits on it able
