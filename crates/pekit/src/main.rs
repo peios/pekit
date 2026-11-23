@@ -3,6 +3,11 @@
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
+/// The allocator: jemalloc, which keeps a large build's evaluation smaller
+/// and faster than the system's (see `Cargo.toml`).
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> ExitCode {
     // The meter a build runs each program of a step under, on this thread,
     // which the program dies with (see [`pekit::meter`]).

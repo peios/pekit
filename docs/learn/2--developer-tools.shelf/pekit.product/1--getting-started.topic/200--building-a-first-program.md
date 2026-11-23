@@ -20,7 +20,9 @@ You need:
 
 - pekit. To build it from its source, run
   `cargo install --git https://github.com/peios/pekit pekit --locked`, or
-  `cargo install --path crates/pekit --locked` in a checkout.
+  `cargo install --path crates/pekit --locked` in a checkout. Building it
+  needs a C compiler and `make`, for the compression libraries and the
+  memory allocator it links.
 - bubblewrap, the `bwrap` program, which pekit runs every step in.
 - A C compiler from your distribution's packages, as `/usr/bin/cc`. A step
   can see the host's `/usr`, but not `/usr/local`.

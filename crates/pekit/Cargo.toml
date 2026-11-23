@@ -37,6 +37,10 @@ rustix = { version = "1.1", features = ["fs", "process"] }
 # Starting every program with default signal dispositions, without `unsafe`:
 # a signal caught, unlike one ignored, is reset by `exec`.
 signal-hook = "0.4"
+# The allocator: evaluating a large build allocates and frees much across
+# threads, and jemalloc keeps it smaller and faster than glibc's: on 120 of
+# pkgs' targets, 15% less CPU, 25% less time and 11% less memory (PEI-1766).
+tikv-jemallocator = "0.6"
 # The remote cache (`design/additive.md`, F5).
 pekit-reapi = { path = "../pekit-reapi" }
 prost = "0.14"
