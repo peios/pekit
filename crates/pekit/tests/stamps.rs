@@ -83,6 +83,7 @@ fn a_workspace_s_stamps_are_kept_between_builds() {
     let kept: Vec<_> = fs::read_dir(state.path().join("store/seen"))
         .unwrap()
         .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .collect();
     let [stamps] = &kept[..] else {
         panic!("{kept:?}");
@@ -120,4 +121,62 @@ fn a_workspace_s_stamps_are_kept_between_builds() {
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".pekit")),
     );
+}
+
+#[test]
+fn the_stamps_of_a_workspace_gone_are_removed() {
+    let state = tempfile::tempdir().unwrap();
+    let seen = state.path().join("store/seen");
+    let names = || -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&seen)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let gone = workspace("one\n");
+    build_in(gone.path(), state.path(), "both").unwrap();
+    // Its path is noted beside its stamps.
+    let noted = names();
+    assert_eq!(noted.len(), 2, "{noted:?}");
+    let [json, root] = &noted[..] else {
+        panic!("{noted:?}");
+    };
+    assert!(
+        Path::new(json).extension().is_some_and(|ext| ext == "json")
+            && Path::new(root).extension().is_some_and(|ext| ext == "root"),
+        "{noted:?}"
+    );
+    assert_eq!(
+        fs::read(seen.join(root)).unwrap(),
+        gone.path()
+            .canonicalize()
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+    );
+    // Stamps an older pekit kept, noting no path: removed once old.
+    let old = seen.join("0123.json");
+    fs::write(&old, "{}").unwrap();
+    let month = std::time::Duration::from_hours(31 * 24);
+    File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - month)
+        .unwrap();
+    fs::write(seen.join("4567.json"), "{}").unwrap();
+    // Another workspace built alone, the first gone: its stamps go too.
+    let gone_root = gone.path().to_path_buf();
+    drop(gone);
+    assert!(!gone_root.exists());
+    let other = workspace("two\n");
+    build_in(other.path(), state.path(), "both").unwrap();
+    let left = names();
+    assert!(!left.contains(json) && !left.contains(root), "{left:?}");
+    assert!(!left.contains(&"0123.json".to_owned()), "{left:?}");
+    assert!(left.contains(&"4567.json".to_owned()), "{left:?}");
+    assert_eq!(left.len(), 3, "{left:?}");
 }

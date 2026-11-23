@@ -766,6 +766,35 @@ fn in_order<S: serde::Serializer>(
     serde::Serialize::serialize(&ordered, serializer)
 }
 
+/// Where the store at `store` keeps stamps of the workspace at `root`, in
+/// `seen/`, by a digest of its path: its own files' if `suffix` is empty,
+/// and its libraries' if it is `-libraries`.
+#[must_use]
+pub fn stamps_path(store: &Path, root: &Path, suffix: &str) -> PathBuf {
+    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
+    store.join("seen").join(format!("{name}{suffix}.json"))
+}
+
+/// The stamps the store at `store` keeps of the workspace at `root`, as
+/// [`stamps_path`] names them, or none. The workspace's path is noted
+/// beside them, in `seen/<digest>.root`, if it is not, so that the stamps
+/// of a workspace gone are found ([`crate::sweep::sweep_seen`]).
+#[must_use]
+pub fn read_stamps(store: &Path, root: &Path, suffix: &str) -> Seen {
+    let path = stamps_path(store, root, suffix);
+    let noted = stamps_path(store, root, "").with_extension("root");
+    if !noted.exists() {
+        let temp = noted.with_extension(format!("tmp-{}", crate::sweep::token()));
+        let _ = fs::create_dir_all(store.join("seen"))
+            .and_then(|()| fs::write(&temp, root.as_os_str().as_encoded_bytes()))
+            .and_then(|()| fs::rename(&temp, &noted));
+    }
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// Keeps `seen`, stamps of files, at `path`, if any was added, changed or
 /// forgotten since it was read: a large workspace's run to tens of
 /// megabytes, mostly as the last build left them.

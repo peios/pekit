@@ -23,6 +23,10 @@
 //! eviction does: then no other process has the store open, so nothing in
 //! the store's `tmp/`, and no staging directory, swept directory, unpacking
 //! or checkout in the scratch directory, is any but its own.
+//!
+//! The same process removes the stamps kept of each workspace that is gone
+//! ([`sweep_seen`]): by the path noted beside them, or, kept by an older
+//! pekit that noted none, once they are unchanged for [`UNNOTED_DAYS`].
 
 use std::fmt::Write as _;
 use std::fs::{self, TryLockError};
@@ -87,7 +91,8 @@ pub fn sweep_stale(store: &Store, scratch: &Path) -> io::Result<bool> {
             return Err(error);
         }
     }
-    let swept = sweep_held(&store.root().join("tmp"), scratch);
+    let swept = sweep_held(&store.root().join("tmp"), scratch)
+        .and_then(|()| sweep_seen(&store.root().join("seen")));
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     swept.map(|()| true)
@@ -120,6 +125,59 @@ pub(crate) fn sweep_held(tmp: &Path, scratch: &Path) -> io::Result<()> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if SCRATCH_KINDS.iter().any(|kind| name.starts_with(kind)) && !name.contains(own) {
             remove(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// How many days the stamps of a workspace whose path is not noted beside
+/// them are kept unchanged before [`sweep_seen`] removes them.
+pub const UNNOTED_DAYS: u64 = 30;
+
+/// Removes from `seen`, the store's stamps, those of each workspace whose
+/// root is no directory, by the path noted beside them, those noted with
+/// none unchanged for [`UNNOTED_DAYS`], and what a write of them left;
+/// the store's lock held exclusively, so that none is being written.
+///
+/// # Errors
+///
+/// That `seen` cannot be listed, or a file in it removed.
+pub fn sweep_seen(seen: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let entries = match fs::read_dir(seen) {
+        Ok(entries) => entries.collect::<io::Result<Vec<_>>>()?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let remove = |name: &str| match fs::remove_file(seen.join(name)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    let unnoted = std::time::Duration::from_hours(UNNOTED_DAYS * 24);
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(digest) = name.strip_suffix(".root") {
+            let Ok(root) = fs::read(entry.path()) else {
+                continue;
+            };
+            if !Path::new(std::ffi::OsStr::from_bytes(&root)).is_dir() {
+                remove(&format!("{digest}.json"))?;
+                remove(&format!("{digest}-libraries.json"))?;
+                remove(&name)?;
+            }
+        } else if let Some(stem) = name.strip_suffix(".json") {
+            let digest = stem.strip_suffix("-libraries").unwrap_or(stem);
+            // Gone already, with the stamps of a workspace gone, is no
+            // stamps of any.
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > unnoted));
+            if old && !seen.join(format!("{digest}.root")).exists() {
+                remove(&name)?;
+            }
+        } else if name.contains(".tmp-") {
+            remove(&name)?;
         }
     }
     Ok(())

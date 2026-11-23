@@ -1222,17 +1222,13 @@ pub fn requires_strict(loaded: &Loaded) -> Result<bool, String> {
 
 /// Where the store keeps the stamps of the workspace at `root`'s files.
 fn stamps_path(store: &Store, root: &Path) -> PathBuf {
-    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
-    store.root().join("seen").join(format!("{name}.json"))
+    crate::store::stamps_path(store.root(), root, "")
 }
 
 /// The stamps of the workspace at `root`'s files as the last build kept
 /// them, or none.
 fn workspace_stamps(store: &Store, root: &Path) -> Seen {
-    fs::read(stamps_path(store, root))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    crate::store::read_stamps(store.root(), root, "")
 }
 
 /// Keeps `seen`, the stamps of the workspace at `root`'s files, but of those
