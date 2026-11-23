@@ -114,6 +114,12 @@ pub enum EventKind {
         /// When it began, since the build began.
         began: Duration,
     },
+    /// Something the build did, or could not do, that its user should know
+    /// of as it goes: room it made on the disk, say.
+    Warned {
+        /// What, as a line `warning: ` begins.
+        message: String,
+    },
     /// A target came to its value, or failed: it needs nothing more of the
     /// build.
     TargetEnded {

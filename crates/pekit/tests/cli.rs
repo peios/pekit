@@ -53,6 +53,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", cache.join("config"))
         .env_remove("PEKIT_CACHE_LIMIT")
         .env_remove("PEKIT_EVALUATING")
+        .env_remove("PEKIT_KEEP_FREE")
         .env_remove("PEKIT_PROGRESS_SECS")
         // A remote cache only where a test names one.
         .env_remove("PEKIT_REMOTE_CACHE")

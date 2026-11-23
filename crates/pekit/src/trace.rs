@@ -116,6 +116,11 @@ impl Trace {
                     "args": { "step": step },
                 }));
             }
+            EventKind::Warned { message } => self.events.push(json!({
+                "name": format!("warning: {message}"),
+                "cat": "warning", "ph": "i", "s": "g", "ts": ts, "pid": PID,
+                "tid": EVALUATION_ROW,
+            })),
             EventKind::TargetEnded { target, failed } => self.events.push(json!({
                 "name": format!("{target} {}", if *failed { "failed" } else { "ended" }),
                 "cat": "target", "ph": "i", "s": "g", "ts": ts, "pid": PID,

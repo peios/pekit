@@ -606,6 +606,23 @@ in
 sets the limit.
 A value that is no size fails every command that builds.
 .TP
+.B PEKIT_KEEP_FREE
+How much a build keeps free on the file system of the store and the scratch directory, a size as
+.B PEKIT_CACHE_LIMIT
+takes; unset or
+.BR 0 ,
+the default, keeps nothing free.
+Once less is free, a build starts no new step; once none of its steps runs, it evicts what it has not used, if no other
+.B pekit
+process has the store open, then goes on, warning of what it did or could not do.
+As a build ends, it evicts again if less is free.
+Without it,
+.B keep_free
+in
+.I CONFIG/machine.conf
+sets it.
+Whatever it is set to, a step that fails for want of room, by its error or by how little is free then, runs once more after room is made for it, and then fails saying how much is free.
+.TP
 .B PEKIT_STATE_DIR
 The state directory, which holds the machine's key that secrets' identities are hashed with.
 If it is unset or empty, the state directory is
@@ -849,13 +866,15 @@ and
 describe, with
 .B #
 starting a comment;
-.B cache_limit
-and
+.BR cache_limit ,
 .BR evaluating ,
-as
-.B PEKIT_CACHE_LIMIT
 and
-.B PEKIT_EVALUATING
+.BR keep_free ,
+as
+.BR PEKIT_CACHE_LIMIT ,
+.BR PEKIT_EVALUATING ,
+and
+.B PEKIT_KEEP_FREE
 describe, for every build on the machine.
 The environment overrides each.
 A line that sets anything else fails every command that builds.

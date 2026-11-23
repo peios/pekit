@@ -202,6 +202,59 @@ fn a_step_that_fails_fails_the_build_with_its_own_error() {
 }
 
 #[test]
+fn a_step_that_runs_out_of_room_runs_once_more_then_says_so() {
+    // Writing to `/dev/full` fails as a full disk does, each time.
+    let text = "#[hermetic] fn full() -> File {\n\
+                \x20   let r = exec([\"/bin/sh\", \"-c\", \"dd if=/dev/zero of=/dev/full bs=1 count=1\"])\n\
+                \x20   working_dir().file(\"out.txt\")\n\
+                }\n\
+                def build hello() { out = full() }\n";
+    let dir = workspace(text, &[]);
+    let state = tempfile::tempdir().unwrap();
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", Options::default());
+    let error = built.unwrap_err();
+    assert!(error.contains("No space left on device"), "{error}");
+    assert!(error.contains("not enough space: "), "{error}");
+    // Run once more, and once only.
+    let attempts: Vec<u32> = events
+        .iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Started { attempt, .. } => Some(attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts, [0, 1], "{events:?}");
+}
+
+#[test]
+fn a_build_short_of_its_floor_makes_room_says_so_and_goes_on() {
+    let text = format!("{SHOUT}def build hello() {{ out = shout(file(\"name.txt\")) }}\n");
+    let dir = workspace(&text, &[("name.txt", "hi\n")]);
+    let state = tempfile::tempdir().unwrap();
+    // More kept free than any disk has: the build holds its step, makes
+    // what room it can, says how little, and builds.
+    let options = Options {
+        keep_free: Some(u64::MAX / 4),
+        ..Options::default()
+    };
+    let (built, events) = observed_with(dir.path(), state.path(), "hello", options);
+    assert_eq!(built.unwrap().ran, 1);
+    let warned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Warned { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        warned.first().is_some_and(
+            |message| message.contains("less than the") && message.contains("wants free")
+        ),
+        "{warned:?}"
+    );
+}
+
+#[test]
 fn a_step_s_timeout_stops_it() {
     let text = "#[hermetic] #[timeout(1s)] fn slow() -> File {\n\
                 \x20   let r = exec([\"/bin/sh\", \"-c\", \"sleep 20\"])\n\

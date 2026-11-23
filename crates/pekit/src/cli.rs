@@ -2360,6 +2360,7 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         no_dynamic: shared.allows.no_dynamic,
         strict,
         cache_limit: machine.cache_limit,
+        keep_free: machine.keep_free,
         profile_gcsl: shared.gcsl_profile.is_some(),
         exposing: Exposing::AsNeeded,
         remote,
@@ -2375,6 +2376,9 @@ struct MachineWide {
     /// How large the store may be as a build ends, by `PEKIT_CACHE_LIMIT`,
     /// else the configuration's `cache_limit`.
     cache_limit: Option<u64>,
+    /// How much a build keeps free on the store's file system, by
+    /// `PEKIT_KEEP_FREE`, else the configuration's `keep_free`.
+    keep_free: Option<u64>,
     /// How many targets a build evaluates at once, by `--evaluating`, else
     /// `PEKIT_EVALUATING`, else the configuration's `evaluating`.
     evaluating: usize,
@@ -2394,11 +2398,13 @@ struct MachineWide {
 fn machine_wide(flag: Option<usize>, cache: &Path, jobs: usize) -> Result<MachineWide, String> {
     let conf = MachineConf::read()?;
     let cache_limit = conf.cache_limit()?;
+    let keep_free = conf.keep_free()?;
     let (number, named) = conf.setting("PEKIT_EVALUATING", "evaluating");
     let evaluating = evaluating_of(flag, number.as_deref(), &named, jobs)?;
     let budget = machine_budget(cache, (&conf.path, conf.text.as_deref()))?;
     Ok(MachineWide {
         cache_limit,
+        keep_free,
         evaluating,
         budget,
     })
@@ -2453,6 +2459,32 @@ impl MachineConf {
     fn cache_limit(&self) -> Result<Option<u64>, String> {
         let (limit, named) = self.setting("PEKIT_CACHE_LIMIT", "cache_limit");
         limit_named(limit.as_deref(), &named)
+    }
+
+    /// How much a build keeps free on the store's file system:
+    /// `PEKIT_KEEP_FREE`, else `keep_free`; `None` for nothing, the
+    /// default.
+    ///
+    /// # Errors
+    ///
+    /// That what is set is no size.
+    fn keep_free(&self) -> Result<Option<u64>, String> {
+        let (free, named) = self.setting("PEKIT_KEEP_FREE", "keep_free");
+        match free
+            .as_deref()
+            .map(str::trim)
+            .filter(|free| !free.is_empty())
+        {
+            None => Ok(None),
+            Some(free) => match crate::evict::size_of(free) {
+                Some(0) => Ok(None),
+                Some(bytes) => Ok(Some(bytes)),
+                None => Err(format!(
+                    "{named} is `{free}`, which is no size: write a number of bytes, such as \
+                     `30GiB`, or `0` to keep nothing free"
+                )),
+            },
+        }
     }
 }
 
@@ -2550,6 +2582,13 @@ fn build_targets(
         let mut events = |event: &Event| {
             if tracing {
                 trace.add(event);
+            }
+            // Told whatever else is shown, on a line of its own.
+            if let EventKind::Warned { message } = &event.kind {
+                if live {
+                    progress.clear(err);
+                }
+                let _ = writeln!(err, "warning: {message}");
             }
             profile.add(event);
             if live {

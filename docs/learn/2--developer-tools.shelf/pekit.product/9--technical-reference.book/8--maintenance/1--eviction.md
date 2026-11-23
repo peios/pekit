@@ -89,3 +89,31 @@ If another process has the store open and the ledger says the store is over
 its limit, the build says so in the same warning, with the store's size and
 its limit, rather than evicting nothing silently. A command shows each
 warning once, however many builds it runs.
+
+## Room during a build
+
+With `keep_free` set, a build evicts during the run as well
+(`evict::make_room`), when less than that much is free on the file system
+of the store or the scratch directory. It starts no new step until none of
+its own steps, effects, or jobs is running. It then evicts until the floor,
+and a tenth more, is free. Whatever it costs, it keeps:
+
+- every blob the build has used: put, looked up, or taken by its stamp;
+- every record it found or wrote;
+- every scratch directory it held.
+
+A step that fails for want of room is held, unstaged, and run once more after
+room is made for it: at least the floor, and at least 10 GiB. A step counts as
+failing for want of room if its error says "No space left on device", "Disk
+quota exceeded", or tar's "Wrote only", or if less than the floor, or 1 GiB,
+is free once it has failed. If it fails so again, or no room could be made,
+its error ends with a note:
+
+```text
+= note: not enough space: the file system of the store and the scratch directory has FREE free, and the build could make no more room
+```
+
+As with eviction at the end, room is made only if no other process has the
+store open. Otherwise the build warns that nothing was evicted, and goes on.
+It warns too if it could go on only by starting a step it holds, and it
+then starts that step.

@@ -124,6 +124,38 @@ struct Priorities {
     evicted: HashSet<String>,
 }
 
+/// What an eviction during a build keeps, whatever it costs: what the
+/// build has used so far (see [Room on the disk](crate::engine#room-on-the-disk)).
+#[derive(Clone, Debug, Default)]
+pub struct Keep {
+    /// Each blob the build used.
+    pub blobs: HashSet<Digest>,
+    /// Each record it found or wrote, by its key.
+    pub records: HashSet<Digest>,
+    /// Each scratch directory it held, by its name.
+    pub scratch: HashSet<String>,
+}
+
+/// How far an eviction goes.
+#[derive(Clone, Copy, Debug)]
+enum Aim {
+    /// To below nine tenths of a limit, in bytes, if the store is over it.
+    Limit(u64),
+    /// Until it has freed so many bytes, or has nothing more it may evict.
+    Free(u64),
+}
+
+/// What [`make_room`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Room {
+    /// It evicted, the store from one size to another.
+    Made(Evicted),
+    /// It had nothing to evict.
+    Nothing,
+    /// Another process has the store open, so it evicted nothing.
+    NotAlone,
+}
+
 /// What an eviction did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Evicted {
@@ -320,7 +352,7 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
     }
     // No process holds a claim on a step, since none has the store.
     let _ = remove_tree(&store.root().join("claims"));
-    let evicted = evict_held(store, limit);
+    let evicted = evict_held(store, Aim::Limit(limit), &Keep::default());
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     evicted
@@ -343,7 +375,9 @@ pub fn evict_alone(
     limit: u64,
     waiting: &mut dyn FnMut(),
 ) -> io::Result<Option<Evicted>> {
-    alone(root, scratch, waiting, |store| evict_held(store, limit))
+    alone(root, scratch, waiting, |store| {
+        evict_held(store, Aim::Limit(limit), &Keep::default())
+    })
 }
 
 /// `work` done on the store at `root`, its scratch directory `scratch`,
@@ -493,7 +527,7 @@ impl Ledger {
 }
 
 /// `bytes` in GiB, to a tenth, as a warning shows a size.
-fn gib(bytes: u64) -> String {
+pub(crate) fn gib(bytes: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
         reason = "a size shown to a tenth of a GiB"
@@ -540,26 +574,63 @@ fn journal(root: &Path, used: &Used) -> io::Result<()> {
     )
 }
 
-/// [`evict`], its lock held exclusively.
-fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
+/// Evicts from `store`, which this process has open, during its build,
+/// until `bytes` more are free, keeping all `keep` says the build has used
+/// (see [Room on the disk](crate::engine#room-on-the-disk)): only if no other
+/// process has the store, and none of this process's steps runs.
+///
+/// # Errors
+///
+/// That the store's lock cannot be taken, or the store cannot be read or
+/// written.
+pub fn make_room(store: &Store, bytes: u64, keep: &Keep) -> io::Result<Room> {
+    match store.held().try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            store.held().lock_shared()?;
+            return Ok(Room::NotAlone);
+        }
+        Err(TryLockError::Error(error)) => {
+            store.held().lock_shared()?;
+            return Err(error);
+        }
+    }
+    let evicted = evict_held(store, Aim::Free(bytes), keep);
+    // Held shared again, as every process that has the store holds it.
+    store.held().lock_shared()?;
+    Ok(match evicted? {
+        Some(evicted) if evicted.after < evicted.before => Room::Made(evicted),
+        _ => Room::Nothing,
+    })
+}
+
+/// [`evict`] or [`make_room`], its lock held exclusively, as far as `aim`
+/// says, keeping what `keep` says.
+fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted>> {
     let root = store.root();
     let scratch = scratch_of(root)?;
     let scratch_size = |scratch: &HashMap<String, (PathBuf, u64)>| -> u64 {
         scratch.values().map(|(_, size)| size).sum()
     };
     // Within its limit by what the ledger says, nothing more is read.
-    if Ledger::read(root).is_some_and(|blobs| blobs + scratch_size(&scratch) <= limit) {
+    if let Aim::Limit(limit) = aim
+        && Ledger::read(root).is_some_and(|blobs| blobs + scratch_size(&scratch) <= limit)
+    {
         return Ok(None);
     }
     let blobs = blobs_of(root)?;
     let measured = blobs.total();
     let total = measured + scratch_size(&scratch);
-    // Within its limit, nothing more is read: the journals wait for an
-    // eviction that does something.
-    if total <= limit {
-        Ledger::write(root, measured)?;
-        return Ok(None);
-    }
+    let low = match aim {
+        // Within its limit, nothing more is read: the journals wait for an
+        // eviction that does something.
+        Aim::Limit(limit) if total <= limit => {
+            Ledger::write(root, measured)?;
+            return Ok(None);
+        }
+        Aim::Limit(limit) => limit / 10 * 9,
+        Aim::Free(bytes) => total.saturating_sub(bytes),
+    };
     // No tree is known to be complete once a blob may be gone, and none
     // materialised holds a link to one.
     store.forget_complete()?;
@@ -587,7 +658,6 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
     for name in &used.scratch {
         state.scratch.insert(name.clone(), state.inflation);
     }
-    let low = limit / 10 * 9;
     let after = evict_to(
         &StoreSeen {
             store,
@@ -598,6 +668,7 @@ fn evict_held(store: &Store, limit: u64) -> io::Result<Option<Evicted>> {
         },
         &mut state,
         (total, low),
+        keep,
     );
     // Only what is still there is remembered.
     state.records.retain(|hex, _| records.contains_key(hex));
@@ -628,7 +699,12 @@ fn cost_per_byte(cost: u64, size: u64) -> u64 {
 /// Evicts the blobs, scratch directories and records' contents given, by
 /// `state`'s priorities, until the store, `total` bytes, is at most `low`:
 /// its size after.
-fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64, u64)) -> u64 {
+fn evict_to(
+    seen: &StoreSeen<'_>,
+    state: &mut Priorities,
+    (mut total, low): (u64, u64),
+    keep: &Keep,
+) -> u64 {
     let StoreSeen {
         store,
         blobs,
@@ -641,6 +717,8 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
         .filter(|(hex, _)| !state.evicted.contains(*hex))
         .collect();
     let mut named = named_of(&live, blobs, trees);
+    let kept_records: HashSet<String> = keep.records.iter().map(Digest::hex).collect();
+    let kept = |blob: u32| keep.blobs.contains(&blobs.get(blob).digest);
     let remove = |blob: u32, total: &mut u64| {
         let seen = blobs.get(blob);
         for (there, executable) in [(seen.plain, false), (seen.executable, true)] {
@@ -652,32 +730,15 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
     };
     // What no live record names costs nothing to make again: a blob no
     // live record names, and a copy, the largest first.
-    let mut unnamed: Vec<(u64, Result<u32, &Path>)> = (0..blobs.seen.len())
-        .filter(|at| named[*at] == 0)
+    let unnamed = (0..blobs.seen.len())
         .filter_map(|at| u32::try_from(at).ok())
-        .map(|blob| (blobs.get(blob).size, Ok(blob)))
-        .chain(
-            blobs
-                .others
-                .iter()
-                .map(|(path, size)| (*size, Err(path.as_path()))),
-        )
-        .collect();
-    unnamed.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
-    for (size, what) in unnamed {
-        if total <= low {
-            return total;
-        }
-        match what {
-            Ok(blob) => remove(blob, &mut total),
-            Err(path) => {
-                let _ = fs::remove_file(path);
-                total = total.saturating_sub(size);
-            }
-        }
+        .filter(|blob| named[index(*blob)] == 0 && !kept(*blob));
+    total = remove_unnamed(blobs, unnamed, (total, low), &remove);
+    if total <= low {
+        return total;
     }
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
-    for (hex, record) in &live {
+    for (hex, record) in live.iter().filter(|(hex, _)| !kept_records.contains(*hex)) {
         let priority = state.records.get(*hex).copied().unwrap_or_else(|| {
             state
                 .inflation
@@ -688,7 +749,7 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
             what: Evictable::Record((*hex).clone()),
         });
     }
-    for name in scratch.keys() {
+    for name in scratch.keys().filter(|name| !keep.scratch.contains(*name)) {
         let priority = state.scratch.get(name).copied().unwrap_or(state.inflation);
         heap.push(Candidate {
             priority,
@@ -708,7 +769,9 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
                 while let Some(blob) = letting.pop() {
                     let count = &mut named[index(blob)];
                     *count = count.saturating_sub(1);
-                    if *count == 0 {
+                    // A blob the build uses stays, and so does all a tree of
+                    // it names.
+                    if *count == 0 && !kept(blob) {
                         remove(blob, &mut total);
                         letting.extend(
                             trees
@@ -727,6 +790,40 @@ fn evict_to(seen: &StoreSeen<'_>, state: &mut Priorities, (mut total, low): (u64
                     total = total.saturating_sub(*size);
                     state.scratch.remove(&name);
                 }
+            }
+        }
+    }
+    total
+}
+
+/// Removes from `blobs` each of `unnamed`, blobs no live record names, and
+/// each copy of a blob, the largest first, by `remove`, until the store,
+/// `total` bytes, is at `low` or below: its size after.
+fn remove_unnamed(
+    blobs: &Blobs,
+    unnamed: impl Iterator<Item = u32>,
+    (mut total, low): (u64, u64),
+    remove: &dyn Fn(u32, &mut u64),
+) -> u64 {
+    let mut found: Vec<(u64, Result<u32, &Path>)> = unnamed
+        .map(|blob| (blobs.get(blob).size, Ok(blob)))
+        .chain(
+            blobs
+                .others
+                .iter()
+                .map(|(path, size)| (*size, Err(path.as_path()))),
+        )
+        .collect();
+    found.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+    for (size, what) in found {
+        if total <= low {
+            break;
+        }
+        match what {
+            Ok(blob) => remove(blob, &mut total),
+            Err(path) => {
+                let _ = fs::remove_file(path);
+                total = total.saturating_sub(size);
             }
         }
     }

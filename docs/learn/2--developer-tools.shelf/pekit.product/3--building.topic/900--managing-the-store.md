@@ -39,6 +39,26 @@ eviction waits until no other pekit process is using the store, so a build
 that runs while another is running leaves it to a later build. If the store
 is over its limit then, pekit warns that nothing was evicted.
 
+## Keep room free on the disk
+
+The store's limit counts the store, not what shares its disk: the
+directories builds write outputs and scratch files to, and other programs.
+To keep room free whatever fills the disk, set `keep_free` in
+`machine.conf`, or `PEKIT_KEEP_FREE`:
+
+```text
+keep_free = 30GiB
+```
+
+Once less is free during a build, pekit starts no new step. Once none of
+its steps is running, it evicts what the build hasn't used, if no other
+pekit is using the store, and then goes on. It warns of what it evicted, or
+why it couldn't. As the build ends, it evicts again if less is free.
+
+Whether or not `keep_free` is set, a step that fails because the disk is
+full runs once more, after pekit makes room for it. If it fails again, its
+error says how much is free.
+
 ## See and evict the store
 
 `pekit store stats` shows where the store is, how large it was when it was

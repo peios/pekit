@@ -473,3 +473,28 @@ fn what_a_build_writes_is_counted_as_it_goes_and_once() {
     pekit::evict::evict(&store, &store.used(), DEFAULT_LIMIT).unwrap();
     assert_eq!(ledgered(state.path()), 6000);
 }
+
+#[test]
+fn room_made_during_a_build_keeps_what_the_build_used() {
+    use pekit::evict::{Keep, Room, make_room};
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(&state.path().join("store")).unwrap();
+    let used = store.put_bytes(&vec![b'u'; 1 << 16]).unwrap();
+    let unused = store.put_bytes(&vec![b'n'; 1 << 16]).unwrap();
+    let keep = Keep {
+        blobs: [used].into(),
+        ..Keep::default()
+    };
+    // Another process has the store open: nothing is evicted.
+    let other = Store::open(&state.path().join("store")).unwrap();
+    assert_eq!(make_room(&store, 1 << 30, &keep).unwrap(), Room::NotAlone);
+    assert!(store.has(&unused));
+    drop(other);
+    // Alone: all it may evict, but what the build used.
+    let Room::Made(made) = make_room(&store, 1 << 30, &keep).unwrap() else {
+        panic!("no room made");
+    };
+    assert!(made.after < made.before, "{made:?}");
+    assert!(store.has(&used));
+    assert!(!store.has(&unused));
+}

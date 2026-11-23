@@ -357,6 +357,17 @@ fn read_ahead(root: &Path, skip: &(dyn Fn(&Path) -> bool + Sync)) -> HashMap<Pat
     ahead
 }
 
+/// The bytes free to write on the file system `path` is on, as one who is
+/// not its administrator may.
+///
+/// # Errors
+///
+/// That the file system cannot be asked.
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    let stat = rustix::fs::statvfs(path)?;
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
 /// Now, as the clock of the file system `path` is on tells it, as coarsely
 /// as that file system keeps times: the change time of a file made beside
 /// it, and removed.
@@ -759,6 +770,10 @@ pub struct Store {
     /// What it knows of the materialised trees (see [Materialised
     /// trees](trees#materialised-trees)).
     materialised: Arc<Mutex<trees::Materialised>>,
+    /// Each blob this process asked where it is, put, or took by a stamp:
+    /// what an eviction during its build keeps (see
+    /// [`crate::evict::make_room`]).
+    touched: Arc<Mutex<HashSet<Digest>>>,
 }
 
 /// How a tree was found complete (see [`Store::holds_tree`]).
@@ -1046,6 +1061,7 @@ impl Store {
             trees: Arc::default(),
             complete: Arc::default(),
             materialised: Arc::default(),
+            touched: Arc::default(),
         })
     }
 
@@ -1179,6 +1195,7 @@ impl Store {
     /// Where the blob of `digest` is, executable if `executable`.
     #[must_use]
     pub fn blob_path(&self, digest: &Digest, executable: bool) -> PathBuf {
+        self.touch(digest);
         let hex = digest.hex();
         let name = if executable {
             format!("{hex}.x")
@@ -1186,6 +1203,36 @@ impl Store {
             hex.clone()
         };
         self.root.join("cas").join(&hex[..2]).join(name)
+    }
+
+    /// Notes that this process uses the blob `digest`, which an eviction
+    /// during its build then keeps.
+    fn touch(&self, digest: &Digest) {
+        if let Ok(mut touched) = self.touched.lock() {
+            touched.insert(*digest);
+        }
+    }
+
+    /// Each blob this process used, each record it found or wrote, and each
+    /// scratch directory it held, so far: what an eviction during its
+    /// build keeps (see [`crate::evict::make_room`]).
+    #[must_use]
+    pub fn in_use(&self) -> crate::evict::Keep {
+        let blobs = self
+            .touched
+            .lock()
+            .map(|touched| touched.clone())
+            .unwrap_or_default();
+        let (records, scratch) = self
+            .used
+            .lock()
+            .map(|used| (used.records.clone(), used.scratch.clone()))
+            .unwrap_or_default();
+        crate::evict::Keep {
+            blobs,
+            records,
+            scratch,
+        }
     }
 
     /// Whether the store holds the contents of `digest`.
@@ -2024,6 +2071,7 @@ impl Store {
             && *known == stamp
         {
             let entry = *entry;
+            self.touch(&entry.digest);
             walk.seen.visited.insert(path.to_path_buf());
             walk.trusted.push((path.to_path_buf(), entry));
             return Ok(Some(entry));
