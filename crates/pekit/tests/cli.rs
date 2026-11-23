@@ -48,6 +48,12 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .env("PEKIT_CACHE_DIR", cache)
         .env("PEKIT_STATE_DIR", cache.join("state"))
         .env("XDG_RUNTIME_DIR", cache.join("run"))
+        // The machine's settings the test's own: no configuration, and none
+        // in the environment.
+        .env("XDG_CONFIG_HOME", cache.join("config"))
+        .env_remove("PEKIT_CACHE_LIMIT")
+        .env_remove("PEKIT_EVALUATING")
+        .env_remove("PEKIT_PROGRESS_SECS")
         // A remote cache only where a test names one.
         .env_remove("PEKIT_REMOTE_CACHE")
         .env_remove("PEKIT_REMOTE_INSTANCE")
@@ -204,9 +210,115 @@ fn at_most_as_many_targets_as_evaluating_says_are_evaluated_at_once() {
     assert!(
         printed(&wrong)
             .1
-            .contains("`PEKIT_EVALUATING=some` is no number of targets"),
+            .contains("`PEKIT_EVALUATING` is `some`, which is no number of targets"),
         "{:?}",
         printed(&wrong)
+    );
+}
+
+#[test]
+fn a_long_build_into_a_log_shows_where_it_is_and_each_target_s_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let build = "#[hermetic] fn slow(n: Int) -> File {\n\
+                 \x20   let r = exec([\"sh\", \"-c\", \"sleep {n}; echo {n} > out\"])\n\
+                 \x20   working_dir().file(\"out\")\n\
+                 }\n\
+                 def build quick() { out = slow(0) }\n\
+                 def build later() { out = slow(4) }\n";
+    write(
+        dir.path(),
+        &[("workspace.gcsl", ""), ("app/build.gcsl", build)],
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let logged = Command::new(env!("CARGO_BIN_EXE_pekit"))
+        .args(["build", "quick", "later"])
+        .current_dir(dir.path().join("app"))
+        .env("PEKIT_CACHE_DIR", cache.path())
+        .env("PEKIT_STATE_DIR", cache.path().join("state"))
+        .env("XDG_RUNTIME_DIR", cache.path().join("run"))
+        .env("PEKIT_PROGRESS_SECS", "1")
+        .output()
+        .unwrap();
+    let (_, err) = printed(&logged);
+    assert!(logged.status.success(), "{err}");
+    // Where the build is, each second, once a second has passed: `quick`
+    // has ended, and `later`'s step runs.
+    let status = err
+        .lines()
+        .find(|line| line.contains("1 of 2 targets ended"))
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(status.starts_with("[00:00:0"), "{status}");
+    assert!(status.contains("; running 1: slow/"), "{status}");
+    assert!(status.contains("; pekit uses "), "{status}");
+    // And `later`'s end, once lines are shown.
+    assert!(
+        err.lines().any(|line| line.ends_with(" ended app/later")),
+        "{err}"
+    );
+    // A build that ends within the period shows none.
+    let again = pekit(
+        &dir.path().join("app"),
+        cache.path(),
+        &["build", "quick", "later"],
+    );
+    assert!(
+        !printed(&again).1.contains("targets ended"),
+        "{:?}",
+        printed(&again)
+    );
+}
+
+#[test]
+fn the_store_command_shows_the_store_and_evicts_it_now() {
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let store = |args: &[&str]| {
+        let mut all = vec!["store"];
+        all.extend_from_slice(args);
+        pekit(dir.path(), cache.path(), &all)
+    };
+    let stats = store(&["stats"]);
+    let (out, err) = printed(&stats);
+    assert!(stats.status.success(), "{err}");
+    assert!(
+        out.contains(&format!(
+            "store: {}\n",
+            cache.path().join("store").display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("size: not measured yet"), "{out}");
+    assert!(out.contains("limit: 100.0 GiB\n"), "{out}");
+    assert!(out.contains("last evicted: never\n"), "{out}");
+    assert!(out.contains("in use: by none\n"), "{out}");
+    assert!(
+        pekit(dir.path(), cache.path(), &["build", "app/hello"])
+            .status
+            .success()
+    );
+    let evicted = store(&["evict", "--limit", "1"]);
+    let (out, err) = printed(&evicted);
+    assert!(evicted.status.success(), "{err}");
+    assert!(out.starts_with("evicted "), "{out}");
+    let stats = printed(&store(&["stats"])).0;
+    assert!(stats.contains("last evicted: just now\n"), "{stats}");
+    assert!(
+        stats.contains(", by its ledger, last walked just now"),
+        "{stats}"
+    );
+    // The step was evicted: the next build runs it again.
+    let again = pekit(dir.path(), cache.path(), &["build", "app/hello"]);
+    assert!(
+        printed(&again).0.starts_with("built app/hello: 1 step run"),
+        "{:?}",
+        printed(&again)
+    );
+    let wrong = store(&["evict", "--limit", "lots"]);
+    assert!(!wrong.status.success());
+    assert!(
+        printed(&wrong)
+            .1
+            .contains("`--limit` is `lots`, which is no size")
     );
 }
 

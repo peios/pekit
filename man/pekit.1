@@ -57,6 +57,12 @@ pekit \- build, test, run, and package GCSL build files as cached, sandboxed ste
 .B pekit clean
 .RB [ \-\-cache ]
 .br
+.B pekit store stats
+.br
+.B pekit store evict
+.RB [ \-\-limit
+.IR SIZE ]
+.br
 .B pekit
 .RB [ \-h | \-\-help | \-V | \-\-version ]
 .SH DESCRIPTION
@@ -289,6 +295,23 @@ Each is written as it is recorded, so a recipe that fails, or a stop, keeps the 
 .B clean
 Remove
 .IR pekit-out/ .
+.TP
+.B store stats
+Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, and whether another
+.B pekit
+has it open.
+.TP
+.B store evict
+Evict the store to within its limit, or
+.I SIZE
+with
+.BR \-\-limit ,
+now.
+A build evicts only when it ends with no other
+.B pekit
+using the store;
+.B store evict
+waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
 .SH OPTIONS
 .B build ,
 .BR test ,
@@ -515,6 +538,20 @@ else
 How many targets a build evaluates at once, as
 .B \-\-evaluating
 says, which overrides it.
+Without it,
+.B evaluating
+in
+.I CONFIG/machine.conf
+sets it.
+.TP
+.B PEKIT_PROGRESS_SECS
+When standard error is no terminal, how often a build that runs longer writes a line of its progress, in seconds:
+how many targets have ended, how many steps ran and were found, the steps running, and the memory
+.B pekit
+uses, then also a line as each target ends.
+The default is 60;
+.B 0
+writes none.
 .TP
 .B PEKIT_CACHE_LIMIT
 The size the store is kept within, a number of bytes followed by nothing,
@@ -545,6 +582,11 @@ When a build ends with the store larger, and no other
 .B pekit
 process has the store open, the store is evicted to nine tenths of the limit, cheapest to make again for its size first.
 If another process has it open, nothing is evicted, and a store over its limit is warned of.
+Without it,
+.B cache_limit
+in
+.I CONFIG/machine.conf
+sets the limit.
 A value that is no size fails every command that builds.
 .TP
 .B PEKIT_STATE_DIR
@@ -789,7 +831,16 @@ and
 .B PEKIT_MACHINE_UNSEEN
 describe, with
 .B #
-starting a comment.
+starting a comment;
+.B cache_limit
+and
+.BR evaluating ,
+as
+.B PEKIT_CACHE_LIMIT
+and
+.B PEKIT_EVALUATING
+describe, for every build on the machine.
+The environment overrides each.
 A line that sets anything else fails every command that builds.
 .SH NOTES
 Do not change the files in the store, or files under

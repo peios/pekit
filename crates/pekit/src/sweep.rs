@@ -95,7 +95,7 @@ pub fn sweep_stale(store: &Store, scratch: &Path) -> io::Result<bool> {
 
 /// Removes what is not this process's in `tmp` and of a build's kinds in
 /// `scratch`, the store's lock held exclusively.
-fn sweep_held(tmp: &Path, scratch: &Path) -> io::Result<()> {
+pub(crate) fn sweep_held(tmp: &Path, scratch: &Path) -> io::Result<()> {
     let own = token();
     let entries = |dir: &Path| -> io::Result<Vec<fs::DirEntry>> {
         match fs::read_dir(dir) {

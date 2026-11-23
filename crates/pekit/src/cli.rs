@@ -55,7 +55,7 @@ use gcsl::eval::plain::Plain;
 use gcsl::workspace::Workspace;
 
 use crate::budget::{Budget, DEFAULT_UNSEEN, Limits, budget_dir, machine_memory};
-use crate::evict::limit_of;
+use crate::evict::limit_named;
 use crate::meter::remove_stale_fifos;
 use crate::exposure::Exposing;
 use crate::engine::{
@@ -110,6 +110,24 @@ enum Command {
     Sources(PackageArgs),
     /// Build a package from `HEAD` strictly, publish it, and tag it.
     Release(ReleaseArgs),
+    /// Look after the store: how large it is, or evict it now.
+    #[command(subcommand)]
+    Store(StoreCommand),
+}
+
+/// `pekit store`'s commands (see [Commands](#commands)).
+#[derive(Debug, Subcommand)]
+enum StoreCommand {
+    /// Show where the store is, how large, its limit, and whether a build
+    /// has it.
+    Stats,
+    /// Evict the store to within its limit now: waiting for the builds that
+    /// have it to end, while builds that start meanwhile wait for this.
+    Evict {
+        /// The size to evict to, in place of the store's limit.
+        #[arg(long, value_name = "SIZE")]
+        limit: Option<String>,
+    },
 }
 
 /// `pekit release`'s arguments (see [Commands](#commands)).
@@ -498,6 +516,7 @@ pub fn run(
         Command::Lock(args) => lock_command(&args, cwd, terminal),
         Command::Sources(args) => sources_command(&args, cwd, terminal),
         Command::Release(args) => release_command(&args, cwd, terminal),
+        Command::Store(command) => store_command(&command, terminal),
     }
 }
 
@@ -1855,6 +1874,103 @@ fn emptied_but_lock(store: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `pekit store`: the store's state, as `command` asks, or its eviction.
+fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCode {
+    let cache = cache_dir();
+    let root = cache.join("store");
+    let limit = match command {
+        StoreCommand::Evict { limit: Some(limit) } => limit_named(Some(limit), "`--limit`"),
+        StoreCommand::Evict { limit: None } | StoreCommand::Stats => {
+            MachineConf::read().and_then(|conf| conf.cache_limit())
+        }
+    };
+    let limit = match limit {
+        Ok(limit) => limit,
+        Err(message) => {
+            let _ = writeln!(terminal.err, "error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let shown_limit = limit.map_or_else(|| "none".to_owned(), shown_size);
+    match command {
+        StoreCommand::Stats => {
+            let _ = writeln!(terminal.out, "store: {}", root.display());
+            let size = match crate::evict::ledgered(&root) {
+                Some((bytes, walked)) => format!(
+                    "{}, by its ledger, last walked {}",
+                    shown_size(bytes),
+                    shown_ago(walked)
+                ),
+                None => "not measured yet: an eviction measures it".to_owned(),
+            };
+            let _ = writeln!(terminal.out, "size: {size}");
+            let _ = writeln!(terminal.out, "limit: {shown_limit}");
+            let evicted = std::fs::metadata(root.join("eviction.json"))
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or_else(|| "never".to_owned(), |when| shown_ago(when.as_secs()));
+            let _ = writeln!(terminal.out, "last evicted: {evicted}");
+            let used = match crate::evict::in_use(&root) {
+                Ok(true) => "by another pekit",
+                Ok(false) => "by none",
+                Err(_) => "cannot be told",
+            };
+            let _ = writeln!(terminal.out, "in use: {used}");
+            ExitCode::SUCCESS
+        }
+        StoreCommand::Evict { .. } => {
+            let Some(limit) = limit else {
+                let _ = writeln!(terminal.out, "the store has no limit: nothing to evict");
+                return ExitCode::SUCCESS;
+            };
+            let err = &mut *terminal.err;
+            let mut waiting = || {
+                let _ = writeln!(
+                    err,
+                    "waiting for the builds that have the store to end; builds that start \
+                     meanwhile wait for this"
+                );
+            };
+            match crate::evict::evict_alone(&root, &cache.join("scratch"), limit, &mut waiting) {
+                Ok(Some(evicted)) => {
+                    let _ = writeln!(
+                        terminal.out,
+                        "evicted {}: the store is {}, within {shown_limit}",
+                        shown_size(evicted.before.saturating_sub(evicted.after)),
+                        shown_size(evicted.after)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(None) => {
+                    let _ = writeln!(
+                        terminal.out,
+                        "nothing to evict: the store is within {shown_limit}"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    let _ = writeln!(terminal.err, "error: cannot evict the store: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+/// How long ago `seconds`, since the Unix epoch, was, as a person reads it.
+fn shown_ago(seconds: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs());
+    match now.saturating_sub(seconds) {
+        ago if ago < 120 => "just now".to_owned(),
+        ago if ago < 2 * 3600 => format!("{} minutes ago", ago / 60),
+        ago if ago < 2 * 86_400 => format!("{} hours ago", ago / 3600),
+        ago => format!("{} days ago", ago / 86_400),
+    }
+}
+
 /// Whether the test whose result is `result`, a `TestResult`, passed, and
 /// its failure's message; `None` for a value of another shape.
 fn test_result(result: &Plain) -> Option<(bool, &str)> {
@@ -1932,14 +2048,19 @@ fn warn_of_remote(outcomes: &Outcomes, terminal: &mut Terminal<'_>) {
 }
 
 /// How many targets a build of `jobs` jobs evaluates at once: as `--evaluating`,
-/// `flag`, says, else as `PEKIT_EVALUATING`, `setting`, says, a number, `0`
+/// `flag`, says, else as `setting`, what `named` sets, says, a number, `0`
 /// for all, else, unset or empty, as many as `jobs` and at least 8 (see
 /// [Building](crate::engine#building)).
 ///
 /// # Errors
 ///
 /// That it is set to no number.
-fn evaluating_of(flag: Option<usize>, setting: Option<&str>, jobs: usize) -> Result<usize, String> {
+fn evaluating_of(
+    flag: Option<usize>,
+    setting: Option<&str>,
+    named: &str,
+    jobs: usize,
+) -> Result<usize, String> {
     if let Some(evaluating) = flag {
         return Ok(evaluating);
     }
@@ -1947,7 +2068,7 @@ fn evaluating_of(flag: Option<usize>, setting: Option<&str>, jobs: usize) -> Res
         None => Ok(jobs.max(8)),
         Some(setting) => setting.parse().map_err(|_| {
             format!(
-                "`PEKIT_EVALUATING={setting}` is no number of targets: write one, or `0` for all"
+                "{named} is `{setting}`, which is no number of targets: write one, or `0` for all"
             )
         }),
     }
@@ -1988,27 +2109,15 @@ fn warn_of_file_systems(outputs: &Path, store: &Path, terminal: &mut Terminal<'_
 /// names none.
 fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -> Option<Settings> {
     let cache = cache_dir();
-    let cache_limit = match limit_of(std::env::var("PEKIT_CACHE_LIMIT").ok().as_deref()) {
-        Ok(limit) => limit,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
-    let remote = match remote_of(&shared.remote) {
-        Ok(remote) => remote,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
-    let budget = match machine_budget(&cache) {
-        Ok(budget) => budget,
-        Err(message) => {
-            let _ = writeln!(terminal.err, "error: {message}");
-            return None;
-        }
-    };
+    let jobs = shared
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
+    let machine = machine_wide(shared.evaluating, &cache, jobs)
+        .map_err(|message| writeln!(terminal.err, "error: {message}"))
+        .ok()?;
+    let remote = remote_of(&shared.remote)
+        .map_err(|message| writeln!(terminal.err, "error: {message}"))
+        .ok()?;
     warn_of_file_systems(
         &loaded.root.join("pekit-out"),
         &cache.join("store"),
@@ -2042,19 +2151,12 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
             })
         }
     };
-    let jobs = shared
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
-    let setting = std::env::var("PEKIT_EVALUATING").ok();
-    let evaluating = evaluating_of(shared.evaluating, setting.as_deref(), jobs)
-        .map_err(|message| writeln!(terminal.err, "error: {message}"))
-        .ok()?;
     Some(Settings {
         store: cache.join("store"),
         outputs: loaded.root.join("pekit-out"),
         scratch: cache.join("scratch"),
         jobs,
-        evaluating,
+        evaluating: machine.evaluating,
         // A strict build's steps see nothing of the host, so their results
         // are those of any machine of the platform, and keyed apart from
         // a build's that borrowed its tools.
@@ -2079,37 +2181,121 @@ fn settings_for(shared: &Shared, loaded: &Loaded, terminal: &mut Terminal<'_>) -
         building_for,
         no_dynamic: shared.allows.no_dynamic,
         strict,
-        cache_limit,
+        cache_limit: machine.cache_limit,
         profile_gcsl: shared.gcsl_profile.is_some(),
         exposing: Exposing::AsNeeded,
         remote,
-        budget: Some(budget),
+        budget: Some(machine.budget),
         epoch: None,
     })
 }
 
-/// The machine's budget a build's programs wait for, of the limits the
-/// environment and the machine's configuration, `machine.conf` in the
-/// configuration directory, say (see [The budget](crate::budget#the-budget)),
-/// each program of a step metered by this program.
+/// How every build on the machine runs, as the environment, else the
+/// machine's configuration, `machine.conf` in the configuration directory,
+/// says (see [Commands](#commands)).
+struct MachineWide {
+    /// How large the store may be as a build ends, by `PEKIT_CACHE_LIMIT`,
+    /// else the configuration's `cache_limit`.
+    cache_limit: Option<u64>,
+    /// How many targets a build evaluates at once, by `--evaluating`, else
+    /// `PEKIT_EVALUATING`, else the configuration's `evaluating`.
+    evaluating: usize,
+    /// The machine's budget, by `PEKIT_MACHINE_*`, else the
+    /// configuration's `jobs`, `memory` and `unseen`.
+    budget: Arc<Budget>,
+}
+
+/// How every build on the machine runs, for one of `jobs` jobs, its
+/// `--evaluating` `flag`, with the cache directory `cache` (see
+/// [`MachineWide`]).
 ///
 /// # Errors
 ///
-/// That the configuration cannot be read or sets what is no limit, or the
-/// budget's directory cannot be made.
-fn machine_budget(cache: &Path) -> Result<Arc<Budget>, String> {
+/// That the configuration cannot be read, or sets what is no setting, or
+/// the budget's directory cannot be made.
+fn machine_wide(flag: Option<usize>, cache: &Path, jobs: usize) -> Result<MachineWide, String> {
+    let conf = MachineConf::read()?;
+    let cache_limit = conf.cache_limit()?;
+    let (number, named) = conf.setting("PEKIT_EVALUATING", "evaluating");
+    let evaluating = evaluating_of(flag, number.as_deref(), &named, jobs)?;
+    let budget = machine_budget(cache, (&conf.path, conf.text.as_deref()))?;
+    Ok(MachineWide {
+        cache_limit,
+        evaluating,
+        budget,
+    })
+}
+
+/// The machine's configuration, `machine.conf` in the configuration
+/// directory, as read (see [`MachineWide`]).
+struct MachineConf {
+    /// Where it is.
+    path: PathBuf,
+    /// What it says, if it is there.
+    text: Option<String>,
+}
+
+impl MachineConf {
+    /// The machine's configuration.
+    ///
+    /// # Errors
+    ///
+    /// That it is there but cannot be read.
+    fn read() -> Result<Self, String> {
+        let path = config_dir().join("machine.conf");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
+        };
+        Ok(Self { path, text })
+    }
+
+    /// What the environment's `name` sets, else the configuration's `key`,
+    /// if either sets it, and how to name where it was set.
+    fn setting(&self, name: &str, key: &str) -> (Option<String>, String) {
+        match std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => (Some(value), format!("`{name}`")),
+            None => (
+                crate::budget::machine_setting(self.text.as_deref(), key),
+                format!("`{key}` in `{}`", self.path.display()),
+            ),
+        }
+    }
+
+    /// How large the store may be: `PEKIT_CACHE_LIMIT`, else
+    /// `cache_limit`, else the default; `None` for no limit.
+    ///
+    /// # Errors
+    ///
+    /// That the limit set is no size.
+    fn cache_limit(&self) -> Result<Option<u64>, String> {
+        let (limit, named) = self.setting("PEKIT_CACHE_LIMIT", "cache_limit");
+        limit_named(limit.as_deref(), &named)
+    }
+}
+
+/// The machine's budget, its limits as the environment, else the machine's
+/// configuration at `config`, its text `file` if it has one, says, in its
+/// directory under `$XDG_RUNTIME_DIR`, else the cache directory `cache`.
+///
+/// # Errors
+///
+/// That the configuration sets what is no limit, or the budget's directory
+/// cannot be made.
+fn machine_budget(
+    cache: &Path,
+    (config, file): (&Path, Option<&str>),
+) -> Result<Arc<Budget>, String> {
     let var = |name: &str| std::env::var(name).ok();
-    let config = config_dir().join("machine.conf");
-    let file = match std::fs::read_to_string(&config) {
-        Ok(text) => Some(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot read `{}`: {error}", config.display())),
-    };
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     // A machine that does not say gets a program of a kind never metered
     // for each job.
     let ram = machine_memory().unwrap_or(cores as u64 * DEFAULT_UNSEEN * 2);
-    let limits = Limits::of_machine(&var, file.as_deref(), (cores, ram)).map_err(|message| {
+    let limits = Limits::of_machine(&var, file, (cores, ram)).map_err(|message| {
         if file.is_some() {
             format!(
                 "{message}; the machine's configuration is `{}`",
@@ -2177,6 +2363,10 @@ fn build_targets(
     let mut reports = Vec::new();
     let mut progress = Progress::default();
     let live = terminal.live;
+    let logged = (!live)
+        .then(|| LogProgress::start(epoch, targets.len()))
+        .flatten();
+    let log = logged.as_ref().map(LogProgress::state);
     let outcomes = {
         let err = &mut *terminal.err;
         let mut events = |event: &Event| {
@@ -2187,11 +2377,21 @@ fn build_targets(
             if live {
                 progress.show(event, err);
             }
+            if let Some(log) = &log {
+                log.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .show(event);
+            }
         };
         let first = build_once((loaded, targets, doing), settings, &mut events);
         reports.extend(loaded.workspace.profile_report());
         match first {
             Ok(first) if shared.reuse.check_reproducible => {
+                if let Some(log) = &log {
+                    log.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .next_pass();
+                }
                 let again = Settings {
                     reuse: Reuse::Compare,
                     ..settings.clone()
@@ -2212,6 +2412,7 @@ fn build_targets(
     if live {
         progress.clear(terminal.err);
     }
+    drop(logged);
     if let Some(path) = &shared.gcsl_profile {
         for report in reports {
             profile.add_report(report);
@@ -2317,6 +2518,199 @@ impl Progress {
 /// How many characters of a progress line are shown, so that it fits on
 /// one line of a narrow terminal.
 const PROGRESS_WIDTH: usize = 79;
+
+/// How often a build's progress is shown when standard error is no
+/// terminal, unless `PEKIT_PROGRESS_SECS` says otherwise (see [`LogProgress`]).
+const LOG_PERIOD: Duration = Duration::from_secs(60);
+
+/// A build's progress as a log shows it, standard error being no terminal,
+/// a service's journal say: nothing for a build that ends within a period,
+/// `PEKIT_PROGRESS_SECS` seconds, 60 by default, `0` for never, since one
+/// that short needs none; after it, a line of where the build is each
+/// period, and a line as each target ends. A thread of its own shows the
+/// periodic line, so that a step that runs for an hour still shows one.
+struct LogProgress {
+    /// What it shows.
+    state: Arc<Mutex<LogState>>,
+    /// What stops the thread.
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    /// The thread.
+    ticker: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Where a build is, as [`LogProgress`] shows it.
+#[derive(Debug)]
+struct LogState {
+    /// When the command's first build began, which each line is timed from.
+    epoch: Instant,
+    /// How many targets the build has.
+    targets: usize,
+    /// How many have ended, and how many of those failed, in this pass.
+    ended: (usize, usize),
+    /// Whether this is the reproducibility check's second pass.
+    checking: bool,
+    /// How many steps ran, and how many were found in the store.
+    steps: (usize, usize),
+    /// The steps running, in the order they started.
+    running: Vec<String>,
+    /// Whether it has shown a line yet: it shows targets ending only after.
+    talking: bool,
+}
+
+impl LogProgress {
+    /// The log's progress of a build of `targets` targets, its lines timed
+    /// from `epoch`, if `PEKIT_PROGRESS_SECS` asks for any.
+    fn start(epoch: Instant, targets: usize) -> Option<Self> {
+        let period = match std::env::var("PEKIT_PROGRESS_SECS")
+            .ok()
+            .map(|secs| secs.trim().parse())
+        {
+            Some(Ok(0)) => return None,
+            Some(Ok(secs)) => Duration::from_secs(secs),
+            _ => LOG_PERIOD,
+        };
+        let state = Arc::new(Mutex::new(LogState {
+            epoch,
+            targets,
+            ended: (0, 0),
+            checking: false,
+            steps: (0, 0),
+            running: Vec::new(),
+            talking: false,
+        }));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let shown = Arc::clone(&state);
+        let ticker = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(period)
+            {
+                let mut state = shown.lock().unwrap_or_else(PoisonError::into_inner);
+                state.talking = true;
+                let line = state.status();
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
+        });
+        Some(Self {
+            state,
+            stop: Some(stop),
+            ticker: Some(ticker),
+        })
+    }
+
+    /// What it shows, which a build's events change.
+    fn state(&self) -> Arc<Mutex<LogState>> {
+        Arc::clone(&self.state)
+    }
+}
+
+impl Drop for LogProgress {
+    /// Stops its thread.
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.join();
+        }
+    }
+}
+
+impl LogState {
+    /// Takes in `event`, showing a target's end once it has shown a line.
+    fn show(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::Started { step, .. } => self.running.push(step.clone()),
+            EventKind::Finished { step } | EventKind::Failed { step, .. } => {
+                self.running.retain(|running| running != step);
+                if matches!(event.kind, EventKind::Finished { .. }) {
+                    self.steps.0 += 1;
+                }
+            }
+            EventKind::Cached { .. } => self.steps.1 += 1,
+            EventKind::TargetEnded { target, failed } => {
+                self.ended.0 += 1;
+                self.ended.1 += usize::from(*failed);
+                if self.talking {
+                    let how = if *failed { "FAILED" } else { "ended" };
+                    let line = format!("{} {how} {target}", self.stamp());
+                    let _ = writeln!(std::io::stderr(), "{line}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts the reproducibility check's pass, whose targets end again.
+    fn next_pass(&mut self) {
+        self.ended = (0, 0);
+        self.checking = true;
+    }
+
+    /// The time since the command's first build began, `[HH:MM:SS]`.
+    fn stamp(&self) -> String {
+        let secs = self.epoch.elapsed().as_secs();
+        format!(
+            "[{:02}:{:02}:{:02}]",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        )
+    }
+
+    /// The line of where the build is.
+    fn status(&self) -> String {
+        let (ended, failed) = self.ended;
+        let mut line = format!("{} {ended} of {} targets ended", self.stamp(), self.targets);
+        if failed > 0 {
+            let _ = write!(line, ", {failed} failed");
+        }
+        if self.checking {
+            line.push_str(" (checking reproducibility)");
+        }
+        let (ran, found) = self.steps;
+        let steps = if ran == 1 { "step" } else { "steps" };
+        let _ = write!(line, "; {ran} {steps} run, {found} found");
+        if !self.running.is_empty() {
+            let shown: Vec<&str> = self.running.iter().take(3).map(String::as_str).collect();
+            let _ = write!(
+                line,
+                "; running {}: {}",
+                self.running.len(),
+                shown.join(", ")
+            );
+            if self.running.len() > shown.len() {
+                let _ = write!(line, " and {} more", self.running.len() - shown.len());
+            }
+        }
+        if let Some(rss) = own_rss() {
+            let _ = write!(line, "; pekit uses {}", shown_size(rss));
+        }
+        line
+    }
+}
+
+/// `bytes` as a size is shown: in MiB below a GiB, else in GiB to a tenth.
+fn shown_size(bytes: u64) -> String {
+    #[expect(clippy::cast_precision_loss, reason = "a size shown to a tenth")]
+    let bytes = bytes as f64;
+    let gib = f64::from(1u32 << 30);
+    if bytes < gib {
+        format!("{:.0} MiB", bytes / f64::from(1u32 << 20))
+    } else {
+        format!("{:.1} GiB", bytes / gib)
+    }
+}
+
+/// The bytes of memory this process has resident, from `/proc/self/status`.
+fn own_rss() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
+}
 
 /// The cache directory (see [Commands](#commands)).
 fn cache_dir() -> PathBuf {

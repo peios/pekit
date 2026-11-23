@@ -408,3 +408,54 @@ fn what_a_killed_build_left_is_swept_once_no_other_process_has_the_store() {
     // The store is held shared again, as every process holds it.
     assert!(Store::open(store.root()).is_ok());
 }
+
+#[test]
+fn an_eviction_alone_waits_for_the_store_and_builds_wait_for_it() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = workspace();
+    let state = tempfile::tempdir().unwrap();
+    built(dir.path(), state.path(), None);
+    let root = state.path().join("store");
+    // A build has the store.
+    let holder = Store::open(&root).unwrap();
+    assert!(pekit::evict::in_use(&root).unwrap());
+    let waiting = Arc::new(AtomicBool::new(false));
+    let evicting = {
+        let (root, scratch, waiting) = (
+            root.clone(),
+            state.path().join("scratch"),
+            Arc::clone(&waiting),
+        );
+        std::thread::spawn(move || {
+            pekit::evict::evict_alone(&root, &scratch, 1, &mut || {
+                waiting.store(true, Ordering::SeqCst);
+            })
+            .unwrap()
+        })
+    };
+    while !waiting.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // A build that starts meanwhile waits for the eviction.
+    let opened = Arc::new(AtomicBool::new(false));
+    let opening = {
+        let (root, opened) = (root.clone(), Arc::clone(&opened));
+        std::thread::spawn(move || {
+            let store = Store::open(&root).unwrap();
+            opened.store(true, Ordering::SeqCst);
+            store
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!opened.load(Ordering::SeqCst));
+    // Once the first build lets the store go, the eviction runs, then the
+    // build that waited opens it.
+    drop(holder);
+    let evicted = evicting.join().unwrap().unwrap();
+    assert!(evicted.after < evicted.before);
+    drop(opening.join().unwrap());
+    assert!(opened.load(Ordering::SeqCst));
+    assert!(pekit::evict::ledgered(&root).is_some());
+    assert!(!pekit::evict::in_use(&root).unwrap());
+}

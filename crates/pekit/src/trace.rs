@@ -116,6 +116,11 @@ impl Trace {
                     "args": { "step": step },
                 }));
             }
+            EventKind::TargetEnded { target, failed } => self.events.push(json!({
+                "name": format!("{target} {}", if *failed { "failed" } else { "ended" }),
+                "cat": "target", "ph": "i", "s": "g", "ts": ts, "pid": PID,
+                "tid": EVALUATION_ROW,
+            })),
             EventKind::Evaluated { unit, step, began } => {
                 let began = micros(*began);
                 self.events.push(json!({

@@ -59,21 +59,31 @@ use crate::store::{Digest, Store, TreeEntry, Used};
 pub const DEFAULT_LIMIT: u64 = 100 << 30;
 
 /// The limit `PEKIT_CACHE_LIMIT`, `setting`, gives the store: its default
-/// if it is unset, none if it is `0`.
+/// if it is unset or empty, none if it is `0`.
 ///
 /// # Errors
 ///
 /// That it is no size: a number of bytes, with a unit or none.
 pub fn limit_of(setting: Option<&str>) -> Result<Option<u64>, String> {
-    let Some(text) = setting else {
+    limit_named(setting, "`PEKIT_CACHE_LIMIT`")
+}
+
+/// The limit `setting`, what `name` sets, gives the store: its default if
+/// it is unset or empty, none if it is `0`.
+///
+/// # Errors
+///
+/// That it is no size: a number of bytes, with a unit or none.
+pub fn limit_named(setting: Option<&str>, name: &str) -> Result<Option<u64>, String> {
+    let Some(text) = setting.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(Some(DEFAULT_LIMIT));
     };
     match size_of(text) {
         Some(0) => Ok(None),
         Some(size) => Ok(Some(size)),
         None => Err(format!(
-            "`PEKIT_CACHE_LIMIT` is `{text}`, which is no size: write a number of bytes, \
-             such as `50GiB`, `500MB` or `0` for no limit"
+            "{name} is `{text}`, which is no size: write a number of bytes, such as `50GiB`, \
+             `500MB` or `0` for no limit"
         )),
     }
 }
@@ -313,6 +323,77 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     evicted
+}
+
+/// Evicts the store at `root`, its scratch directory `scratch`, until it is
+/// below nine tenths of `limit`, if it is larger, as `pekit store evict`
+/// does: once no other process has it, waiting, `waiting` told once if it
+/// waits, while it holds the store's gate, so that a build that would open
+/// the store meanwhile waits for it rather than keeping it from it; then
+/// removing what killed builds left, as a build that ends alone does.
+///
+/// # Errors
+///
+/// That the store's locks cannot be taken, or the store cannot be read or
+/// written.
+pub fn evict_alone(
+    root: &Path,
+    scratch: &Path,
+    limit: u64,
+    waiting: &mut dyn FnMut(),
+) -> io::Result<Option<Evicted>> {
+    fs::create_dir_all(root)?;
+    let mut told = false;
+    let mut take = |file: &File| match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => {
+            if !told {
+                told = true;
+                waiting();
+            }
+            file.lock()
+        }
+        Err(TryLockError::Error(error)) => Err(error),
+    };
+    let gate = Store::lock_file(root, "gate")?;
+    take(&gate)?;
+    let held = Store::lock_file(root, "lock")?;
+    take(&held)?;
+    let store = Store::with_held(root, held)?;
+    // No process holds a claim, or is using what one left.
+    let _ = remove_tree(&root.join("claims"));
+    let _ = crate::sweep::sweep_held(&root.join("tmp"), scratch);
+    let evicted = evict_held(&store, limit);
+    drop(gate);
+    evicted
+}
+
+/// What the ledger of the store at `root` last said its blobs came to, and
+/// when it was measured, in seconds since the Unix epoch, if it has one:
+/// at most a build's writes since an eviction walked them too few, or too
+/// many by what killed builds wrote.
+#[must_use]
+pub fn ledgered(root: &Path) -> Option<(u64, u64)> {
+    let text = fs::read_to_string(root.join("size")).ok()?;
+    let (bytes, walked) = text.trim().split_once(' ')?;
+    Some((bytes.parse().ok()?, walked.parse().ok()?))
+}
+
+/// Whether another process has the store at `root` open.
+///
+/// # Errors
+///
+/// That its lock cannot be opened or tried.
+pub fn in_use(root: &Path) -> io::Result<bool> {
+    if !root.join("lock").exists() {
+        return Ok(false);
+    }
+    let lock = Store::lock_file(root, "lock")?;
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// The size of a store's blobs as its file `size` keeps it (see

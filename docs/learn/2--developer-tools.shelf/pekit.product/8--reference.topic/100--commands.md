@@ -30,6 +30,8 @@ These are the commands, in the order you're likely to meet them:
 | `pekit publish` | Packs packages and publishes them into a store. | [Packaging](~pekit/packaging) |
 | `pekit release` | Builds a package from `HEAD` strictly, publishes it, and tags it. | [Releasing](~pekit/releasing) |
 | `pekit clean` | Removes `pekit-out/`, and with `--cache` the store. | [Managing the Store](~pekit/managing-the-store) |
+| `pekit store stats` | Shows the store's size, its limit, and whether a build is using it. | [Managing the Store](~pekit/managing-the-store#see-and-evict-the-store) |
+| `pekit store evict` | Evicts the store to within its limit now. | [Managing the Store](~pekit/managing-the-store#see-and-evict-the-store) |
 
 ## Options the building commands share
 

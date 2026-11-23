@@ -23,6 +23,11 @@ limit of 20 GiB, set the variable in your shell's startup file:
 export PEKIT_CACHE_LIMIT=20GiB
 ```
 
+To set it for every build on the machine, whatever their environment, put
+`cache_limit = 20GiB` in `machine.conf` in pekit's configuration directory
+instead (see [Sharing the Machine](~pekit/sharing-the-machine)). The
+variable overrides the file.
+
 A limit is a number of bytes, with a unit or none: `KiB`, `MiB`, `GiB`,
 and `TiB` count in powers of 1024, and `KB`, `MB`, `GB`, and `TB` in powers
 of 1000. `0` means no limit.
@@ -33,6 +38,34 @@ cheapest to make again until the store is under nine tenths of the limit.
 eviction waits until no other pekit process is using the store, so a build
 that runs while another is running leaves it to a later build. If the store
 is over its limit then, pekit warns that nothing was evicted.
+
+## See and evict the store
+
+`pekit store stats` shows where the store is, how large it was when it was
+last measured, its limit, when it was last evicted, and whether another
+pekit process is using it:
+
+```text
+store: /home/me/.cache/pekit/store
+size: 402.3 GiB, by its ledger, last walked 3 hours ago
+limit: 400.0 GiB
+last evicted: 2 days ago
+in use: by another pekit
+```
+
+A build evicts only when it ends with no other pekit process using the
+store, so on a machine where builds overlap, the store can grow past its
+limit, and each build warns of it. `pekit store evict` evicts it now
+instead. It waits for the builds that are using the store to end, and a
+build that starts meanwhile waits for the eviction rather than holding
+it off:
+
+```sh
+pekit store evict
+```
+
+`--limit` evicts to another size than the store's limit, such as
+`--limit 300GiB` to make room ahead of a large build.
 
 ## Move the store
 
