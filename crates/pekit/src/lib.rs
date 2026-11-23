@@ -9,6 +9,7 @@
 pub mod budget;
 pub mod claims;
 pub mod cli;
+pub mod copies;
 pub mod engine;
 pub mod events;
 pub mod evict;

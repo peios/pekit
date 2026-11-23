@@ -33,7 +33,9 @@ you ran it from.
 
 These paths are symbolic links into each step's own directory. The file
 they lead to is a copy of the step's output, and it's yours: you can change
-it or delete it, and the next build puts it back.
+it or delete it, and the next build puts it back. A copy that nobody has
+changed since a build made it is left as it is, so a build with nothing to
+run doesn't write its results out again.
 
 ## Each step's own directory
 

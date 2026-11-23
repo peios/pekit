@@ -26,6 +26,7 @@ else `CACHE/budget`.
 | `pekit-out/.fetch/<sha256>/<name>` | An exposed fetched file. | Each build. |
 | `pekit-out/.unpack/<key>/` | An exposed unpacked archive. | Each build. |
 | `pekit-out/.git/<key>/<name>/` | An exposed git commit's files. | Each build. |
+| `pekit-out/.pekit-copies` | What each copy a build made holds, and its files' stamps as made, so a later build leaves an unchanged copy. | Each build that copies. |
 
 ## In the cache directory
 
