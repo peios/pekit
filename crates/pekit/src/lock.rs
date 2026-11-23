@@ -448,20 +448,13 @@ pub fn restore(root: &Path, (cache, store): (&Path, &Store)) -> Result<Vec<Strin
 /// Where the stamps of the files of the libraries of the workspace at
 /// `root` are kept, in `store`'s `seen/`, beside the workspace's own.
 fn library_stamps_path(store: &Store, root: &Path) -> PathBuf {
-    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
-    store
-        .root()
-        .join("seen")
-        .join(format!("{name}-libraries.json"))
+    crate::store::stamps_path(store.root(), root, "-libraries")
 }
 
 /// The stamps of the files of the libraries of the workspace at `root` as
 /// the last check of them kept them, or none.
 fn library_stamps(store: &Store, root: &Path) -> Seen {
-    fs::read(library_stamps_path(store, root))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    crate::store::read_stamps(store.root(), root, "-libraries")
 }
 
 /// Keeps `seen`, the stamps of the files of the libraries of the workspace

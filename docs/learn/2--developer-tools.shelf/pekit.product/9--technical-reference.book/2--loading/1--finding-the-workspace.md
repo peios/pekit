@@ -78,6 +78,11 @@ times. The next build reads such a file again. Stamps of files that are
 gone are dropped as the build ends. The file is written again only if its
 stamps changed.
 
+The workspace's path is noted beside its stamps, in `seen/<digest>.root`.
+A build that ends with no other pekit using the store removes the stamps of
+each workspace whose directory is gone. Stamps from a pekit that noted no
+path are removed once they are 30 days unchanged.
+
 ## Files that change as they are read
 
 A workspace file or directory that a step is given can be changing as

@@ -65,6 +65,11 @@ put back from its file. When every blob is found, the tree is marked
 complete, so walking the same tree again checks for none. These marks
 accumulate until an eviction removes them all.
 
+Before a walk, the tree is read ahead, one level at a time: each directory
+of the level is listed, then each entry of the level is stamped, on up to
+eight threads where there are enough entries. The walk then takes each
+listing and stamp as it was read ahead.
+
 A file that is a hard link to a blob this process linked, by its device and
 inode, is that blob, and isn't read. A file that is read is hashed before
 it is copied, and isn't copied if its blob is there. A directory known not

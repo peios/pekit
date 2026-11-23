@@ -51,6 +51,11 @@ use crate::remote::Remote;
 use crate::store::{Digest, FileEntry, Store};
 use crate::unpack::{unpack, unpack_key, unpacked_path};
 
+/// The stack of each worker thread: enough to walk a tree of thousands of
+/// levels, as a step's output can be, a level at a time, the default two
+/// megabytes not. Only what is used is ever given memory.
+const WORKER_STACK: usize = 32 * 1024 * 1024;
+
 /// What a thread of the pool does (see [The pool](#the-pool)).
 pub enum Work {
     /// Runs an effect under its effect context, a program of a step waiting
@@ -538,29 +543,36 @@ impl Pool {
         for worker in workers {
             let queue = Arc::clone(&queue);
             let report = report.clone();
-            thread::spawn(move || {
-                loop {
-                    let next = queue.lock().ok().and_then(|queue| queue.recv().ok());
-                    let Some((node, work, deadline)) = next else {
-                        return;
-                    };
-                    let began = Instant::now();
-                    let ((outcome, kept, done), queued) = perform(work, deadline);
-                    let ran = Ran {
-                        node,
-                        worker,
-                        began: began + queued,
-                        ended: Instant::now(),
-                        queued,
-                        outcome,
-                        kept,
-                        done,
-                    };
-                    if report.send(ran).is_err() {
-                        return;
+            let spawned = thread::Builder::new()
+                .stack_size(WORKER_STACK)
+                .spawn(move || {
+                    loop {
+                        let next = queue.lock().ok().and_then(|queue| queue.recv().ok());
+                        let Some((node, work, deadline)) = next else {
+                            return;
+                        };
+                        let began = Instant::now();
+                        let ((outcome, kept, done), queued) = perform(work, deadline);
+                        let ran = Ran {
+                            node,
+                            worker,
+                            began: began + queued,
+                            ended: Instant::now(),
+                            queued,
+                            outcome,
+                            kept,
+                            done,
+                        };
+                        if report.send(ran).is_err() {
+                            return;
+                        }
                     }
-                }
-            });
+                });
+            // As `thread::spawn` would: a pool short of a worker could wait
+            // for its jobs for ever.
+            if let Err(error) = spawned {
+                panic!("cannot start a worker thread: {error}");
+            }
         }
         jobs
     }

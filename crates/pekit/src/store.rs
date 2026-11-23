@@ -59,6 +59,18 @@
 //! not copied if its blob is there. A directory said to be fixed, such as a
 //! sealed composition, is walked once until it is said to have changed.
 //!
+//! # Reading ahead
+//!
+//! A walk spends most of its time asking the file system for each entry's
+//! stamp, one at a time, and a catalog's libraries are a hundred thousand
+//! files. So before a walk, its tree is read ahead ([`read_ahead`]): level
+//! by level, each directory of the level listed, then each entry of the
+//! level stamped, by several threads where there are enough of them. The
+//! walk then takes each directory's listing and each entry's metadata as
+//! read ahead, and reads only what was not. What changes between the two is
+//! what changes while a walk reads, which [Trees read while they
+//! change](#trees-read-while-they-change) covers.
+//!
 //! # Putting a tree at once
 //!
 //! A blob is flushed to the disk before it is renamed into place, so that a
@@ -176,10 +188,21 @@ impl Seen {
     /// Forgets each file that is no longer there: one a walk did not find
     /// since this was read is looked for.
     pub fn retain_present(&mut self) {
-        let (count, visited) = (self.files.len(), &self.visited);
-        self.files
-            .retain(|path, _| visited.contains(path) || path.exists());
-        self.edited |= self.files.len() != count;
+        let unvisited: Vec<&PathBuf> = self
+            .files
+            .keys()
+            .filter(|path| !self.visited.contains(*path))
+            .collect();
+        let gone: HashSet<PathBuf> = unvisited
+            .iter()
+            .zip(in_parallel(&unvisited, |path| path.exists()))
+            .filter(|(_, there)| !there)
+            .map(|(path, _)| (*path).clone())
+            .collect();
+        if !gone.is_empty() {
+            self.files.retain(|path, _| !gone.contains(path));
+            self.edited = true;
+        }
     }
 
     /// Forgets each file no walk found since this was read: of trees each
@@ -228,6 +251,89 @@ fn listing(path: &Path) -> io::Result<Vec<(std::ffi::OsString, fs::FileType, Pat
         .collect()
 }
 
+/// The most threads a walk reads ahead on, or looks for changes on.
+const MOST_THREADS: usize = 8;
+
+/// The fewest stamps a thread is given to take, so that it is worth its
+/// start.
+const PER_THREAD: usize = 256;
+
+/// `each` of every one of `items`, in their order, on as many threads as
+/// there are [`PER_THREAD`] of them, to [`MOST_THREADS`] and the machine's
+/// processors (see [Reading ahead](#reading-ahead)).
+fn in_parallel<T: Sync, U: Send>(items: &[T], each: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    let processors = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = (items.len() / PER_THREAD).clamp(1, MOST_THREADS.min(processors));
+    if threads == 1 {
+        return items.iter().map(each).collect();
+    }
+    let each = &each;
+    std::thread::scope(|scope| {
+        let parts: Vec<_> = items
+            .chunks(items.len().div_ceil(threads))
+            .map(|part| scope.spawn(move || part.iter().map(each).collect::<Vec<U>>()))
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| {
+                part.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// An entry of a directory as a walk reads it: its name, its path, and
+/// its metadata, if it was read ahead ([`read_ahead`]).
+type Listed = (
+    std::ffi::OsString,
+    PathBuf,
+    Option<io::Result<fs::Metadata>>,
+);
+
+/// The tree at `root` read ahead of a walk (see [Reading
+/// ahead](#reading-ahead)): each directory's entries with their metadata,
+/// by its path, but those under a directory `skip` says to leave, or that
+/// could not be listed, which the walk lists itself.
+fn read_ahead(root: &Path, skip: &(dyn Fn(&Path) -> bool + Sync)) -> HashMap<PathBuf, Vec<Listed>> {
+    let mut ahead = HashMap::new();
+    let mut level = vec![root.to_path_buf()];
+    while !level.is_empty() {
+        let listed: Vec<(PathBuf, Vec<(std::ffi::OsString, PathBuf)>)> =
+            in_parallel(&level, |dir| {
+                let names = fs::read_dir(dir).and_then(|entries| {
+                    entries
+                        .map(|entry| entry.map(|entry| (entry.file_name(), entry.path())))
+                        .collect::<io::Result<Vec<_>>>()
+                });
+                Some((dir.clone(), names.ok()?))
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+        let paths: Vec<&PathBuf> = listed
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(|(_, at)| at))
+            .collect();
+        let mut metas = in_parallel(&paths, |at| fs::symlink_metadata(at)).into_iter();
+        level = Vec::new();
+        for (dir, names) in listed {
+            let entries: Vec<Listed> = names
+                .into_iter()
+                .zip(metas.by_ref())
+                .map(|((name, at), meta)| {
+                    if meta.as_ref().is_ok_and(fs::Metadata::is_dir) && !skip(&at) {
+                        level.push(at.clone());
+                    }
+                    (name, at, Some(meta))
+                })
+                .collect();
+            ahead.insert(dir, entries);
+        }
+    }
+    ahead
+}
+
 /// Now, as the clock of the file system `path` is on tells it, as coarsely
 /// as that file system keeps times: the change time of a file made beside
 /// it, and removed.
@@ -262,6 +368,9 @@ struct Walk<'a> {
     /// Each tree taken as put before, unwalked: a fixed directory's, or a
     /// mounted one's.
     unwalked: Vec<Digest>,
+    /// What of the tree was read ahead of the walk, which it takes (see
+    /// [Reading ahead](#reading-ahead)).
+    ahead: HashMap<PathBuf, Vec<Listed>>,
 }
 
 impl Walk<'_> {
@@ -280,13 +389,27 @@ impl Walk<'_> {
             watch,
             trusted: Vec::new(),
             unwalked: Vec::new(),
+            ahead: HashMap::new(),
         }
+    }
+
+    /// Reads the tree at `root` ahead of the walk, but what it leaves out
+    /// and the directories it knows.
+    fn read_ahead(&mut self, root: &Path) {
+        let (left_out, seen) = (self.left_out, &*self.seen);
+        let skip = |at: &Path| {
+            left_out.iter().any(|out| out == at)
+                || seen.mounted.contains_key(at)
+                || seen.dirs.contains_key(at)
+        };
+        self.ahead = read_ahead(root, &skip);
     }
 
     /// Forgets what the walk found, to walk again.
     fn restart(&mut self) {
         self.trusted.clear();
         self.unwalked.clear();
+        self.ahead.clear();
         self.seen.dirs.clear();
         if let Some(watch) = &mut self.watch {
             *watch = Watch::default();
@@ -343,12 +466,13 @@ impl Watch {
         if let Some((path, _)) = listed {
             return Some(path.clone());
         }
+        let differ = in_parallel(&self.stamps, |(path, stamp)| {
+            fs::symlink_metadata(path).map(|meta| Stamp::of(&meta)).ok() != Some(*stamp)
+        });
         self.stamps
             .iter()
-            .find(|(path, stamp)| {
-                fs::symlink_metadata(path).map(|meta| Stamp::of(&meta)).ok() != Some(*stamp)
-            })
-            .map(|(path, _)| path.clone())
+            .zip(differ)
+            .find_map(|((path, _), differs)| differs.then(|| path.clone()))
     }
 }
 
@@ -640,6 +764,35 @@ fn in_order<S: serde::Serializer>(
 ) -> Result<S::Ok, S::Error> {
     let ordered: std::collections::BTreeMap<&PathBuf, &(Stamp, FileEntry)> = files.iter().collect();
     serde::Serialize::serialize(&ordered, serializer)
+}
+
+/// Where the store at `store` keeps stamps of the workspace at `root`, in
+/// `seen/`, by a digest of its path: its own files' if `suffix` is empty,
+/// and its libraries' if it is `-libraries`.
+#[must_use]
+pub fn stamps_path(store: &Path, root: &Path, suffix: &str) -> PathBuf {
+    let name = Digest::of(root.as_os_str().as_encoded_bytes()).hex();
+    store.join("seen").join(format!("{name}{suffix}.json"))
+}
+
+/// The stamps the store at `store` keeps of the workspace at `root`, as
+/// [`stamps_path`] names them, or none. The workspace's path is noted
+/// beside them, in `seen/<digest>.root`, if it is not, so that the stamps
+/// of a workspace gone are found ([`crate::sweep::sweep_seen`]).
+#[must_use]
+pub fn read_stamps(store: &Path, root: &Path, suffix: &str) -> Seen {
+    let path = stamps_path(store, root, suffix);
+    let noted = stamps_path(store, root, "").with_extension("root");
+    if !noted.exists() {
+        let temp = noted.with_extension(format!("tmp-{}", crate::sweep::token()));
+        let _ = fs::create_dir_all(store.join("seen"))
+            .and_then(|()| fs::write(&temp, root.as_os_str().as_encoded_bytes()))
+            .and_then(|()| fs::rename(&temp, &noted));
+    }
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Keeps `seen`, stamps of files, at `path`, if any was added, changed or
@@ -1543,6 +1696,7 @@ impl Store {
         // once that one ends: too soon to mark the tree complete.
         let settles = AT_ONCE.with(|at_once| at_once.borrow().is_none());
         loop {
+            walk.read_ahead(path);
             let walked = self.at_once(|| {
                 let Some(tree) = self.tree_seen(path, walk)? else {
                     return Ok(None);
@@ -1593,24 +1747,33 @@ impl Store {
     /// [`Store::put_tree_seen`] of `path`, as `walk` has it.
     fn tree_seen(&self, path: &Path, walk: &mut Walk<'_>) -> io::Result<Option<Digest>> {
         let mut entries = Vec::new();
-        let listed = listing(path)?;
+        let listed: Vec<Listed> = match walk.ahead.remove(path) {
+            Some(listed) => listed,
+            None => listing(path)?
+                .into_iter()
+                .map(|(name, _, at)| (name, at, None))
+                .collect(),
+        };
         if let Some(watch) = &mut walk.watch {
             let mut names: Vec<_> = listed
                 .iter()
-                .filter(|(_, _, at)| !walk.left_out.contains(at))
+                .filter(|(_, at, _)| !walk.left_out.contains(at))
                 .map(|(name, _, _)| name.clone())
                 .collect();
             names.sort();
             watch.listings.push((path.to_path_buf(), names));
         }
-        for (name, _, at) in listed {
+        for (name, at, ahead) in listed {
             let name = name.into_string().map_err(|name| {
                 io::Error::other(format!("`{}` is no UTF-8 name", name.display()))
             })?;
             if walk.left_out.contains(&at) {
                 continue;
             }
-            let meta = fs::symlink_metadata(&at)?;
+            let meta = match ahead {
+                Some(meta) => meta?,
+                None => fs::symlink_metadata(&at)?,
+            };
             let kind = meta.file_type();
             if let Some(watch) = &mut walk.watch
                 && !kind.is_dir()
