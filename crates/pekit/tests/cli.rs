@@ -323,6 +323,32 @@ fn the_store_command_shows_the_store_and_evicts_it_now() {
 }
 
 #[test]
+fn a_copy_out_a_build_made_is_left_unless_it_changed() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = workspace();
+    let cache = tempfile::tempdir().unwrap();
+    let build = || {
+        let built = pekit(dir.path(), cache.path(), &["build", "app/hello"]);
+        assert!(built.status.success(), "{:?}", printed(&built));
+    };
+    build();
+    let copy = fs::canonicalize(dir.path().join("pekit-out/app/hello/shout/out.txt")).unwrap();
+    let node = || fs::metadata(&copy).unwrap().ino();
+    let first = node();
+    // Found in the store, the same contents: the copy is left as it is.
+    build();
+    assert_eq!(node(), first);
+    // Changed, it is copied again, as the build made it.
+    fs::write(&copy, "changed\n").unwrap();
+    build();
+    assert_eq!(fs::read_to_string(&copy).unwrap(), "WORLD\n");
+    // And removed, it is copied again.
+    fs::remove_file(&copy).unwrap();
+    build();
+    assert_eq!(fs::read_to_string(&copy).unwrap(), "WORLD\n");
+}
+
+#[test]
 fn a_step_whose_result_is_no_data_fails_its_target_alone() {
     let dir = tempfile::tempdir().unwrap();
     write(

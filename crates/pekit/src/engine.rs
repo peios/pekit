@@ -35,8 +35,9 @@
 //! recorded, unless its result holds a secret, and its outputs are kept by
 //! their logical paths, so that the steps after it are staged with them. Once
 //! the target's value has no holes, the files under `/pekit-out` it names are
-//! copied out to the output directory, each a copy of its own, and linked
-//! under the target's name.
+//! copied out to the output directory, each a copy of its own, unless an
+//! earlier build's copy of the same contents is there unchanged (see
+//! [Copies](crate::copies#copies)), and linked under the target's name.
 //!
 //! Several targets are one build ([`build_all_observed`]): each is a unit of
 //! its own, against the one graph, so that a step two of them reach runs
@@ -76,6 +77,7 @@ use gcsl::{Diagnostic, Span, Value};
 
 use crate::budget::Budget;
 use crate::claims::{Claimed, try_claim};
+use crate::copies::Copies;
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, evict};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
@@ -730,8 +732,10 @@ fn build_roots(
             "cannot remove a step's staging directory: {error}"
         ))
     })?;
-    // A stamp cache that can't be kept is a workspace read again next time.
+    // A stamp cache that can't be kept is a workspace read again next time,
+    // and copies that can't be are copied again.
     let _ = keep_workspace_stamps(&run.store, &run.loaded.root, &run.workspace_seen.0);
+    let _ = run.copies.keep(&settings.outputs);
     // What a killed build left that can't be removed is left for the next.
     let _ = crate::sweep::sweep_stale(&run.store, &settings.scratch);
     let evicted = settings.cache_limit.map(|limit| {
@@ -860,6 +864,7 @@ fn new_run<'a>(
         uploads: 0,
         admitted: 0,
         told_ended: Vec::new(),
+        copies: Copies::read(&settings.outputs),
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -1491,6 +1496,9 @@ struct Run<'a> {
     admitted: usize,
     /// Whether each root's end has been told, by its number among them.
     told_ended: Vec<bool>,
+    /// What each copy out to the output directory was as made (see
+    /// [Copies](crate::copies#copies)).
+    copies: Copies,
 }
 
 /// The step that holds a name (see [`Run::claim_name`]).
@@ -4125,15 +4133,22 @@ impl Run<'_> {
             }
             self.exposures.forget_within(path);
             // What no step made, the target's own effects wrote there.
-            let Some(kept) = self.outputs.get(path) else {
+            let Some(&kept) = self.outputs.get(path) else {
                 continue;
             };
+            // A copy of the same contents, made by an earlier build and
+            // unchanged since, is left as it is.
+            if self.copies.unchanged(path, kept, &at) {
+                continue;
+            }
+            self.copies.forget(path);
             let _ = remove_tree(&at);
             let copied = match kept {
-                Kept::File(entry) => self.store.copy_file(entry, &at),
-                Kept::Dir(tree) => self.store.copy_tree(tree, &at),
+                Kept::File(entry) => self.store.copy_file(&entry, &at),
+                Kept::Dir(tree) => self.store.copy_tree(&tree, &at),
             };
             copied.map_err(|error| engine(&format!("cannot write `{}`: {error}", at.display())))?;
+            self.copies.made(path, kept, &at);
         }
         let Some(root) = self.roots.get(index) else {
             return Ok(());
