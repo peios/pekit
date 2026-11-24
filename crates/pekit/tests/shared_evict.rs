@@ -88,10 +88,11 @@ fn a_store_another_publishing_process_has_is_evicted_but_what_it_uses() {
     let store = Store::open(&root).unwrap();
     let theirs = blob(&root, &vec![b't'; 1 << 16]);
     let nobody = blob(&root, &vec![b'n'; 1 << 16]);
-    // An evictor that died left what it moved aside.
+    // An evictor that died left aside a blob the holder uses.
     let left = root.join("tmp/evicting-dead");
     fs::create_dir_all(&left).unwrap();
-    fs::write(left.join("x"), "x").unwrap();
+    let hex = theirs.hex();
+    fs::rename(root.join("cas").join(&hex[..2]).join(&hex), left.join(&hex)).unwrap();
     let Some((mut child, _)) = holder(&root, true, &[theirs]) else {
         skip("no holder could be started");
         return;
@@ -102,9 +103,43 @@ fn a_store_another_publishing_process_has_is_evicted_but_what_it_uses() {
     let _ = child.wait();
     let evicted = evicted.unwrap().expect("nothing evicted");
     assert!(evicted.after < evicted.before, "{evicted:?}");
+    // It is put back, and kept.
     assert!(holds(&root, &theirs));
     assert!(!holds(&root, &nobody));
     assert!(!left.exists());
+}
+
+#[test]
+fn a_store_this_process_cannot_publish_for_is_left() {
+    if Command::new("flock").arg("--version").output().is_err() {
+        skip("no `flock`");
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("store");
+    let store = Store::open(&root).unwrap();
+    let nobody = blob(&root, &vec![b'n'; 1 << 16]);
+    let Some((mut child, _)) = holder(&root, true, &[]) else {
+        skip("no holder could be started");
+        return;
+    };
+    // This process's own file could not be written, the disk full say.
+    pekit::using::publisher(&root).unwrap().break_for_test();
+    // Measured just now, over its limit, so that it says why it is left.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(root.join("size"), format!("{} {now}\n", 1u64 << 30)).unwrap();
+    let evicted = pekit::evict::evict(&store, &store.used(), 1);
+    let _ = child.kill();
+    let _ = child.wait();
+    let skipped = evicted.unwrap_err();
+    assert!(
+        skipped.to_string().contains("does not say what it uses"),
+        "{skipped}"
+    );
+    assert!(holds(&root, &nobody));
 }
 
 #[test]

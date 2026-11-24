@@ -371,16 +371,18 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
             store.held().lock_shared()?;
             // Evicted beside the other processes, if each publishes what it
             // uses (see [Shared eviction](#shared-eviction)).
-            match evict_shared(store, Aim::Limit(limit), &Keep::default())? {
+            let why = match evict_shared(store, Aim::Limit(limit), &Keep::default())? {
                 Shared::Made(evicted) => return Ok(Some(evicted)),
                 Shared::Nothing => return Ok(None),
-                Shared::Busy | Shared::Unpublished => {}
-            }
+                Shared::Busy => "another pekit is evicting it, or waits to",
+                Shared::Unpublished => {
+                    "a pekit that has it open does not say what it uses, as an older one \
+                     does not, so nothing may be evicted beside it"
+                }
+            };
             return match Ledger::read(store.root()) {
                 Some(blobs) if blobs > limit => Err(io::Error::other(format!(
-                    "it holds {}, over its limit of {}, and nothing was evicted, since \
-                     another pekit has it open: a build evicts as it ends only if no other \
-                     has the store",
+                    "it holds {}, over its limit of {}, and nothing was evicted: {why}",
                     gib(blobs),
                     gib(limit)
                 ))),
@@ -467,6 +469,7 @@ pub fn alone<T>(
     let store = Store::with_held(root, held)?;
     // No process holds a claim, or is using what one left.
     let _ = remove_tree(&root.join("claims"));
+    restore_aside(root, &root.join("tmp"));
     let _ = crate::sweep::sweep_held(&root.join("tmp"), scratch);
     let done = work(&store);
     drop(gate);
@@ -701,6 +704,35 @@ pub fn between_in_next_shared(between: impl FnOnce() + 'static) {
     BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(between)));
 }
 
+/// Puts back into the store at `root` what an evictor that died left aside
+/// in `tmp`, each blob unless one of its name is there again, and removes
+/// what it left (see [Shared eviction](#shared-eviction)).
+pub(crate) fn restore_aside(root: &Path, tmp: &Path) {
+    let Ok(entries) = fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("evicting-") {
+            continue;
+        }
+        for blob in fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+            let name = blob.file_name().to_string_lossy().into_owned();
+            if name.get(..64).and_then(Digest::from_hex).is_none() {
+                continue;
+            }
+            let target = root.join("cas").join(&name[..2]).join(&name);
+            let _ = rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                blob.path(),
+                rustix::fs::CWD,
+                &target,
+                rustix::fs::RenameFlags::NOREPLACE,
+            );
+        }
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
 /// What [`evict_shared`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shared {
@@ -731,20 +763,23 @@ fn evict_shared(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Shared> {
         Err(TryLockError::WouldBlock) => return Ok(Shared::Busy),
         Err(TryLockError::Error(error)) => return Err(error),
     }
+    // The gate every process passes to open the store, held until the end:
+    // none can open it meanwhile and rely on what it does not publish. A
+    // `pekit store evict` waiting for the store alone holds it, and evicts.
+    let gate = Store::lock_file(root, "gate")?;
+    match gate.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(Shared::Busy),
+        Err(TryLockError::Error(error)) => return Err(error),
+    }
     let live = crate::using::live(root)?;
     if !crate::using::all_publish(root, &live) {
         return Ok(Shared::Unpublished);
     }
-    // What an evictor that died left aside: none live but this one, which
-    // holds the lock, so none is being put back.
+    // What an evictor that died left aside is put back, as it would have
+    // been: none live but this one, which holds the lock.
     let tmp = root.join("tmp");
-    if let Ok(entries) = fs::read_dir(&tmp) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("evicting-") {
-                let _ = fs::remove_dir_all(entry.path());
-            }
-        }
-    }
+    restore_aside(root, &tmp);
     let mut kept = keep.clone();
     for used in live {
         kept.blobs.extend(used.blobs);

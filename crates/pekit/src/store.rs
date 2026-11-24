@@ -1235,11 +1235,13 @@ impl Store {
     /// Notes that this process uses the blob `digest`, which an eviction
     /// during its build then keeps.
     fn touch(&self, digest: &Digest) {
-        if let Some(publisher) = &self.publisher {
-            publisher.publish(crate::using::Kind::Blob, digest);
-        }
-        if let Ok(mut touched) = self.touched.lock() {
-            touched.insert(*digest);
+        match &self.publisher {
+            Some(publisher) => publisher.publish(crate::using::Kind::Blob, digest),
+            None => {
+                if let Ok(mut touched) = self.touched.lock() {
+                    touched.insert(*digest);
+                }
+            }
         }
     }
 

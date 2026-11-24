@@ -91,6 +91,9 @@ pub fn sweep_stale(store: &Store, scratch: &Path) -> io::Result<bool> {
             return Err(error);
         }
     }
+    // What an evictor that died left aside is put back before `tmp/` is
+    // swept (see [Shared eviction](crate::evict#shared-eviction)).
+    crate::evict::restore_aside(store.root(), &store.root().join("tmp"));
     let swept = sweep_held(&store.root().join("tmp"), scratch)
         .and_then(|()| sweep_seen(&store.root().join("seen")));
     // Held shared again, as every process that has the store holds it.

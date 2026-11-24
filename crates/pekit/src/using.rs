@@ -69,29 +69,61 @@ const ENTRY: usize = 33;
 pub struct Publisher {
     /// The file, appended to, and locked exclusively for the process's life.
     file: Mutex<File>,
-    /// What it has published, so that each is published once.
+    /// Where it is.
+    path: PathBuf,
+    /// What it has published, so that each is published once; and, once a
+    /// write failed, what it uses, unpublished.
     published: Mutex<HashSet<(Kind, Digest)>>,
+    /// Whether a write failed: then the file is gone, nothing more is
+    /// written, and an eviction beside this process tells it publishes
+    /// nothing.
+    broken: std::sync::atomic::AtomicBool,
 }
 
 impl Publisher {
     /// Publishes that this process uses `digest`, of the kind `kind`, if it
-    /// has not: before it relies on it.
+    /// has not: before it relies on it. Should the write fail, the disk
+    /// full say, the file is removed and nothing more is published, so that
+    /// no eviction beside this process trusts what it did not get to write.
     pub fn publish(&self, kind: Kind, digest: &Digest) {
+        use std::sync::atomic::Ordering;
         let new = self
             .published
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert((kind, *digest));
-        if new {
-            let mut entry = [0u8; ENTRY];
-            entry[0] = kind.byte();
-            entry[1..].copy_from_slice(digest.bytes());
-            let _ = self
-                .file
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .write_all(&entry);
+        if !new || self.broken.load(Ordering::Acquire) {
+            return;
         }
+        let mut entry = [0u8; ENTRY];
+        entry[0] = kind.byte();
+        entry[1..].copy_from_slice(digest.bytes());
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if file.write_all(&entry).is_err() {
+            self.broken.store(true, Ordering::Release);
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    /// Each blob this process uses, as it published them.
+    #[must_use]
+    pub fn blobs(&self) -> HashSet<Digest> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(kind, _)| *kind == Kind::Blob)
+            .map(|(_, digest)| *digest)
+            .collect()
+    }
+
+    /// Stops publishing, as a failed write does: for a test of what an
+    /// eviction beside such a process does.
+    #[doc(hidden)]
+    pub fn break_for_test(&self) {
+        self.broken
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -100,7 +132,8 @@ static PUBLISHERS: OnceLock<Mutex<HashMap<PathBuf, Arc<Publisher>>>> = OnceLock:
 
 /// This process's publisher of what it uses of the store at `root`, made
 /// once: none if its file cannot be made, which an eviction while this
-/// process holds the store then tells by it.
+/// process holds the store then tells by it. The file is locked before it
+/// is put where others look, so that none takes it for a dead process's.
 #[must_use]
 pub fn publisher(root: &Path) -> Option<Arc<Publisher>> {
     let mut publishers = PUBLISHERS
@@ -113,15 +146,16 @@ pub fn publisher(root: &Path) -> Option<Arc<Publisher>> {
     let dir = root.join("using");
     fs::create_dir_all(&dir).ok()?;
     let name = format!("{}-{}", std::process::id(), crate::sweep::token());
-    let file = File::options()
-        .create(true)
-        .append(true)
-        .open(dir.join(name))
-        .ok()?;
+    let made = dir.join(format!(".{name}"));
+    let file = File::options().create(true).append(true).open(&made).ok()?;
     file.try_lock().ok()?;
+    let path = dir.join(name);
+    fs::rename(&made, &path).ok()?;
     let publisher = Arc::new(Publisher {
         file: Mutex::new(file),
+        path,
         published: Mutex::default(),
+        broken: std::sync::atomic::AtomicBool::new(false),
     });
     publishers.insert(root.to_path_buf(), Arc::clone(&publisher));
     Some(publisher)
@@ -157,6 +191,10 @@ pub fn live(root: &Path) -> io::Result<Vec<Used>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
+        // One being made, not yet locked.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let Ok(mut file) = File::open(&path) else {
             continue;
         };
@@ -235,6 +273,11 @@ pub fn all_publish(root: &Path, live: &[Used]) -> bool {
     let Some(holders) = holders(&root.join("lock")) else {
         return false;
     };
+    // This process holds it too: if the kernel's list does not say so, it
+    // is not read right, and says nothing of the others.
+    if !holders.contains(&std::process::id()) {
+        return false;
+    }
     let publishing: HashSet<u32> = live.iter().map(|used| used.pid).collect();
     holders
         .iter()

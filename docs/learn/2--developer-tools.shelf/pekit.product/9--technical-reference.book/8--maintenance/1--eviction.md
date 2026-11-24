@@ -113,8 +113,9 @@ its error ends with a note:
 = note: not enough space: the file system of the store and the scratch directory has FREE free, and the build could make no more room
 ```
 
-As with eviction at the end, room is made only if no other process has the
-store open. Otherwise the build warns that nothing was evicted, and goes on.
+As with eviction at the end, room is made beside other processes only as
+[Eviction beside other builds](#eviction-beside-other-builds) describes.
+Otherwise the build warns that nothing was evicted, and why, and goes on.
 It warns too if it could go on only by starting a step it holds, and it
 then starts that step.
 
@@ -145,9 +146,12 @@ once: each record before it reads it, each blob before it looks for it or
 links it, and each tree it takes as complete. The kernel's `/proc/locks` says
 which processes hold the store. One that publishes nothing, an older pekit
 say, keeps the build from evicting beside it, and the build warns as it
-always did.
+always did. So does a process that could not write its file, the disk full
+say: it removes the file, and publishes no more.
 
-One such eviction runs at a time, holding the `evicting` lock:
+One such eviction runs at a time, holding the `evicting` lock. It also holds
+the store's `gate` for its whole length, so that no process opens the store
+meanwhile; if either is held, the eviction does not run:
 
 1. It evicts as an eviction alone does, keeping everything any live
    process has published, but it moves each blob it evicts into
@@ -166,4 +170,10 @@ step might have mounted, and the outputs of what it evicted, for an
 eviction with the store to itself. `pekit store stats` shows how many
 materialized trees there are. A file in `using/` whose lock no process
 holds is a dead process's, and is removed. What a dead evictor moved aside
-is deleted by the next.
+is moved back by the next eviction or sweep, unless a blob of the same name
+is there again, and the rest is deleted.
+
+An eviction as a build ends keeps everything that build used, not only what
+other processes use: it still holds the store as it evicts. A store that only
+such evictions trim keeps each running build's working set, and is trimmed
+further by `pekit store evict` or by an eviction with the store to itself.

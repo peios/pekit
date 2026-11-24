@@ -90,11 +90,11 @@ fn a_store_over_its_limit_evicts_what_is_cheapest_to_make_again() {
 }
 
 #[test]
-fn a_store_another_process_has_is_not_evicted() {
+fn a_build_beside_another_holder_that_publishes_keeps_what_it_used() {
     let dir = workspace();
     let state = tempfile::tempdir().unwrap();
     built(dir.path(), state.path(), None);
-    // Another holds the store: nothing is evicted.
+    // Another holds the store, and publishes: what the build used is kept.
     let other = Store::open(&state.path().join("store")).unwrap();
     assert_eq!(built(dir.path(), state.path(), Some(1)), (0, 2));
     drop(other);
@@ -138,6 +138,10 @@ fn a_store_over_its_limit_that_another_process_has_says_so() {
         skipped
             .to_string()
             .starts_with("it holds 3.0 GiB, over its limit of 2.0 GiB, and nothing was evicted"),
+        "{skipped}"
+    );
+    assert!(
+        skipped.to_string().contains("does not say what it uses"),
         "{skipped}"
     );
     // Within its limit, it is no failure.
