@@ -4476,7 +4476,11 @@ impl Run<'_> {
                     self.limit.past = 0;
                 }
             }
-            Ok(Shared::Nothing) => self.limit.again = None,
+            // Within the limit by a walk: weighed against it again.
+            Ok(Shared::Nothing) => {
+                self.limit.again = None;
+                self.limit.past = 0;
+            }
             Ok(Shared::Busy) => again(&mut self.limit),
             Ok(Shared::Unpublished) => {
                 again(&mut self.limit);
