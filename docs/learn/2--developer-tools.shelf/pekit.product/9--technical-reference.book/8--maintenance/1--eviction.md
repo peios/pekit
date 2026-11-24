@@ -89,3 +89,93 @@ If another process has the store open and the ledger says the store is over
 its limit, the build says so in the same warning, with the store's size and
 its limit, rather than evicting nothing silently. A command shows each
 warning once, however many builds it runs.
+
+## Room during a build
+
+With `keep_free` set, a build evicts during the run as well
+(`evict::make_room`), when less than that much is free on the file system
+of the store or the scratch directory. It starts no new step until none of
+its own steps, effects, or jobs is running. It then evicts until the floor,
+and a tenth more, is free. Whatever it costs, it keeps:
+
+- every blob the build has used: put, looked up, or taken by its stamp;
+- every record it found or wrote;
+- every scratch directory it held.
+
+A step that fails for want of room is held, unstaged, and run once more after
+room is made for it: at least the floor, and at least 10 GiB. A step counts as
+failing for want of room if its error says "No space left on device", "Disk
+quota exceeded", or tar's "Wrote only", or if less than the floor, or 1 GiB,
+is free once it has failed. If it fails so again, or no room could be made,
+its error ends with a note:
+
+```text
+= note: not enough space: the file system of the store and the scratch directory has FREE free, and the build could make no more room
+```
+
+As with eviction at the end, room is made beside other processes only as
+[Eviction beside other builds](#eviction-beside-other-builds) describes.
+Otherwise the build warns that nothing was evicted, and why, and goes on.
+It warns too if it could go on only by starting a step it holds, and it
+then starts that step.
+
+## Outputs of evicted steps
+
+A build exposes outputs under its output directory as hard links to the
+store's blobs (see [Exposure](~pekit/where-results-go)). An eviction removes
+a blob's name in the store, but an exposure's link keeps its contents on the
+disk, though the store's size leaves them out. No build can use them,
+because a build exposes what it needs again from the store.
+
+Each build notes its workspace's output directory beside its stamps, in
+`seen/<digest>.outputs`. An eviction that evicted something with the store to
+itself, and every `pekit store evict`, then removes each exposure under
+`.steps/`, `.unpack/`, `.git/`, or `.fetch/` of a noted output directory that
+holds a file of the store's file system that no name in `cas/` links. It
+never touches the files a target gives, nor anything on another file system,
+which is a copy rather than a link. What it found is kept in `orphaned`, which
+`pekit store stats` shows.
+
+## Eviction beside other builds
+
+While other processes have the store open, a build evicts beside them, if
+every process that holds the store publishes what it uses. Each process
+keeps a file of its own in `using/`, `<pid>-<token>`, locked for as long as
+it lives. Before it relies on anything of the store, it appends it there,
+once: each record before it reads it, each blob before it looks for it or
+links it, and each tree it takes as complete. The kernel's `/proc/locks` says
+which processes hold the store. One that publishes nothing, an older pekit
+say, keeps the build from evicting beside it, and the build warns as it
+always did. So does a process that could not write its file, the disk full
+say: it removes the file, and publishes no more.
+
+One such eviction runs at a time, holding the `evicting` lock. It also holds
+the store's `gate` for its whole length, so that no process opens the store
+meanwhile; if either is held, the eviction does not run:
+
+1. It evicts as an eviction alone does, keeping everything any live
+   process has published, but it moves each blob it evicts into
+   `tmp/evicting-<token>/` rather than deleting it.
+2. It reads what each live process has published again, and moves back
+   each blob published meanwhile, directly or through a record or a tree.
+   If a process has meanwhile put a blob of the same name, of the same
+   contents, the one moved aside is dropped instead.
+3. It deletes what is still aside.
+
+A process that published a blob before step 2 has it moved back. One that
+published it after finds it gone, and puts or builds it again. So no
+process relies on what is deleted. Such an eviction removes every mark that
+a tree is complete, but it leaves the materialized trees, which a running
+step might have mounted, and the outputs of what it evicted, for an
+eviction with the store to itself. `pekit store stats` shows how many
+materialized trees there are. A process removes its file in `using/` as
+it exits. A file there whose lock no process holds is a dead process's, and
+the next such eviction, or sweep with the store to itself, removes it.
+What a dead evictor moved aside is moved back by the next eviction or
+sweep, unless a blob of the same name is there again, and the rest is
+deleted.
+
+An eviction as a build ends keeps everything that build used, not only what
+other processes use: it still holds the store as it evicts. A store that only
+such evictions trim keeps each running build's working set, and is trimmed
+further by `pekit store evict` or by an eviction with the store to itself.

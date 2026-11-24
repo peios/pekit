@@ -297,8 +297,12 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         }
-        // Gone from where any build looks, whether or not it is removed now.
+        // Gone from where any build looks, whether or not it is removed now,
+        // and so from what this process knows it made or found.
         let _ = fs::remove_dir_all(&aside);
+        let mut known = self.materialised_known();
+        known.instances.clear();
+        known.origins.clear();
         Ok(())
     }
 }

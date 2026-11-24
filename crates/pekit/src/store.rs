@@ -357,6 +357,17 @@ fn read_ahead(root: &Path, skip: &(dyn Fn(&Path) -> bool + Sync)) -> HashMap<Pat
     ahead
 }
 
+/// The bytes free to write on the file system `path` is on, as one who is
+/// not its administrator may.
+///
+/// # Errors
+///
+/// That the file system cannot be asked.
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    let stat = rustix::fs::statvfs(path)?;
+    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
 /// Now, as the clock of the file system `path` is on tells it, as coarsely
 /// as that file system keeps times: the change time of a file made beside
 /// it, and removed.
@@ -529,6 +540,12 @@ impl Digest {
     #[must_use]
     pub fn from_hasher(hasher: Sha256) -> Self {
         Self(hasher.finalize().into())
+    }
+
+    /// The digest of the bytes `bytes`, as [`Digest::bytes`] gives them.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     /// Its 64 lower-case hex digits.
@@ -759,6 +776,14 @@ pub struct Store {
     /// What it knows of the materialised trees (see [Materialised
     /// trees](trees#materialised-trees)).
     materialised: Arc<Mutex<trees::Materialised>>,
+    /// Each blob this process asked where it is, put, or took by a stamp:
+    /// what an eviction during its build keeps (see
+    /// [`crate::evict::make_room`]).
+    touched: Arc<Mutex<HashSet<Digest>>>,
+    /// Where this process publishes what it uses, for an eviction while it
+    /// has the store open (see [Publishing what is
+    /// used](crate::using#publishing-what-is-used)).
+    publisher: Option<Arc<crate::using::Publisher>>,
 }
 
 /// How a tree was found complete (see [`Store::holds_tree`]).
@@ -1010,8 +1035,11 @@ impl Store {
         let held = Self::lock_file(root, "lock")?;
         // An eviction running elsewhere is waited for.
         held.lock_shared()?;
+        // Its file of what it uses is made before the gate is let go, so
+        // that no eviction beside it finds it holding the store unpublished.
+        let store = Self::with_held(root, held);
         drop(gate);
-        Self::with_held(root, held)
+        store
     }
 
     /// The file `name` in the store's directory `root`, opened to be locked,
@@ -1046,6 +1074,8 @@ impl Store {
             trees: Arc::default(),
             complete: Arc::default(),
             materialised: Arc::default(),
+            touched: Arc::default(),
+            publisher: crate::using::publisher(root),
         })
     }
 
@@ -1065,6 +1095,9 @@ impl Store {
 
     /// Notes that the record `key` was found or written.
     pub fn note_record(&self, key: &Digest) {
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(crate::using::Kind::Record, key);
+        }
         if let Ok(mut used) = self.used.lock() {
             used.records.insert(*key);
         }
@@ -1094,6 +1127,12 @@ impl Store {
     /// Whether the tree `digest` is known complete, by what this process
     /// found or by its mark, without a walk.
     fn marked_complete(&self, digest: &Digest) -> bool {
+        // Published before it is looked for, as all it names is then relied
+        // on (see [Publishing what is
+        // used](crate::using#publishing-what-is-used)).
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(crate::using::Kind::Tree, digest);
+        }
         self.complete
             .lock()
             .is_ok_and(|complete| complete.contains(digest))
@@ -1179,6 +1218,14 @@ impl Store {
     /// Where the blob of `digest` is, executable if `executable`.
     #[must_use]
     pub fn blob_path(&self, digest: &Digest, executable: bool) -> PathBuf {
+        self.touch(digest);
+        self.cas_path(digest, executable)
+    }
+
+    /// [`Store::blob_path`], the blob not noted as this process's to use:
+    /// for an eviction, which looks at every blob.
+    #[must_use]
+    pub fn cas_path(&self, digest: &Digest, executable: bool) -> PathBuf {
         let hex = digest.hex();
         let name = if executable {
             format!("{hex}.x")
@@ -1186,6 +1233,48 @@ impl Store {
             hex.clone()
         };
         self.root.join("cas").join(&hex[..2]).join(name)
+    }
+
+    /// Notes that this process uses the blob `digest`, which an eviction
+    /// during its build then keeps.
+    fn touch(&self, digest: &Digest) {
+        match &self.publisher {
+            Some(publisher) => publisher.publish(crate::using::Kind::Blob, digest),
+            None => {
+                if let Ok(mut touched) = self.touched.lock() {
+                    touched.insert(*digest);
+                }
+            }
+        }
+    }
+
+    /// Each blob this process used, each record it found or wrote, and each
+    /// scratch directory it held, so far: what an eviction during its
+    /// build keeps (see [`crate::evict::make_room`]).
+    #[must_use]
+    pub fn in_use(&self) -> crate::evict::Keep {
+        let blobs = self
+            .touched
+            .lock()
+            .map(|touched| touched.clone())
+            .unwrap_or_default();
+        let (records, scratch) = self
+            .used
+            .lock()
+            .map(|used| (used.records.clone(), used.scratch.clone()))
+            .unwrap_or_default();
+        // Each tree it took as complete, all of which it relies on.
+        let trees = self
+            .complete
+            .lock()
+            .map(|complete| complete.clone())
+            .unwrap_or_default();
+        crate::evict::Keep {
+            blobs,
+            records,
+            scratch,
+            trees,
+        }
     }
 
     /// Whether the store holds the contents of `digest`.
@@ -2019,7 +2108,8 @@ impl Store {
         }
         let stamp = Stamp::of(meta);
         // Its blob is looked for once the walk is over, and only if the
-        // tree is not known complete.
+        // tree is not known complete: published then, as the tree or as
+        // itself ([`Store::trusted_held`]), not here.
         if let Some((known, entry)) = walk.seen.files.get(path)
             && *known == stamp
         {
@@ -2133,7 +2223,14 @@ impl Store {
         {
             return Ok(tree);
         }
-        let bytes = self.read_blob(digest)?;
+        // Read as an eviction reads it, not noted as this process's to use.
+        let plain = self.cas_path(digest, false);
+        let path = if plain.is_file() {
+            plain
+        } else {
+            self.cas_path(digest, true)
+        };
+        let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
@@ -2141,9 +2238,11 @@ impl Store {
     /// [`Store::materialise_file`] makes it where it can.
     #[must_use]
     pub fn is_linked(&self, entry: &FileEntry, at: &Path) -> bool {
+        // Compared only, not relied on: a link keeps its contents if the
+        // blob is evicted, so it is not published.
         let (Ok(meta), Ok(blob)) = (
             fs::symlink_metadata(at),
-            fs::metadata(self.blob_path(&entry.digest, entry.executable)),
+            fs::metadata(self.cas_path(&entry.digest, entry.executable)),
         ) else {
             return false;
         };
@@ -2199,7 +2298,8 @@ impl Store {
                         && meta.permissions().mode() & 0o222 == 0
                         && meta.len() == file.size
                         && if copy == 0 {
-                            linked(self.blob_path(&file.digest, file.executable))
+                            // Compared only, as in `is_linked`.
+                            linked(self.cas_path(&file.digest, file.executable))
                         } else {
                             // A copy of its own where no link to the
                             // store's could be made.
@@ -2332,11 +2432,11 @@ impl Store {
     ///
     /// That it cannot be read.
     pub fn record_bytes(&self, key: &Digest) -> io::Result<Option<Vec<u8>>> {
+        // Published before it is read (see [Publishing what is
+        // used](crate::using#publishing-what-is-used)).
+        self.note_record(key);
         match fs::read(self.record_path(key)) {
-            Ok(bytes) => {
-                self.note_record(key);
-                Ok(Some(bytes))
-            }
+            Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -2380,7 +2480,7 @@ impl Store {
     pub fn is_tree_blob(&self, digest: &Digest) -> bool {
         const BEGINNING: &[u8] = b"{\"entries\":";
         let mut start = [0u8; BEGINNING.len()];
-        File::open(self.blob_path(digest, false))
+        File::open(self.cas_path(digest, false))
             .and_then(|mut file| file.read_exact(&mut start))
             .is_ok_and(|()| start == BEGINNING)
     }

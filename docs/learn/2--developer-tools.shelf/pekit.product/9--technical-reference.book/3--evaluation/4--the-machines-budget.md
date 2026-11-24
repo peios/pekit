@@ -26,8 +26,9 @@ Each limit is read, in order of precedence, from:
 
 `jobs` is a count above 0. `memory` and `unseen` are sizes, written as
 `PEKIT_CACHE_LIMIT`'s are, above 0. `machine.conf` can also set
-`cache_limit` and `evaluating`, which are not limits of the budget but are
-read the same way, after `PEKIT_CACHE_LIMIT` and `PEKIT_EVALUATING`.
+`cache_limit`, `evaluating` and `keep_free`, which are not limits of the
+budget but are read the same way, after `PEKIT_CACHE_LIMIT`,
+`PEKIT_EVALUATING` and `PEKIT_KEEP_FREE`.
 Anything else, or a line of `machine.conf` that sets nothing it knows,
 fails every command that builds.
 

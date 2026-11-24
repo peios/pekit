@@ -423,6 +423,7 @@ fn the_machine_s_configuration_sets_the_store_s_limit_and_how_many_evaluate() {
     // Each setting read: one that is wrong says where it is.
     for (setting, says) in [
         ("cache_limit = lots", "`cache_limit` in `"),
+        ("keep_free = plenty", "`keep_free` in `"),
         ("evaluating = some", "`evaluating` in `"),
     ] {
         fs::write(&conf, format!("jobs = 2\n{setting}\n")).unwrap();

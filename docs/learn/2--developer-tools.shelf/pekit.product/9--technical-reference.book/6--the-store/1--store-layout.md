@@ -20,6 +20,7 @@ holds:
 | `claims/` | A lock file for each step a build claimed. See [Claims](~pekit/claims). |
 | `usage/` | One journal for each build of what it used, for eviction. |
 | `eviction.json` | Each record's eviction priority, and what eviction removed. |
+| `orphaned` | What workspaces' output directories held of evicted steps, when an eviction last looked. |
 | `size`, `size.lock` | The blobs' total size as last measured and added to, and its lock. |
 | `tmp/` | What is being written. |
 | `lock` | The store's lock. |

@@ -87,15 +87,22 @@ Each build reads the budget for itself. Builds that read different limits
 share the larger, so set the budget in `machine.conf` rather than in one
 build's environment.
 
-`machine.conf` can also set two more things for every build on the
-machine: `cache_limit`, how large the store can grow, as
-`PEKIT_CACHE_LIMIT` does, and `evaluating`, how many targets a build
-evaluates at once, as `PEKIT_EVALUATING` does. The environment overrides
-both:
+`machine.conf` can also set three more things for every build on the
+machine:
+
+- `cache_limit`, how large the store can grow, as `PEKIT_CACHE_LIMIT` does.
+- `evaluating`, how many targets a build evaluates at once, as
+  `PEKIT_EVALUATING` does.
+- `keep_free`, how much room builds keep free on the store's disk, as
+  `PEKIT_KEEP_FREE` does (see [Managing the
+  Store](~pekit/managing-the-store#keep-room-free-on-the-disk)).
+
+The environment overrides each:
 
 ```text
 cache_limit = 400GiB
 evaluating = 8
+keep_free = 30GiB
 ```
 
 ## Jobservers for `make` and Cargo

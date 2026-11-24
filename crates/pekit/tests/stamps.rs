@@ -148,17 +148,18 @@ fn the_stamps_of_a_workspace_gone_are_removed() {
     };
     let gone = workspace("one\n");
     build_in(gone.path(), state.path(), "both").unwrap();
-    // Its path is noted beside its stamps.
+    // Its path, and its output directory's, are noted beside its stamps.
     let noted = names();
-    assert_eq!(noted.len(), 2, "{noted:?}");
-    let [root, kept] = &noted[..] else {
+    let [outputs, root, kept] = &noted[..] else {
         panic!("{noted:?}");
     };
-    assert!(
-        Path::new(kept)
+    let is = |name: &str, extension: &str| {
+        Path::new(name)
             .extension()
-            .is_some_and(|ext| ext == "stamps")
-            && Path::new(root).extension().is_some_and(|ext| ext == "root"),
+            .is_some_and(|ext| ext == extension)
+    };
+    assert!(
+        is(outputs, "outputs") && is(root, "root") && is(kept, "stamps"),
         "{noted:?}"
     );
     assert_eq!(
@@ -187,10 +188,13 @@ fn the_stamps_of_a_workspace_gone_are_removed() {
     let other = workspace("two\n");
     build_in(other.path(), state.path(), "both").unwrap();
     let left = names();
-    assert!(!left.contains(kept) && !left.contains(root), "{left:?}");
+    assert!(
+        !left.contains(kept) && !left.contains(root) && !left.contains(outputs),
+        "{left:?}"
+    );
     assert!(!left.contains(&"0123.json".to_owned()), "{left:?}");
     assert!(left.contains(&"4567.json".to_owned()), "{left:?}");
-    assert_eq!(left.len(), 3, "{left:?}");
+    assert_eq!(left.len(), 4, "{left:?}");
 }
 
 #[test]

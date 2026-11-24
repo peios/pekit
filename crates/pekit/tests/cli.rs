@@ -53,6 +53,7 @@ fn pekit(dir: &Path, cache: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", cache.join("config"))
         .env_remove("PEKIT_CACHE_LIMIT")
         .env_remove("PEKIT_EVALUATING")
+        .env_remove("PEKIT_KEEP_FREE")
         .env_remove("PEKIT_PROGRESS_SECS")
         // A remote cache only where a test names one.
         .env_remove("PEKIT_REMOTE_CACHE")
@@ -86,6 +87,10 @@ fn a_target_is_built_and_then_found_in_the_store() {
     assert!(err.contains("not hermetic"), "{err}");
     let built = dir.path().join("pekit-out/app/hello/shout/out.txt");
     assert_eq!(fs::read_to_string(built).unwrap(), "WORLD\n");
+    // It published what it used of the store, and removed that as it ended.
+    let using = cache.path().join("store/using");
+    assert!(using.is_dir());
+    assert_eq!(fs::read_dir(&using).unwrap().count(), 0);
     // From the root, by its qualified name: found.
     let again = pekit(dir.path(), cache.path(), &["build", "app/hello"]);
     let (out, err) = printed(&again);

@@ -2,12 +2,14 @@
 //! (see `design/additive.md`, F3).
 
 mod building;
+mod skipping;
 
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 use pekit::evict::{DEFAULT_LIMIT, limit_of};
 use pekit::store::{Digest, Store, TreeEntry};
 
@@ -88,22 +90,47 @@ fn a_store_over_its_limit_evicts_what_is_cheapest_to_make_again() {
 }
 
 #[test]
-fn a_store_another_process_has_is_not_evicted() {
+fn a_build_beside_another_holder_that_publishes_keeps_what_it_used() {
     let dir = workspace();
     let state = tempfile::tempdir().unwrap();
     built(dir.path(), state.path(), None);
-    // Another holds the store: nothing is evicted.
+    // Another holds the store, and publishes: what the build used is kept.
     let other = Store::open(&state.path().join("store")).unwrap();
     assert_eq!(built(dir.path(), state.path(), Some(1)), (0, 2));
     drop(other);
     assert_eq!(built(dir.path(), state.path(), None), (0, 2));
 }
 
+/// Another process holding the store at `root` open that publishes
+/// nothing of what it uses, as an older pekit does, until it is killed:
+/// none if `flock` cannot be run.
+fn older_holder(root: &Path) -> Option<std::process::Child> {
+    let child = std::process::Command::new("flock")
+        .args(["-s", "-F"])
+        .arg(root.join("lock"))
+        .args(["sleep", "60"])
+        .spawn()
+        .ok()?;
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < given_up {
+        if fs::read_to_string("/proc/locks")
+            .is_ok_and(|locks| locks.contains(&format!(" {} ", child.id())))
+        {
+            return Some(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
 #[test]
 fn a_store_over_its_limit_that_another_process_has_says_so() {
     let state = tempfile::tempdir().unwrap();
     let store = Store::open(&state.path().join("store")).unwrap();
-    let other = Store::open(&state.path().join("store")).unwrap();
+    let Some(mut other) = older_holder(&state.path().join("store")) else {
+        skip("no `flock`");
+        return;
+    };
     ledger(state.path(), 3 << 30, 0);
     // Nothing is evicted, as another has the store, and it says why.
     let skipped = pekit::evict::evict(&store, &store.used(), 2 << 30).unwrap_err();
@@ -113,13 +140,18 @@ fn a_store_over_its_limit_that_another_process_has_says_so() {
             .starts_with("it holds 3.0 GiB, over its limit of 2.0 GiB, and nothing was evicted"),
         "{skipped}"
     );
+    assert!(
+        skipped.to_string().contains("does not say what it uses"),
+        "{skipped}"
+    );
     // Within its limit, it is no failure.
     assert!(
         pekit::evict::evict(&store, &store.used(), 4 << 30)
             .unwrap()
             .is_none()
     );
-    drop(other);
+    let _ = other.kill();
+    let _ = other.wait();
 }
 
 #[test]
@@ -472,4 +504,76 @@ fn what_a_build_writes_is_counted_as_it_goes_and_once() {
     pekit::evict::ledger_written(&store).unwrap();
     pekit::evict::evict(&store, &store.used(), DEFAULT_LIMIT).unwrap();
     assert_eq!(ledgered(state.path()), 6000);
+}
+
+#[test]
+fn room_made_during_a_build_keeps_what_the_build_used() {
+    use pekit::evict::{Keep, Room, make_room};
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(&state.path().join("store")).unwrap();
+    let used = store.put_bytes(&vec![b'u'; 1 << 16]).unwrap();
+    let unused = store.put_bytes(&vec![b'n'; 1 << 16]).unwrap();
+    let keep = Keep {
+        blobs: [used].into(),
+        ..Keep::default()
+    };
+    // Another process has the store open that publishes nothing of what
+    // it uses: nothing is evicted.
+    let Some(mut other) = older_holder(&state.path().join("store")) else {
+        skip("no `flock`");
+        return;
+    };
+    assert_eq!(make_room(&store, 1 << 30, &keep).unwrap(), Room::NotAlone);
+    assert!(store.has(&unused));
+    let _ = other.kill();
+    let _ = other.wait();
+    // Alone: all it may evict, but what the build used.
+    let Room::Made(made) = make_room(&store, 1 << 30, &keep).unwrap() else {
+        panic!("no room made");
+    };
+    assert!(made.after < made.before, "{made:?}");
+    assert!(store.has(&used));
+    assert!(!store.has(&unused));
+}
+
+#[test]
+fn an_eviction_alone_removes_what_outputs_still_hold_of_what_it_evicted() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = workspace();
+    let state = tempfile::tempdir().unwrap();
+    // Every output exposed under `pekit-out/`, as `pekit run` exposes them.
+    let options = Options {
+        exposing: pekit::exposure::Exposing::All,
+        ..Options::default()
+    };
+    observed_with(dir.path(), state.path(), "both", options)
+        .0
+        .unwrap();
+    let steps = dir.path().join("pekit-out/.steps");
+    let exposed = |function: &str| fs::read_dir(steps.join(function)).map_or(0, Iterator::count);
+    assert_eq!((exposed("quick"), exposed("slow")), (1, 1));
+    // The workspace's output directory is noted beside its stamps.
+    let noted = pekit::outputs::noted(&state.path().join("store"));
+    assert_eq!(
+        noted,
+        [dir.path().join("pekit-out").canonicalize().unwrap()]
+    );
+    // A file of the user's there, no exposure, stays whatever happens.
+    let own = dir.path().join("pekit-out/mine.txt");
+    fs::write(&own, "mine").unwrap();
+    // Evicted to almost nothing, alone: the exposures of what it evicted go
+    // with it.
+    let store = state.path().join("store");
+    let evicted = pekit::evict::evict_alone(&store, &state.path().join("scratch"), 1, &mut || {})
+        .unwrap()
+        .unwrap();
+    assert!(evicted.released >= 2 << 20, "{evicted:?}");
+    assert_eq!((exposed("quick"), exposed("slow")), (0, 0));
+    assert_eq!(fs::read_to_string(&own).unwrap(), "mine");
+    assert_eq!(fs::metadata(&own).unwrap().nlink(), 1);
+    // `pekit store stats` has what was found after: nothing.
+    assert_eq!(
+        pekit::outputs::last(&store).map(|(bytes, _, _)| bytes),
+        Some(0)
+    );
 }

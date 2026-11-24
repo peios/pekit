@@ -32,6 +32,8 @@ pub struct Options<'a> {
     pub reuse: Reuse,
     /// How large the store may be as it ends, if it has a limit.
     pub cache_limit: Option<u64>,
+    /// How much it keeps free on the store's file system, if anything.
+    pub keep_free: Option<u64>,
     /// Which outputs it writes under `pekit-out/`.
     pub exposing: Exposing,
 }
@@ -44,6 +46,7 @@ impl Default for Options<'_> {
             strict: false,
             reuse: Reuse::Store,
             cache_limit: None,
+            keep_free: None,
             exposing: Exposing::AsNeeded,
         }
     }
@@ -71,6 +74,7 @@ pub fn settings(root: &Path, state: &Path, (arch, profile): (&str, &str)) -> Set
         no_dynamic: false,
         strict: false,
         cache_limit: None,
+        keep_free: None,
         profile_gcsl: false,
         exposing: Exposing::AsNeeded,
         remote: None,
@@ -114,6 +118,7 @@ pub fn observed_with(
         strict,
         reuse,
         cache_limit,
+        keep_free,
         exposing,
     }: Options<'_>,
 ) -> (Result<Built, String>, Vec<Event>) {
@@ -137,6 +142,7 @@ pub fn observed_with(
             let mut settings = settings(&root, &state, (&arch, &profile));
             settings.reuse = reuse;
             settings.cache_limit = cache_limit;
+            settings.keep_free = keep_free;
             settings.exposing = exposing;
             if strict {
                 settings.strict = true;

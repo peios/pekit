@@ -301,7 +301,7 @@ Remove
 .IR pekit-out/ .
 .TP
 .B store stats
-Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, and whether another
+Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, how much the output directories of its workspaces held of evicted steps when an eviction last looked, and whether another
 .B pekit
 has it open.
 .TP
@@ -316,6 +316,18 @@ A build evicts only when it ends with no other
 using the store;
 .B store evict
 waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
+A build that ends while other
+.B pekit
+processes have the store evicts beside them instead, if every one publishes what it uses, keeping all of it; an older
+.BR pekit ,
+which publishes nothing, keeps it from evicting.
+It then removes, from the output directories of the store's workspaces, the exposures of what any eviction evicted under
+.IR .steps/ ,
+.IR .unpack/ ,
+.IR .git/ ,
+and
+.IR .fetch/ ,
+which no build can use and which keep the evicted contents on the disk, as a build's eviction does too; it never removes the files a target gives.
 .TP
 .B store verify
 Read every blob of the store and hash it again, and list each whose contents are not those its name says, and each that is not read-only, which can be changed through any link to it.
@@ -606,6 +618,23 @@ in
 sets the limit.
 A value that is no size fails every command that builds.
 .TP
+.B PEKIT_KEEP_FREE
+How much a build keeps free on the file system of the store and the scratch directory, a size as
+.B PEKIT_CACHE_LIMIT
+takes; unset or
+.BR 0 ,
+the default, keeps nothing free.
+Once less is free, a build starts no new step; once none of its steps runs, it evicts what it has not used, if no other
+.B pekit
+process has the store open, then goes on, warning of what it did or could not do.
+As a build ends, it evicts again if less is free.
+Without it,
+.B keep_free
+in
+.I CONFIG/machine.conf
+sets it.
+Whatever it is set to, a step that fails for want of room, by its error or by how little is free then, runs once more after room is made for it, and then fails saying how much is free.
+.TP
 .B PEKIT_STATE_DIR
 The state directory, which holds the machine's key that secrets' identities are hashed with.
 If it is unset or empty, the state directory is
@@ -849,13 +878,15 @@ and
 describe, with
 .B #
 starting a comment;
-.B cache_limit
-and
+.BR cache_limit ,
 .BR evaluating ,
-as
-.B PEKIT_CACHE_LIMIT
 and
-.B PEKIT_EVALUATING
+.BR keep_free ,
+as
+.BR PEKIT_CACHE_LIMIT ,
+.BR PEKIT_EVALUATING ,
+and
+.B PEKIT_KEEP_FREE
 describe, for every build on the machine.
 The environment overrides each.
 A line that sets anything else fails every command that builds.

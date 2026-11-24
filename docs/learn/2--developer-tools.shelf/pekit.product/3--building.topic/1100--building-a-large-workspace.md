@@ -62,7 +62,12 @@ a shell only if it's set in `machine.conf`, not in one shell's environment:
 
 ```text
 cache_limit = 400GiB
+keep_free = 30GiB
 ```
+
+`keep_free` keeps that much free on the store's disk during every build,
+whatever else fills it, such as outputs or scratch files (see [Managing the
+Store](~pekit/managing-the-store#keep-room-free-on-the-disk)).
 
 A build evicts only as it ends with no other pekit using the store, so
 while builds overlap, the store can grow past its limit, and each build

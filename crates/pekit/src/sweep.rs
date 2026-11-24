@@ -91,6 +91,11 @@ pub fn sweep_stale(store: &Store, scratch: &Path) -> io::Result<bool> {
             return Err(error);
         }
     }
+    // What an evictor that died left aside is put back before `tmp/` is
+    // swept (see [Shared eviction](crate::evict#shared-eviction)).
+    crate::evict::restore_aside(store.root(), &store.root().join("tmp"));
+    // And the files of what dead processes used.
+    let _ = crate::using::live(store.root());
     let swept = sweep_held(&store.root().join("tmp"), scratch)
         .and_then(|()| sweep_seen(&store.root().join("seen")));
     // Held shared again, as every process that has the store holds it.
@@ -165,6 +170,7 @@ pub fn sweep_seen(seen: &Path) -> io::Result<()> {
                     remove(&format!("{digest}{kept}.stamps"))?;
                     remove(&format!("{digest}{kept}.json"))?;
                 }
+                remove(&format!("{digest}.outputs"))?;
                 remove(&name)?;
             }
         } else if let Some(stem) = name

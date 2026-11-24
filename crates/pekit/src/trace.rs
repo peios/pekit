@@ -106,16 +106,22 @@ impl Trace {
                 work,
                 worker,
                 began,
+                ended,
             } => {
                 self.name_workers(worker + 1);
                 let began = micros(*began);
                 self.events.push(json!({
                     "name": work, "cat": "engine", "ph": "X",
-                    "ts": began, "dur": ts.saturating_sub(began),
+                    "ts": began, "dur": micros(*ended).saturating_sub(began),
                     "pid": PID, "tid": worker + FIRST_WORKER_ROW,
                     "args": { "step": step },
                 }));
             }
+            EventKind::Warned { message } => self.events.push(json!({
+                "name": format!("warning: {message}"),
+                "cat": "warning", "ph": "i", "s": "g", "ts": ts, "pid": PID,
+                "tid": EVALUATION_ROW,
+            })),
             EventKind::TargetEnded { target, failed } => self.events.push(json!({
                 "name": format!("{target} {}", if *failed { "failed" } else { "ended" }),
                 "cat": "target", "ph": "i", "s": "g", "ts": ts, "pid": PID,

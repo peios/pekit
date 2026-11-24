@@ -169,8 +169,8 @@ impl Limits {
             "unseen" => self.unseen = size()?,
             other => {
                 return Err(format!(
-                    "`{other}` is no setting: write `jobs`, `memory`, `unseen`, `cache_limit` \
-                     or `evaluating`"
+                    "`{other}` is no setting: write `jobs`, `memory`, `unseen`, `cache_limit`, \
+                     `evaluating` or `keep_free`"
                 ));
             }
         }
@@ -199,7 +199,7 @@ impl Limits {
 /// budget but how every build on the machine runs: the store's limit, and
 /// how many targets a build evaluates at once. [`machine_setting`] reads
 /// them.
-pub const SETTINGS: [&str; 2] = ["cache_limit", "evaluating"];
+pub const SETTINGS: [&str; 3] = ["cache_limit", "evaluating", "keep_free"];
 
 /// What the machine's configuration `file` sets `key`, one of
 /// [`SETTINGS`], to, if it sets it: by its last line that does.
