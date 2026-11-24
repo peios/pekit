@@ -117,3 +117,20 @@ As with eviction at the end, room is made only if no other process has the
 store open. Otherwise the build warns that nothing was evicted, and goes on.
 It warns too if it could go on only by starting a step it holds, and it
 then starts that step.
+
+## Outputs of evicted steps
+
+A build exposes outputs under its output directory as hard links to the
+store's blobs (see [Exposure](~pekit/where-results-go)). An eviction removes
+a blob's name in the store, but an exposure's link keeps its contents on the
+disk, though the store's size leaves them out. No build can use them,
+because a build exposes what it needs again from the store.
+
+Each build notes its workspace's output directory beside its stamps, in
+`seen/<digest>.outputs`. An eviction that evicted something with the store to
+itself, and every `pekit store evict`, then removes each exposure under
+`.steps/`, `.unpack/`, `.git/`, or `.fetch/` of a noted output directory that
+holds a file of the store's file system that no name in `cas/` links. It
+never touches the files a target gives, nor anything on another file system,
+which is a copy rather than a link. What it found is kept in `orphaned`, which
+`pekit store stats` shows.

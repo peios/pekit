@@ -1989,32 +1989,7 @@ fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCod
     };
     let shown_limit = limit.map_or_else(|| "none".to_owned(), shown_size);
     match command {
-        StoreCommand::Stats => {
-            let _ = writeln!(terminal.out, "store: {}", root.display());
-            let size = match crate::evict::ledgered(&root) {
-                Some((bytes, walked)) => format!(
-                    "{}, by its ledger, last walked {}",
-                    shown_size(bytes),
-                    shown_ago(walked)
-                ),
-                None => "not measured yet: an eviction measures it".to_owned(),
-            };
-            let _ = writeln!(terminal.out, "size: {size}");
-            let _ = writeln!(terminal.out, "limit: {shown_limit}");
-            let evicted = std::fs::metadata(root.join("eviction.json"))
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or_else(|| "never".to_owned(), |when| shown_ago(when.as_secs()));
-            let _ = writeln!(terminal.out, "last evicted: {evicted}");
-            let used = match crate::evict::in_use(&root) {
-                Ok(true) => "by another pekit",
-                Ok(false) => "by none",
-                Err(_) => "cannot be told",
-            };
-            let _ = writeln!(terminal.out, "in use: {used}");
-            ExitCode::SUCCESS
-        }
+        StoreCommand::Stats => stats_command(&root, &shown_limit, terminal),
         StoreCommand::Evict { .. } => {
             let Some(limit) = limit else {
                 let _ = writeln!(terminal.out, "the store has no limit: nothing to evict");
@@ -2030,12 +2005,26 @@ fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCod
             };
             match crate::evict::evict_alone(&root, &cache.join("scratch"), limit, &mut waiting) {
                 Ok(Some(evicted)) => {
-                    let _ = writeln!(
-                        terminal.out,
-                        "evicted {}: the store is {}, within {shown_limit}",
-                        shown_size(evicted.before.saturating_sub(evicted.after)),
-                        shown_size(evicted.after)
-                    );
+                    if evicted.before > evicted.after {
+                        let _ = writeln!(
+                            terminal.out,
+                            "evicted {}: the store is {}, within {shown_limit}",
+                            shown_size(evicted.before.saturating_sub(evicted.after)),
+                            shown_size(evicted.after)
+                        );
+                    } else {
+                        let _ = writeln!(
+                            terminal.out,
+                            "nothing to evict: the store is within {shown_limit}"
+                        );
+                    }
+                    if evicted.released > 0 {
+                        let _ = writeln!(
+                            terminal.out,
+                            "released {} that output directories held of evicted steps",
+                            shown_size(evicted.released)
+                        );
+                    }
                     ExitCode::SUCCESS
                 }
                 Ok(None) => {
@@ -2054,6 +2043,45 @@ fn store_command(command: &StoreCommand, terminal: &mut Terminal<'_>) -> ExitCod
         // Verified above, needing no limit.
         StoreCommand::Verify { .. } => ExitCode::SUCCESS,
     }
+}
+
+/// `pekit store stats`: where the store at `root` is, how large, its limit
+/// as `shown_limit`, when it was last evicted, what output directories hold
+/// of evicted steps, and whether a build has it.
+fn stats_command(root: &Path, shown_limit: &str, terminal: &mut Terminal<'_>) -> ExitCode {
+    let _ = writeln!(terminal.out, "store: {}", root.display());
+    let size = match crate::evict::ledgered(root) {
+        Some((bytes, walked)) => format!(
+            "{}, by its ledger, last walked {}",
+            shown_size(bytes),
+            shown_ago(walked)
+        ),
+        None => "not measured yet: an eviction measures it".to_owned(),
+    };
+    let _ = writeln!(terminal.out, "size: {size}");
+    let _ = writeln!(terminal.out, "limit: {shown_limit}");
+    let evicted = std::fs::metadata(root.join("eviction.json"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(|| "never".to_owned(), |when| shown_ago(when.as_secs()));
+    let _ = writeln!(terminal.out, "last evicted: {evicted}");
+    let held = match crate::outputs::last(root) {
+        Some((bytes, exposures, when)) => format!(
+            "{} in {exposures} exposures, found {}",
+            shown_size(bytes),
+            shown_ago(when)
+        ),
+        None => "not measured yet: an eviction measures it".to_owned(),
+    };
+    let _ = writeln!(terminal.out, "held by outputs of evicted steps: {held}");
+    let used = match crate::evict::in_use(root) {
+        Ok(true) => "by another pekit",
+        Ok(false) => "by none",
+        Err(_) => "cannot be told",
+    };
+    let _ = writeln!(terminal.out, "in use: {used}");
+    ExitCode::SUCCESS
 }
 
 /// `pekit store verify`: every blob of the store under `cache` read and

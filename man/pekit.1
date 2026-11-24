@@ -301,7 +301,7 @@ Remove
 .IR pekit-out/ .
 .TP
 .B store stats
-Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, and whether another
+Show where the store is, its size as its ledger last measured it and when, its limit, when it was last evicted, how much the output directories of its workspaces held of evicted steps when an eviction last looked, and whether another
 .B pekit
 has it open.
 .TP
@@ -316,6 +316,13 @@ A build evicts only when it ends with no other
 using the store;
 .B store evict
 waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
+It then removes, from the output directories of the store's workspaces, the exposures of what any eviction evicted under
+.IR .steps/ ,
+.IR .unpack/ ,
+.IR .git/ ,
+and
+.IR .fetch/ ,
+which no build can use and which keep the evicted contents on the disk, as a build's eviction does too; it never removes the files a target gives.
 .TP
 .B store verify
 Read every blob of the store and hash it again, and list each whose contents are not those its name says, and each that is not read-only, which can be changed through any link to it.

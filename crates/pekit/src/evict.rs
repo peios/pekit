@@ -163,6 +163,9 @@ pub struct Evicted {
     pub before: u64,
     /// Its size after.
     pub after: u64,
+    /// The bytes held by exposures of evicted blobs it removed (see
+    /// [Exposures of evicted blobs](crate::outputs#exposures-of-evicted-blobs)).
+    pub released: u64,
 }
 
 /// Something that can be evicted, by its priority.
@@ -376,7 +379,16 @@ pub fn evict_alone(
     waiting: &mut dyn FnMut(),
 ) -> io::Result<Option<Evicted>> {
     alone(root, scratch, waiting, |store| {
-        evict_held(store, Aim::Limit(limit), &Keep::default())
+        let evicted = evict_held(store, Aim::Limit(limit), &Keep::default())?;
+        // Exposures of what earlier evictions removed go even if nothing
+        // more is evicted now.
+        Ok(evicted.or_else(|| {
+            let released = release_orphans(store);
+            (released > 0).then_some(Evicted {
+                released,
+                ..Evicted::default()
+            })
+        }))
     })
 }
 
@@ -587,6 +599,20 @@ pub fn journal_used(store: &Store) -> io::Result<()> {
     Ledger::add(store.root(), used.added)
 }
 
+/// Removes each exposure of an evicted blob in the output directories noted
+/// in `store`, which this process has to itself, and keeps what it found
+/// for `pekit store stats`: the bytes they held (see [Exposures of evicted
+/// blobs](crate::outputs#exposures-of-evicted-blobs)).
+fn release_orphans(store: &Store) -> u64 {
+    let Ok(orphans) = crate::outputs::find(store.root()) else {
+        return 0;
+    };
+    let released = crate::outputs::release(&orphans).map_or(0, |()| orphans.bytes);
+    let none = crate::outputs::Orphans::default();
+    let _ = crate::outputs::keep_last(store.root(), if released > 0 { &none } else { &orphans });
+    released
+}
+
 /// Evicts from `store`, which this process has open, during its build,
 /// until `bytes` more are free, keeping all `keep` says the build has used
 /// (see [Room on the disk](crate::engine#room-on-the-disk)): only if no other
@@ -696,9 +722,12 @@ fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted
         let _ = fs::remove_file(journal);
     }
     Ledger::write(root, after.saturating_sub(scratch_size(&scratch_of(root)?)))?;
+    // What output directories still held of what was evicted goes too.
+    let released = release_orphans(store);
     Ok(Some(Evicted {
         before: total,
         after,
+        released,
     }))
 }
 

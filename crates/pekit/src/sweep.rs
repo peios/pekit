@@ -165,6 +165,7 @@ pub fn sweep_seen(seen: &Path) -> io::Result<()> {
                     remove(&format!("{digest}{kept}.stamps"))?;
                     remove(&format!("{digest}{kept}.json"))?;
                 }
+                remove(&format!("{digest}.outputs"))?;
                 remove(&name)?;
             }
         } else if let Some(stem) = name

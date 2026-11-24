@@ -498,3 +498,49 @@ fn room_made_during_a_build_keeps_what_the_build_used() {
     assert!(store.has(&used));
     assert!(!store.has(&unused));
 }
+
+#[test]
+fn an_eviction_alone_removes_what_outputs_still_hold_of_what_it_evicted() {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = workspace();
+    let state = tempfile::tempdir().unwrap();
+    // Every output exposed under `pekit-out/`, as `pekit run` exposes them.
+    let options = Options {
+        exposing: pekit::exposure::Exposing::All,
+        ..Options::default()
+    };
+    observed_with(dir.path(), state.path(), "both", options)
+        .0
+        .unwrap();
+    let steps = dir.path().join("pekit-out/.steps");
+    let exposed = |function: &str| {
+        fs::read_dir(steps.join(function))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert_eq!((exposed("quick"), exposed("slow")), (1, 1));
+    // The workspace's output directory is noted beside its stamps.
+    let noted = pekit::outputs::noted(&state.path().join("store"));
+    assert_eq!(
+        noted,
+        [dir.path().join("pekit-out").canonicalize().unwrap()]
+    );
+    // A file of the user's there, no exposure, stays whatever happens.
+    let own = dir.path().join("pekit-out/mine.txt");
+    fs::write(&own, "mine").unwrap();
+    // Evicted to almost nothing, alone: the exposures of what it evicted go
+    // with it.
+    let store = state.path().join("store");
+    let evicted = pekit::evict::evict_alone(&store, &state.path().join("scratch"), 1, &mut || {})
+        .unwrap()
+        .unwrap();
+    assert!(evicted.released >= 2 << 20, "{evicted:?}");
+    assert_eq!((exposed("quick"), exposed("slow")), (0, 0));
+    assert_eq!(fs::read_to_string(&own).unwrap(), "mine");
+    assert_eq!(fs::metadata(&own).unwrap().nlink(), 1);
+    // `pekit store stats` has what was found after: nothing.
+    assert_eq!(
+        pekit::outputs::last(&store).map(|(bytes, _, _)| bytes),
+        Some(0)
+    );
+}

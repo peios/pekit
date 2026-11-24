@@ -876,7 +876,13 @@ fn new_run<'a>(
     }
     let store = Store::open(&settings.store).map_err(|error| engine(&error))?;
     let workspace_seen = (
-        workspace_stamps(&store, &loaded.root),
+        {
+            // Where its outputs are, for an eviction to find what of them it
+            // left (see [Exposures of evicted
+            // blobs](crate::outputs#exposures-of-evicted-blobs)).
+            let _ = crate::outputs::note(store.root(), &loaded.root, &settings.outputs);
+            workspace_stamps(&store, &loaded.root)
+        },
         clock_beside(&loaded.root.join(".pekit")).map_err(|error| engine(&error))?,
     );
     std::fs::create_dir_all(&settings.scratch).map_err(|error| engine(&error))?;

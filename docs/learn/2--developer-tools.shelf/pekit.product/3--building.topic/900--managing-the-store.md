@@ -87,6 +87,18 @@ pekit store evict
 `--limit` evicts to another size than the store's limit, such as
 `--limit 300GiB` to make room ahead of a large build.
 
+A build's outputs in `pekit-out/.steps/`, `.unpack/`, `.git/`, and `.fetch/`
+are links to the store's files, so evicting a step from the store leaves its
+outputs there holding the same space. `pekit store evict`, and a build that
+evicts with the store to itself, remove those outputs too. No build can use
+them, and a build exposes what it needs again. The files your targets give
+are never removed. `pekit store stats` shows how much such outputs held when
+an eviction last looked:
+
+```text
+held by outputs of evicted steps: 33.1 GiB in 2480 exposures, found 3 hours ago
+```
+
 ## Move the store
 
 The store is in pekit's cache directory. To keep it on another disk, set

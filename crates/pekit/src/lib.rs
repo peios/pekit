@@ -24,6 +24,7 @@ pub mod layers;
 pub mod load;
 pub mod lock;
 pub mod meter;
+pub mod outputs;
 pub mod platform;
 pub mod pool;
 pub mod programs;
