@@ -60,7 +60,7 @@ else `CACHE/budget`.
 | `claims/<base>` | The lock file of the claim on a step, by its base receipt. |
 | `usage/` | A journal of what each build used. |
 | `eviction.json` | Each record's eviction priority, and what was evicted. |
-| `using/<pid>-<token>` | What each process that has the store open uses of it, published, held locked by the process. |
+| `using/<pid>-<token>` | What each process that has the store open uses of it, published, held locked by the process, and removed as it exits. |
 | `evicting` | The lock of an eviction beside other processes. |
 | `tmp/evicting-<token>/` | What such an eviction has moved aside, until it puts back or deletes it. |
 | `orphaned` | What output directories held of evicted steps when an eviction last looked: bytes, exposures, and when. |

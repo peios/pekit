@@ -33,10 +33,13 @@ fn main() -> ExitCode {
             };
             pekit::cli::run(std::env::args_os(), &cwd, &mut terminal)
         });
-    if let Ok(Ok(code)) = run.map(std::thread::JoinHandle::join) {
+    let code = if let Ok(Ok(code)) = run.map(std::thread::JoinHandle::join) {
         code
     } else {
         eprintln!("error: pekit stopped unexpectedly");
         ExitCode::FAILURE
-    }
+    };
+    // Its files of what it used of each store, of no more use.
+    pekit::using::retire();
+    code
 }

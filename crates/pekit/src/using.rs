@@ -5,8 +5,8 @@
 //!
 //! Each process that opens a store keeps a file of its own in the store's
 //! `using/`, `<pid>-<token>`, and holds a lock on it, exclusively, for as
-//! long as it lives: a file whose lock can be taken is a dead process's,
-//! and is removed. Before it relies on anything of the store, a process
+//! long as it lives, and removes it as it exits ([`retire`]): a file whose
+//! lock can be taken is a dead process's, and is removed. Before it relies on anything of the store, a process
 //! appends it there, once: each record it reads, before it reads it; each
 //! blob it asks where it is, before it looks for it or links it; and each
 //! tree it takes as complete. Each entry is a kind byte and a digest.
@@ -121,9 +121,16 @@ impl Publisher {
     /// eviction beside such a process does.
     #[doc(hidden)]
     pub fn break_for_test(&self) {
+        self.break_off();
+    }
+
+    /// Publishes no more, and removes the file.
+    fn break_off(&self) {
+        let file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
         self.broken
             .store(true, std::sync::atomic::Ordering::Release);
         let _ = fs::remove_file(&self.path);
+        drop(file);
     }
 }
 
@@ -159,6 +166,20 @@ pub fn publisher(root: &Path) -> Option<Arc<Publisher>> {
     });
     publishers.insert(root.to_path_buf(), Arc::clone(&publisher));
     Some(publisher)
+}
+
+/// Removes this process's file of what it uses of each store it opened, and
+/// publishes no more: for when it is done with the stores, as it exits.
+/// One left by a process that died is removed by the next process that
+/// looks at `using/` with the store to itself, or evicts beside others.
+pub fn retire() {
+    let Some(publishers) = PUBLISHERS.get() else {
+        return;
+    };
+    let publishers = publishers.lock().unwrap_or_else(PoisonError::into_inner);
+    for publisher in publishers.values() {
+        publisher.break_off();
+    }
 }
 
 /// What a live process has published that it uses of a store.

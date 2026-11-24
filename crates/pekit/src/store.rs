@@ -2108,12 +2108,12 @@ impl Store {
         }
         let stamp = Stamp::of(meta);
         // Its blob is looked for once the walk is over, and only if the
-        // tree is not known complete.
+        // tree is not known complete: published then, as the tree or as
+        // itself ([`Store::trusted_held`]), not here.
         if let Some((known, entry)) = walk.seen.files.get(path)
             && *known == stamp
         {
             let entry = *entry;
-            self.touch(&entry.digest);
             walk.seen.visited.insert(path.to_path_buf());
             walk.trusted.push((path.to_path_buf(), entry));
             return Ok(Some(entry));
@@ -2238,9 +2238,11 @@ impl Store {
     /// [`Store::materialise_file`] makes it where it can.
     #[must_use]
     pub fn is_linked(&self, entry: &FileEntry, at: &Path) -> bool {
+        // Compared only, not relied on: a link keeps its contents if the
+        // blob is evicted, so it is not published.
         let (Ok(meta), Ok(blob)) = (
             fs::symlink_metadata(at),
-            fs::metadata(self.blob_path(&entry.digest, entry.executable)),
+            fs::metadata(self.cas_path(&entry.digest, entry.executable)),
         ) else {
             return false;
         };
@@ -2296,7 +2298,8 @@ impl Store {
                         && meta.permissions().mode() & 0o222 == 0
                         && meta.len() == file.size
                         && if copy == 0 {
-                            linked(self.blob_path(&file.digest, file.executable))
+                            // Compared only, as in `is_linked`.
+                            linked(self.cas_path(&file.digest, file.executable))
                         } else {
                             // A copy of its own where no link to the
                             // store's could be made.

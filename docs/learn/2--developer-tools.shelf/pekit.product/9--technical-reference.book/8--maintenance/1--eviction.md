@@ -168,8 +168,9 @@ process relies on what is deleted. Such an eviction removes every mark that
 a tree is complete, but it leaves the materialized trees, which a running
 step might have mounted, and the outputs of what it evicted, for an
 eviction with the store to itself. `pekit store stats` shows how many
-materialized trees there are. A file in `using/` whose lock no process
-holds is a dead process's, and is removed. What a dead evictor moved aside
+materialized trees there are. A process removes its file in `using/` as
+it exits. A file there whose lock no process holds is a dead process's, and
+the next such eviction, or sweep with the store to itself, removes it. What a dead evictor moved aside
 is moved back by the next eviction or sweep, unless a blob of the same name
 is there again, and the rest is deleted.
 
