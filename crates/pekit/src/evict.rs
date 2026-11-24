@@ -721,6 +721,9 @@ pub(crate) fn restore_aside(root: &Path, tmp: &Path) {
                 continue;
             }
             let target = root.join("cas").join(&name[..2]).join(&name);
+            if let Some(shard) = target.parent() {
+                let _ = fs::create_dir_all(shard);
+            }
             let _ = rustix::fs::renameat_with(
                 rustix::fs::CWD,
                 blob.path(),
@@ -1115,6 +1118,9 @@ fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<()> {
             continue;
         }
         let target = root.join("cas").join(&name[..2]).join(&name);
+        if let Some(shard) = target.parent() {
+            let _ = fs::create_dir_all(shard);
+        }
         let moved = rustix::fs::renameat_with(
             rustix::fs::CWD,
             entry.path(),
