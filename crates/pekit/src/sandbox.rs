@@ -469,6 +469,7 @@ impl Effects for HostView {
             Builtin::Fetch
             | Builtin::FetchTool
             | Builtin::FetchGit
+            | Builtin::FetchGitTool
             | Builtin::ArchiveUnpack
             | Builtin::FileRead
             | Builtin::DirFiles => true,

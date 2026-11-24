@@ -292,7 +292,9 @@ what its packages are built from, with their names, and print how much.
 A recipe is the directory its packages' definitions are in.
 Each recipe's packages, every package of the recipe, are built on their own and not packed, and what the build used is recorded: each file it fetched, by URL and SHA-256, but a tool's, which is one a toolchain is made from or one fetched with
 .BR "tool = true" ;
-each git commit it fetched; and each workspace file and directory its code read, its steps were given, or its packages hold, but a path that leads out of the workspace.
+each git commit it fetched, but a tool's, fetched while a toolchain is made or with
+.BR "tool = true" ;
+and each workspace file and directory its code read, its steps were given, or its packages hold, but a path that leads out of the workspace.
 A recipe's record replaces what was recorded of it, and the others are kept.
 Each is written as it is recorded, so a recipe that fails, or a stop, keeps the records made before it.
 .TP

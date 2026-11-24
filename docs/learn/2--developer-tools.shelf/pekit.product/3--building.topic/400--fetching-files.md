@@ -82,6 +82,10 @@ The file is fetched and kept the same either way. Mark only tools: an
 unmarked fetch is recorded as source, which costs some space if it wasn't,
 while a source marked as a tool goes missing from the record.
 
+`fetch_git` takes `tool = true` too, for a git repository that is a tool's,
+such as the git crates of a tool the build compiles, and treats a
+repository fetched while a toolchain is made as a tool's already.
+
 ## Unpack an archive
 
 `archive.unpack` unpacks a tar archive, compressed with gzip, xz, bzip2, or

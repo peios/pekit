@@ -2,6 +2,7 @@
 //! tools, and the workspace files it read (see `pekit::sources`).
 
 mod building;
+mod skipping;
 mod support;
 
 use std::collections::BTreeSet;
@@ -15,6 +16,7 @@ use pekit::store::Digest;
 use pekit::target::select;
 
 use building::settings;
+use skipping::skip;
 
 /// Writes `files`, each a path relative to `root` and its text.
 fn write(root: &Path, files: &[(&str, &str)]) {
@@ -133,6 +135,84 @@ fn a_build_s_source_is_what_it_fetched_and_read_but_its_tools() {
     assert_eq!(files, ["app/build.gcsl", "app/notes.txt", "workspace.gcsl"]);
     let dirs: Vec<&str> = found.dirs.iter().map(String::as_str).collect();
     assert_eq!(dirs, ["app/patches"]);
+}
+
+/// A git repository of one file, `text`, in a new directory: the
+/// directory, its URL and its commit, or `None` with no `git`.
+fn repository(text: &str) -> Option<(tempfile::TempDir, String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), &[("a.txt", text)]);
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    git(&["init", "--quiet"])?;
+    git(&["add", "."])?;
+    git(&["commit", "--quiet", "-m", "one"])?;
+    let commit = git(&["rev-parse", "HEAD"])?;
+    let url = format!("file://{}", dir.path().display());
+    Some((dir, url, commit))
+}
+
+#[test]
+fn a_build_s_source_is_the_git_repositories_it_fetched_but_its_tools() {
+    let repositories = (
+        repository("source\n"),
+        repository("tool\n"),
+        repository("made\n"),
+    );
+    let (
+        Some((_source_dir, source, source_commit)),
+        Some((_marked_dir, marked, marked_commit)),
+        Some((_made_dir, made, made_commit)),
+    ) = repositories
+    else {
+        skip("no `git`");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("workspace.gcsl", ""),
+            (
+                "app/build.gcsl",
+                &format!(
+                    "def build hello() {{\n\
+                     \x20   let tool = fetch_git(\"{marked}\", \"{marked_commit}\", tool = true)\n\
+                     \x20   let made = fetch_git(\"{made}\", \"{made_commit}\") with {{ making_tool = true }}\n\
+                     \x20   let src = fetch_git(\"{source}\", \"{source_commit}\")\n\
+                     \x20   = [src.file(\"a.txt\").read(), tool.file(\"a.txt\").read(), made.file(\"a.txt\").read()]\n\
+                     }}\n"
+                ),
+            ),
+        ],
+    );
+    let state = tempfile::tempdir().unwrap();
+    let found = sources_of(dir.path(), state.path(), &["hello"]);
+    // The source's repository, but neither tool's.
+    assert_eq!(
+        found
+            .git
+            .iter()
+            .map(|tree| (tree.url.as_str(), tree.commit.as_str()))
+            .collect::<Vec<_>>(),
+        [(source.as_str(), source_commit.as_str())]
+    );
 }
 
 #[test]
