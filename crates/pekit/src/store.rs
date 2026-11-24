@@ -1035,8 +1035,11 @@ impl Store {
         let held = Self::lock_file(root, "lock")?;
         // An eviction running elsewhere is waited for.
         held.lock_shared()?;
+        // Its file of what it uses is made before the gate is let go, so
+        // that no eviction beside it finds it holding the store unpublished.
+        let store = Self::with_held(root, held);
         drop(gate);
-        Self::with_held(root, held)
+        store
     }
 
     /// The file `name` in the store's directory `root`, opened to be locked,
