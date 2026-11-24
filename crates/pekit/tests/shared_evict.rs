@@ -1,6 +1,8 @@
 //! Tests of evicting a store while other processes have it open (see
 //! `pekit::evict`, "Shared eviction", and `pekit::using`).
 
+#[expect(dead_code, reason = "these tests build only with the events observed")]
+mod building;
 mod skipping;
 
 use std::fs;
@@ -10,8 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use pekit::events::{Event, EventKind};
 use pekit::store::{Digest, Store};
 
+use building::{Options, observed_with};
 use skipping::skip;
 
 /// Puts `bytes` into the store at `root` as a blob, as another process
@@ -224,4 +228,129 @@ fn what_is_published_or_put_again_while_aside_is_kept() {
         fs::read(root.join("cas").join(&hex[..2]).join(&hex)).unwrap(),
         vec![b'a'; 1 << 16]
     );
+}
+
+/// A workspace whose `app/build.gcsl` builds `chain`: four steps, each
+/// given the last's output.
+fn chain() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let step = |n: u32| {
+        format!(
+            "#[hermetic] fn s{n}(src: File) -> File {{\n\
+             \x20   let r = exec([\"/bin/sh\", \"-c\", \"cat {{src.path}} > out.txt; echo {n} >> out.txt\"])\n\
+             \x20   working_dir().file(\"out.txt\")\n\
+             }}\n"
+        )
+    };
+    let text = format!(
+        "{}{}{}{}def build chain() {{ out = s4(s3(s2(s1(file(\"name.txt\"))))) }}\n",
+        step(1),
+        step(2),
+        step(3),
+        step(4)
+    );
+    fs::write(dir.path().join("workspace.gcsl"), "").unwrap();
+    fs::create_dir_all(dir.path().join("app")).unwrap();
+    fs::write(dir.path().join("app/build.gcsl"), text).unwrap();
+    fs::write(dir.path().join("app/name.txt"), "hi\n").unwrap();
+    dir
+}
+
+/// Writes the ledger of the store at `root`: `bytes`, measured now.
+fn ledger(root: &Path, bytes: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(root.join("size"), format!("{bytes} {now}\n")).unwrap();
+}
+
+/// What `events` warned of.
+fn warned(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Warned { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_store_that_passes_its_limit_mid_build_is_evicted_but_what_is_published() {
+    if Command::new("flock").arg("--version").output().is_err() {
+        skip("no `flock`");
+        return;
+    }
+    let dir = chain();
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("store");
+    drop(Store::open(&root).unwrap());
+    let theirs = blob(&root, &vec![b't'; 1 << 16]);
+    let nobody = blob(&root, &vec![b'n'; 1 << 16]);
+    let Some((mut child, _)) = holder(&root, true, &[theirs]) else {
+        skip("no holder could be started");
+        return;
+    };
+    // Over its limit by its ledger as the build begins: the first step
+    // kept weighs it, and it is evicted beside the build.
+    ledger(&root, 3 << 20);
+    let options = Options {
+        cache_limit: Some(100_000),
+        ..Options::default()
+    };
+    let (built, events) = observed_with(dir.path(), state.path(), "chain", options);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(built.unwrap().ran, 4);
+    let warned = warned(&events);
+    assert!(
+        warned
+            .iter()
+            .any(|message| message.contains("passed its limit")
+                && message.contains("beside the build")),
+        "{warned:?}"
+    );
+    // What the other process published stays; the rest goes.
+    assert!(holds(&root, &theirs));
+    assert!(!holds(&root, &nobody));
+}
+
+#[test]
+fn what_running_builds_use_over_the_limit_is_kept_and_said_once() {
+    if Command::new("flock").arg("--version").output().is_err() {
+        skip("no `flock`");
+        return;
+    }
+    let dir = chain();
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("store");
+    drop(Store::open(&root).unwrap());
+    // Another process uses more than the limit.
+    let theirs = blob(&root, &vec![b't'; 1 << 18]);
+    let Some((mut child, _)) = holder(&root, true, &[theirs]) else {
+        skip("no holder could be started");
+        return;
+    };
+    ledger(&root, 3 << 18);
+    let options = Options {
+        cache_limit: Some(100_000),
+        ..Options::default()
+    };
+    let (built, events) = observed_with(dir.path(), state.path(), "chain", options);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(built.unwrap().ran, 4);
+    let warned = warned(&events);
+    // Evicted once: the steps after add less than a tenth of the limit.
+    let evicted = warned
+        .iter()
+        .filter(|message| message.contains("passed its limit"))
+        .count();
+    let over = warned
+        .iter()
+        .filter(|message| message.contains("is more than its limit"))
+        .count();
+    assert_eq!((evicted, over), (1, 1), "{warned:?}");
+    assert!(holds(&root, &theirs));
 }
