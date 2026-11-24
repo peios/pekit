@@ -170,9 +170,10 @@ step might have mounted, and the outputs of what it evicted, for an
 eviction with the store to itself. `pekit store stats` shows how many
 materialized trees there are. A process removes its file in `using/` as
 it exits. A file there whose lock no process holds is a dead process's, and
-the next such eviction, or sweep with the store to itself, removes it. What a dead evictor moved aside
-is moved back by the next eviction or sweep, unless a blob of the same name
-is there again, and the rest is deleted.
+the next such eviction, or sweep with the store to itself, removes it.
+What a dead evictor moved aside is moved back by the next eviction or
+sweep, unless a blob of the same name is there again, and the rest is
+deleted.
 
 An eviction as a build ends keeps everything that build used, not only what
 other processes use: it still holds the store as it evicts. A store that only
