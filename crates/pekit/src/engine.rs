@@ -73,6 +73,23 @@
 //! build says so and goes on. It says so too if it could go on only by
 //! starting a step it holds, which it then starts. As it ends, it evicts as
 //! the store's limit says, then again if less than the floor is free.
+//!
+//! # The limit during a build
+//!
+//! A build weighs its store against its limit, [`Settings::cache_limit`],
+//! as it goes: each time it keeps a step, which adds what the step wrote to
+//! the store's ledger, it reads the ledger, which every process adds to.
+//! Once it is over the limit, the build evicts to below nine tenths of it,
+//! as an eviction at its end does, on a thread of its own, beside its
+//! running steps ([Eviction during a
+//! build](crate::evict#eviction-during-a-build)); one eviction at a time,
+//! so room is made only once it ends, and the build ends only once it ends.
+//! If what running builds use is more than the limit, it says so once, and
+//! weighs the store again only once it has grown by a tenth of the limit
+//! more. If another process is evicting, or a pekit that publishes nothing
+//! has the store, it tries again a minute later, saying so once of the
+//! second. A ledger older than a day is not trusted, and nothing is evicted
+//! for it until the build ends, when the store is walked.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -98,7 +115,7 @@ use crate::claims::{Claimed, try_claim};
 use crate::copies::Copies;
 use crate::events::{Event, EventKind, effect_label};
 use crate::evict::{Evicted, Keep, evict, gib};
-use crate::evict::Room;
+use crate::evict::{Room, Shared};
 use crate::exposure::{Exposing, Exposures, OutputRead, within};
 use crate::fetch::IN_A_STEP;
 use crate::git_fetch;
@@ -770,6 +787,9 @@ fn build_roots(
             "cannot remove a step's staging directory: {error}"
         ))
     })?;
+    // An eviction for the limit under way ends before the store is swept
+    // or evicted again.
+    run.watch_limit(true);
     // A stamp cache that can't be kept is a workspace read again next time,
     // and copies that can't be are copied again.
     let seen = std::mem::take(&mut run.workspace_seen.0);
@@ -944,6 +964,7 @@ fn new_run<'a>(
         told_ended: Vec::new(),
         copies: Copies::read(&settings.outputs),
         room: RoomWatch::default(),
+        limit: LimitWatch::default(),
         sweeper: Sweeper::new(
             settings
                 .scratch
@@ -1602,6 +1623,9 @@ struct Run<'a> {
     /// What the build knows of the room on the disk (see [Room on the
     /// disk](#room-on-the-disk)).
     room: RoomWatch,
+    /// What it knows of its store's size against its limit (see [The limit
+    /// during a build](#the-limit-during-a-build)).
+    limit: LimitWatch,
 }
 
 /// Whether `error` is of a file system with no room left, or no more of a
@@ -1637,6 +1661,40 @@ struct RoomWatch {
     /// Whether the last try made no room, so that the floor holds steps
     /// again only once more than it has been free since.
     spent: bool,
+}
+
+/// How long after another process was evicting, or one that publishes
+/// nothing held the store, a build tries again to evict for its limit.
+const LIMIT_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
+/// What a build knows of its store's size against its limit as it goes
+/// (see [The limit during a build](#the-limit-during-a-build)).
+#[derive(Default)]
+struct LimitWatch {
+    /// An eviction beside the build's steps, under way.
+    evicting: Option<std::thread::JoinHandle<io::Result<Shared>>>,
+    /// Whether a step was kept since the store's ledger was last weighed.
+    grew: bool,
+    /// What the ledger must pass for another eviction, once one could not
+    /// bring the store within the limit: else the limit.
+    past: u64,
+    /// When to try again, once another process was evicting, or one that
+    /// publishes nothing held the store.
+    again: Option<Instant>,
+    /// Whether it said that what running builds use is over the limit.
+    told_full: bool,
+    /// Whether it said that a pekit that publishes nothing holds the store.
+    told_unpublished: bool,
+}
+
+impl Drop for LimitWatch {
+    /// A build that ends, or fails, lets an eviction under way end first,
+    /// so that none is cut off with blobs moved aside.
+    fn drop(&mut self) {
+        if let Some(evicting) = self.evicting.take() {
+            let _ = evicting.join();
+        }
+    }
 }
 
 /// So little free that a step that fails then failed for want of room,
@@ -3872,6 +3930,7 @@ impl Run<'_> {
                 // The store's size counts what the step wrote as it goes:
                 // a build killed later is counted for it.
                 let _ = crate::evict::ledger_written(&self.store);
+                self.limit.grew = true;
             }
             // A secret is never stored: the step runs every time.
             Err(StoreError::Secret) => {}
@@ -4313,6 +4372,7 @@ impl Run<'_> {
     ///
     /// That a step held for room cannot be run again.
     fn watch_room(&mut self) -> Result<bool, BuildError> {
+        self.watch_limit(false);
         if let Some(floor) = self.settings.keep_free
             && !self.room.holding
             && self
@@ -4331,10 +4391,117 @@ impl Run<'_> {
             }
         }
         if self.room.holding && self.idle() {
+            // One eviction at a time: room is made once one for the
+            // limit ends.
+            self.watch_limit(true);
             self.make_room()?;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Takes in an eviction for the limit that ended, waiting for one under
+    /// way if `wait`; else starts one once the store's ledger passes the
+    /// limit, beside the build's steps, on a thread of its own (see [The
+    /// limit during a build](#the-limit-during-a-build)).
+    fn watch_limit(&mut self, wait: bool) {
+        if let Some(evicting) = self.limit.evicting.take() {
+            if !wait && !evicting.is_finished() {
+                self.limit.evicting = Some(evicting);
+                return;
+            }
+            let done = evicting
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("the eviction stopped unexpectedly")));
+            self.limit_evicted(done);
+        }
+        let Some(limit) = self.settings.cache_limit else {
+            return;
+        };
+        // Not while room is to be made, which evicts itself.
+        if wait || self.room.holding || !self.limit.grew {
+            return;
+        }
+        if self.limit.again.is_some_and(|again| Instant::now() < again) {
+            return;
+        }
+        self.limit.grew = false;
+        let Some(size) = crate::evict::ledger_size(self.store.root()) else {
+            return;
+        };
+        if size <= limit.max(self.limit.past) {
+            return;
+        }
+        let store = self.store.clone();
+        let keep = self.store.in_use();
+        self.limit.evicting = std::thread::Builder::new()
+            .name("evict".to_owned())
+            .spawn(move || crate::evict::evict_beside(&store, limit, &keep))
+            .ok();
+    }
+
+    /// Says what an eviction for the limit did, `done`, and when to weigh
+    /// the store again.
+    fn limit_evicted(&mut self, done: io::Result<Shared>) {
+        let Some(limit) = self.settings.cache_limit else {
+            return;
+        };
+        let again = |watch: &mut LimitWatch| {
+            watch.again = Some(Instant::now() + LIMIT_AGAIN_AFTER);
+            watch.grew = true;
+        };
+        match done {
+            Ok(Shared::Made(evicted)) => {
+                self.limit.again = None;
+                let message = format!(
+                    "the store passed its limit of {}: evicted {} beside the build, and it holds {}",
+                    gib(limit),
+                    gib(evicted.before.saturating_sub(evicted.after)),
+                    gib(evicted.after)
+                );
+                self.emit(EventKind::Warned { message });
+                if evicted.after > limit {
+                    // Weighed again only once it has grown by a tenth more.
+                    self.limit.past = evicted.after.saturating_add(limit / 10);
+                    if !std::mem::replace(&mut self.limit.told_full, true) {
+                        let message = format!(
+                            "what running builds use of the store, {}, is more than its limit \
+                             of {}: it is kept, and the build goes on",
+                            gib(evicted.after),
+                            gib(limit)
+                        );
+                        self.emit(EventKind::Warned { message });
+                    }
+                } else {
+                    self.limit.past = 0;
+                }
+            }
+            // Within the limit by a walk: weighed against it again.
+            Ok(Shared::Nothing) => {
+                self.limit.again = None;
+                self.limit.past = 0;
+            }
+            Ok(Shared::Busy) => again(&mut self.limit),
+            Ok(Shared::Unpublished) => {
+                again(&mut self.limit);
+                if !std::mem::replace(&mut self.limit.told_unpublished, true) {
+                    let message = format!(
+                        "the store passed its limit of {}, but nothing is evicted while a pekit \
+                         that does not say what it uses, an older one, has it open",
+                        gib(limit)
+                    );
+                    self.emit(EventKind::Warned { message });
+                }
+            }
+            Err(error) => {
+                again(&mut self.limit);
+                let message = format!(
+                    "the store passed its limit of {}, and could not be evicted: {error}",
+                    gib(limit)
+                );
+                self.emit(EventKind::Warned { message });
+            }
+        }
     }
 
     /// Makes the room the build waits for, keeping what it has used, and

@@ -34,7 +34,9 @@
 //!   ends ([`ledger_written`]). The blobs are walked only when that, which
 //!   can only be too large, is above the limit, or is older, or is not
 //!   there; what a build killed wrote after its last step is added by
-//!   none, which the next walk sets right.
+//!   none, which the next walk sets right. What builds add while a walk
+//!   runs is added to what it measured, though it may have seen some of
+//!   it: too much at worst, until the next.
 //! - **Concurrency:** every process holds the store's lock shared while it
 //!   has the store open. An eviction takes it exclusively without waiting,
 //!   so it evicts nothing while another process has the store; having it,
@@ -67,8 +69,20 @@
 //! leaves the materialised trees, which a running step may have mounted,
 //! and the exposures of what it evicts, which a build may be writing,
 //! for an eviction alone; it removes every mark that a tree is complete,
-//! as every eviction does. What an evictor that died left aside is deleted
-//! by the next.
+//! as every eviction does. What an evictor that died left aside is put
+//! back by the next eviction or sweep, unless a blob of its name is there
+//! again.
+//!
+//! # Eviction during a build
+//!
+//! A build whose store passes its limit as it goes evicts it then
+//! ([`evict_beside`]), not only as it ends: on a thread of its own, beside
+//! its own running steps, so always as a shared eviction, never with the
+//! store to itself, which would remove the materialised trees its steps
+//! have mounted. It keeps what it has in use and what every live process
+//! has published, and leaves the exposures of what it evicts, as a shared
+//! eviction does, for an eviction alone. A step of the build that needs
+//! what it evicted later builds or fetches it again.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -533,11 +547,22 @@ impl Ledger {
         (now_seconds().saturating_sub(walked) <= Self::TRUSTED).then_some(bytes)
     }
 
+    /// The size the ledger of the store at `root` says, trusted or not.
+    fn raw(root: &Path) -> Option<u64> {
+        let text = fs::read_to_string(root.join("size")).ok()?;
+        text.trim().split_once(' ')?.0.parse().ok()
+    }
+
     /// Notes in the ledger of the store at `root` that its blobs are
-    /// `bytes`, measured now.
-    fn write(root: &Path, bytes: u64) -> io::Result<()> {
+    /// `bytes`, measured now by a walk begun when it said `began`, and what
+    /// was added to it since: what processes wrote during the walk, which
+    /// the walk may not have seen, counted, at worst, twice until the next.
+    fn settle(root: &Path, bytes: u64, began: Option<u64>) -> io::Result<()> {
         let _held = Self::held(root)?;
-        Self::put(root, bytes, now_seconds())
+        let since = began
+            .zip(Self::raw(root))
+            .map_or(0, |(began, now)| now.saturating_sub(began));
+        Self::put(root, bytes.saturating_add(since), now_seconds())
     }
 
     /// Adds `bytes` to the ledger of the store at `root`, if it has one.
@@ -738,7 +763,7 @@ pub(crate) fn restore_aside(root: &Path, tmp: &Path) {
 
 /// What [`evict_shared`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shared {
+pub(crate) enum Shared {
     /// It evicted.
     Made(Evicted),
     /// It had nothing to evict.
@@ -748,6 +773,27 @@ enum Shared {
     /// A process that holds the store does not publish what it uses, so
     /// nothing may be evicted beside it.
     Unpublished,
+}
+
+/// Evicts `store` to below nine tenths of `limit`, if it is over it, beside
+/// whatever else has it open, this process's running steps among them:
+/// never with the store to itself, which would remove what those steps
+/// have mounted (see [Eviction during a build](#eviction-during-a-build)).
+/// What this process has in use, `keep`, is kept, and what any live
+/// process has published.
+///
+/// # Errors
+///
+/// That the store cannot be read, or what it evicts moved or put back.
+pub(crate) fn evict_beside(store: &Store, limit: u64, keep: &Keep) -> io::Result<Shared> {
+    evict_shared(store, Aim::Limit(limit), keep)
+}
+
+/// The size of the blobs of the store at `root` by its ledger, if it has
+/// one it trusts: what a build weighs against its limit as it goes.
+#[must_use]
+pub(crate) fn ledger_size(root: &Path) -> Option<u64> {
+    Ledger::read(root)
 }
 
 /// Evicts `store`, which other processes have open too, as far as `aim`
@@ -821,6 +867,9 @@ fn evict_held(
     {
         return Ok(None);
     }
+    // What the ledger says as the walk begins: what processes add to it
+    // during the walk is added to what the walk measured.
+    let began = Ledger::raw(root);
     let blobs = blobs_of(root)?;
     let measured = blobs.total();
     let total = measured + scratch_size(&scratch);
@@ -828,7 +877,7 @@ fn evict_held(
         // Within its limit, nothing more is read: the journals wait for an
         // eviction that does something.
         Aim::Limit(limit) if total <= limit => {
-            Ledger::write(root, measured)?;
+            Ledger::settle(root, measured, began)?;
             return Ok(None);
         }
         Aim::Limit(limit) => limit / 10 * 9,
@@ -881,12 +930,12 @@ fn evict_held(
         records: &records,
         discard: &discard,
     };
-    let after = evict_to(&seen, &mut state, (total, low), keep);
+    let mut after = evict_to(&seen, &mut state, (total, low), keep);
     if let Some(aside) = aside {
         if let Some(between) = BETWEEN.with(|between| between.borrow_mut().take()) {
             between();
         }
-        put_back(&seen, aside)?;
+        after += put_back(&seen, aside)?;
     }
     // Only what is still there is remembered.
     state.records.retain(|hex, _| records.contains_key(hex));
@@ -900,7 +949,11 @@ fn evict_held(
     for journal in journals {
         let _ = fs::remove_file(journal);
     }
-    Ledger::write(root, after.saturating_sub(scratch_size(&scratch_of(root)?)))?;
+    Ledger::settle(
+        root,
+        after.saturating_sub(scratch_size(&scratch_of(root)?)),
+        began,
+    )?;
     // What output directories still held of what was evicted goes too, with
     // the store to itself, so that no build writes them meanwhile.
     let released = if aside.is_none() {
@@ -1093,8 +1146,9 @@ fn read_tree_at(
 /// `aside` that a live process published it uses since the eviction began,
 /// directly or through a record or tree (see [Shared
 /// eviction](#shared-eviction)): unless one of its name is there again,
-/// which a process put meanwhile, of the same contents.
-fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<()> {
+/// which a process put meanwhile, of the same contents: the bytes it put
+/// back.
+fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<u64> {
     let root = seen.store.root();
     let mut published = Keep::default();
     for used in crate::using::live(root)? {
@@ -1103,6 +1157,7 @@ fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<()> {
         published.trees.extend(used.trees);
     }
     let held = kept_blobs_in(seen, &published, Some(aside));
+    let mut restored = 0;
     for entry in fs::read_dir(aside)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1131,9 +1186,11 @@ fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<()> {
         // Put meanwhile by another process, of the same contents: dropped.
         if moved.is_err() {
             let _ = fs::remove_file(entry.path());
+        } else if let Some(blob) = seen.blobs.number(&digest) {
+            restored += seen.blobs.get(blob).size;
         }
     }
-    Ok(())
+    Ok(restored)
 }
 
 /// What removes a blob, by its number, from the store's size, `total`.

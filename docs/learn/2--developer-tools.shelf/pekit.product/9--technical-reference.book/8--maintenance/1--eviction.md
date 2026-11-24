@@ -8,7 +8,9 @@ description: How pekit keeps its store within PEKIT_CACHE_LIMIT by
 The store can grow to the size `PEKIT_CACHE_LIMIT` gives: 100 GiB by default,
 or no limit for `0` (`evict::limit_of`). As a build ends, pekit journals
 what the build used and, if the store is larger than its limit, evicts until
-it is below nine tenths of the limit (`evict`).
+it is below nine tenths of the limit (`evict`). A build also evicts as it
+goes, once the store passes its limit (see [The limit during a
+build](#the-limit-during-a-build)).
 
 ## What is evicted
 
@@ -72,7 +74,10 @@ plus the bytes of the blobs each build has written since, added under
 The blobs are walked again only when the ledger is above the limit, is a day
 old or older, or isn't there. A build killed part way has added what it
 wrote up to its last recorded step, so the ledger falls short by little
-more than one step's output, which the next walk sets right.
+more than one step's output, which the next walk sets right. What builds
+add while a walk runs is added to what the walk measured. The walk might have
+seen some of it, so the ledger can be a little too large until the next
+walk, never too small.
 
 ## When it runs
 
@@ -118,6 +123,54 @@ As with eviction at the end, room is made beside other processes only as
 Otherwise the build warns that nothing was evicted, and why, and goes on.
 It warns too if it could go on only by starting a step it holds, and it
 then starts that step.
+
+## The limit during a build
+
+A build doesn't wait for its end to keep the store within its limit. Each
+time it records a step, which adds what the step wrote to the ledger, it
+reads the ledger, which every process adds to. Once the ledger is above the
+limit, the build evicts until the store is below nine tenths of the limit,
+as an eviction at its end does. So after an eviction the store grows by a
+tenth of the limit before the next.
+
+The eviction runs on a thread of its own while the build's steps go on. It
+is always an eviction beside other builds (see [Eviction beside other
+builds](#eviction-beside-other-builds)), even with no other process: the
+build's own running steps might have materialized trees mounted, which only
+an eviction with the store to itself removes. It keeps:
+
+- everything the build has in use, and everything any live process has
+  published;
+- every scratch directory a run holds.
+
+A later step of the build that needs something evicted builds or fetches it
+again. The build says what each such eviction did:
+
+```text
+warning: the store passed its limit of LIMIT: evicted BYTES beside the build, and it holds SIZE
+```
+
+If what running builds use is itself more than the limit, the eviction
+can't bring the store within it. The build says so once, keeps going, and
+weighs the store again only once it has grown by a tenth of the limit more:
+
+```text
+warning: what running builds use of the store, SIZE, is more than its limit of LIMIT: it is kept, and the build goes on
+```
+
+If another process is evicting, the build tries again a minute later. If a
+pekit that publishes nothing has the store open, it tries again a minute
+later too, and says so once. One eviction runs at a time: room for
+`keep_free` is made only once an eviction for the limit has ended, and the
+build ends only once it has. With a ledger a day old or older, or none,
+nothing is evicted for the limit until the build ends, when the store is
+walked.
+
+Materialized trees in `trees/` are hard links to blobs. An eviction beside
+other builds leaves them, so a blob it evicts that a materialized tree
+links still takes its space on disk, though the ledger doesn't count it.
+An eviction with the store to itself removes the trees, and frees that
+space.
 
 ## Outputs of evicted steps
 
