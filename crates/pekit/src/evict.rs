@@ -41,7 +41,34 @@
 //!   it removes the claims' files, which no process then holds
 //!   ([Claims](crate::claims#claims)). A store its ledger says is over its
 //!   limit while another process has it is an error, which a build warns
-//!   of, rather than nothing evicted silently.
+//!   of, rather than nothing evicted silently, unless it can be evicted
+//!   beside them, as follows.
+//!
+//! # Shared eviction
+//!
+//! While other processes have the store open, a build evicts beside them
+//! ([`evict_shared`]), if every process that holds the store publishes what
+//! it uses ([Publishing what is used](crate::using#publishing-what-is-used))
+//! and no other evicts so: one at a time, by the `evicting` lock.
+//!
+//! 1. It takes what each live process published, and evicts as an eviction
+//!    alone does, keeping all of it, but moves each blob it evicts aside,
+//!    into `tmp/evicting-<token>/`, rather than deleting it.
+//! 2. It reads what each live process published again, and moves back each
+//!    blob one published meanwhile, directly or through a record or tree,
+//!    unless a process put a blob of its name meanwhile: then the one aside
+//!    goes, of the same contents.
+//! 3. It deletes what is aside.
+//!
+//! A process publishes what it uses before it looks for it: published
+//! before step 2, it is moved back, though the process may have found it
+//! gone meanwhile and put it again; published after, the process finds it
+//! gone, and puts or builds it again. So none relies on what is deleted. It
+//! leaves the materialised trees, which a running step may have mounted,
+//! and the exposures of what it evicts, which a build may be writing,
+//! for an eviction alone; it removes every mark that a tree is complete,
+//! as every eviction does. What an evictor that died left aside is deleted
+//! by the next.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -134,6 +161,8 @@ pub struct Keep {
     pub records: HashSet<Digest>,
     /// Each scratch directory it held, by its name.
     pub scratch: HashSet<String>,
+    /// Each tree it took as complete: every blob it names, at any depth.
+    pub trees: HashSet<Digest>,
 }
 
 /// How far an eviction goes.
@@ -219,6 +248,9 @@ struct StoreSeen<'a> {
     scratch: &'a HashMap<String, (PathBuf, u64)>,
     /// Every record, by its key's hex digits.
     records: &'a HashMap<String, RecordSeen>,
+    /// What removes the file of a blob or a copy: deletes it, or moves it
+    /// aside (see [Shared eviction](#shared-eviction)).
+    discard: &'a dyn Fn(&Path),
 }
 
 /// A record as an eviction sees it.
@@ -337,6 +369,13 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
             // A lock that failed to change has been let go of: held shared
             // again, as every process that has the store holds it.
             store.held().lock_shared()?;
+            // Evicted beside the other processes, if each publishes what it
+            // uses (see [Shared eviction](#shared-eviction)).
+            match evict_shared(store, Aim::Limit(limit), &Keep::default())? {
+                Shared::Made(evicted) => return Ok(Some(evicted)),
+                Shared::Nothing => return Ok(None),
+                Shared::Busy | Shared::Unpublished => {}
+            }
             return match Ledger::read(store.root()) {
                 Some(blobs) if blobs > limit => Err(io::Error::other(format!(
                     "it holds {}, over its limit of {}, and nothing was evicted, since \
@@ -355,7 +394,7 @@ pub fn evict(store: &Store, used: &Used, limit: u64) -> io::Result<Option<Evicte
     }
     // No process holds a claim on a step, since none has the store.
     let _ = remove_tree(&store.root().join("claims"));
-    let evicted = evict_held(store, Aim::Limit(limit), &Keep::default());
+    let evicted = evict_held(store, Aim::Limit(limit), &Keep::default(), None);
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     evicted
@@ -379,7 +418,7 @@ pub fn evict_alone(
     waiting: &mut dyn FnMut(),
 ) -> io::Result<Option<Evicted>> {
     alone(root, scratch, waiting, |store| {
-        let evicted = evict_held(store, Aim::Limit(limit), &Keep::default())?;
+        let evicted = evict_held(store, Aim::Limit(limit), &Keep::default(), None)?;
         // Exposures of what earlier evictions removed go even if nothing
         // more is evicted now.
         Ok(evicted.or_else(|| {
@@ -627,14 +666,18 @@ pub fn make_room(store: &Store, bytes: u64, keep: &Keep) -> io::Result<Room> {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
             store.held().lock_shared()?;
-            return Ok(Room::NotAlone);
+            return Ok(match evict_shared(store, Aim::Free(bytes), keep)? {
+                Shared::Made(evicted) if evicted.after < evicted.before => Room::Made(evicted),
+                Shared::Made(_) | Shared::Nothing => Room::Nothing,
+                Shared::Busy | Shared::Unpublished => Room::NotAlone,
+            });
         }
         Err(TryLockError::Error(error)) => {
             store.held().lock_shared()?;
             return Err(error);
         }
     }
-    let evicted = evict_held(store, Aim::Free(bytes), keep);
+    let evicted = evict_held(store, Aim::Free(bytes), keep, None);
     // Held shared again, as every process that has the store holds it.
     store.held().lock_shared()?;
     Ok(match evicted? {
@@ -643,9 +686,92 @@ pub fn make_room(store: &Store, bytes: u64, keep: &Keep) -> io::Result<Room> {
     })
 }
 
+thread_local! {
+    /// What runs between moving aside and putting back, in the next shared
+    /// eviction on this thread: a test's way to put a blob meanwhile.
+    static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `between` in the next shared eviction on this thread, between
+/// moving what it evicts aside and putting back what was published
+/// meanwhile: for a test of what happens there.
+#[doc(hidden)]
+pub fn between_in_next_shared(between: impl FnOnce() + 'static) {
+    BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(between)));
+}
+
+/// What [`evict_shared`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shared {
+    /// It evicted.
+    Made(Evicted),
+    /// It had nothing to evict.
+    Nothing,
+    /// Another process is evicting beside the rest.
+    Busy,
+    /// A process that holds the store does not publish what it uses, so
+    /// nothing may be evicted beside it.
+    Unpublished,
+}
+
+/// Evicts `store`, which other processes have open too, as far as `aim`
+/// says, keeping what `keep` says and all any live process published it
+/// uses (see [Shared eviction](#shared-eviction)): only if every process
+/// that holds the store publishes, and no other evicts so meanwhile.
+///
+/// # Errors
+///
+/// That the store cannot be read or written.
+fn evict_shared(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Shared> {
+    let root = store.root();
+    let evicting = Store::lock_file(root, "evicting")?;
+    match evicting.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(Shared::Busy),
+        Err(TryLockError::Error(error)) => return Err(error),
+    }
+    let live = crate::using::live(root)?;
+    if !crate::using::all_publish(root, &live) {
+        return Ok(Shared::Unpublished);
+    }
+    // What an evictor that died left aside: none live but this one, which
+    // holds the lock, so none is being put back.
+    let tmp = root.join("tmp");
+    if let Ok(entries) = fs::read_dir(&tmp) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("evicting-") {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let mut kept = keep.clone();
+    for used in live {
+        kept.blobs.extend(used.blobs);
+        kept.records.extend(used.records);
+        kept.trees.extend(used.trees);
+    }
+    let aside = tmp.join(format!("evicting-{}", crate::sweep::token()));
+    fs::create_dir_all(&aside)?;
+    let evicted = evict_held(store, aim, &kept, Some(&aside));
+    let _ = fs::remove_dir_all(&aside);
+    BETWEEN.with(|between| between.borrow_mut().take());
+    Ok(match evicted? {
+        Some(evicted) => Shared::Made(evicted),
+        None => Shared::Nothing,
+    })
+}
+
 /// [`evict`] or [`make_room`], its lock held exclusively, as far as `aim`
-/// says, keeping what `keep` says.
-fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted>> {
+/// says, keeping what `keep` says; or, with `aside`, held shared, each blob
+/// it evicts moved into `aside`, and put back if a live process published
+/// it meanwhile (see [Shared eviction](#shared-eviction)).
+fn evict_held(
+    store: &Store,
+    aim: Aim,
+    keep: &Keep,
+    aside: Option<&Path>,
+) -> io::Result<Option<Evicted>> {
     let root = store.root();
     let scratch = scratch_of(root)?;
     let scratch_size = |scratch: &HashMap<String, (PathBuf, u64)>| -> u64 {
@@ -673,7 +799,11 @@ fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted
     // No tree is known to be complete once a blob may be gone, and none
     // materialised holds a link to one.
     store.forget_complete()?;
-    store.forget_materialised()?;
+    // A materialised tree is left while other processes have the store,
+    // since a running step of one may have it mounted.
+    if aside.is_none() {
+        store.forget_materialised()?;
+    }
     let state_path = root.join("eviction.json");
     let mut state: Priorities = fs::read(&state_path)
         .ok()
@@ -697,18 +827,29 @@ fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted
     for name in &used.scratch {
         state.scratch.insert(name.clone(), state.inflation);
     }
-    let after = evict_to(
-        &StoreSeen {
-            store,
-            blobs: &blobs,
-            trees: &trees,
-            scratch: &scratch,
-            records: &records,
-        },
-        &mut state,
-        (total, low),
-        keep,
-    );
+    let discard = |path: &Path| match (aside, path.file_name()) {
+        (Some(aside), Some(name)) => {
+            let _ = fs::rename(path, aside.join(name));
+        }
+        _ => {
+            let _ = fs::remove_file(path);
+        }
+    };
+    let seen = StoreSeen {
+        store,
+        blobs: &blobs,
+        trees: &trees,
+        scratch: &scratch,
+        records: &records,
+        discard: &discard,
+    };
+    let after = evict_to(&seen, &mut state, (total, low), keep);
+    if let Some(aside) = aside {
+        if let Some(between) = BETWEEN.with(|between| between.borrow_mut().take()) {
+            between();
+        }
+        put_back(&seen, aside)?;
+    }
     // Only what is still there is remembered.
     state.records.retain(|hex, _| records.contains_key(hex));
     state.scratch.retain(|name, _| scratch.contains_key(name));
@@ -722,8 +863,13 @@ fn evict_held(store: &Store, aim: Aim, keep: &Keep) -> io::Result<Option<Evicted
         let _ = fs::remove_file(journal);
     }
     Ledger::write(root, after.saturating_sub(scratch_size(&scratch_of(root)?)))?;
-    // What output directories still held of what was evicted goes too.
-    let released = release_orphans(store);
+    // What output directories still held of what was evicted goes too, with
+    // the store to itself, so that no build writes them meanwhile.
+    let released = if aside.is_none() {
+        release_orphans(store)
+    } else {
+        0
+    };
     Ok(Some(Evicted {
         before: total,
         after,
@@ -753,6 +899,7 @@ fn evict_to(
         trees,
         scratch,
         records,
+        ..
     } = seen;
     let live: Vec<(&String, &RecordSeen)> = records
         .iter()
@@ -760,12 +907,14 @@ fn evict_to(
         .collect();
     let mut named = named_of(&live, blobs, trees);
     let kept_records: HashSet<String> = keep.records.iter().map(Digest::hex).collect();
-    let kept = |blob: u32| keep.blobs.contains(&blobs.get(blob).digest);
+    let held = kept_blobs(seen, keep);
+    let kept = |blob: u32| held.contains(&blob);
+    let discard = seen.discard;
     let remove = |blob: u32, total: &mut u64| {
         let seen = blobs.get(blob);
         for (there, executable) in [(seen.plain, false), (seen.executable, true)] {
             if there {
-                let _ = fs::remove_file(store.cas_path(&seen.digest, executable));
+                discard(&store.cas_path(&seen.digest, executable));
             }
         }
         *total = total.saturating_sub(seen.size);
@@ -775,7 +924,7 @@ fn evict_to(
     let unnamed = (0..blobs.seen.len())
         .filter_map(|at| u32::try_from(at).ok())
         .filter(|blob| named[index(*blob)] == 0 && !kept(*blob));
-    total = remove_unnamed(blobs, unnamed, (total, low), &remove);
+    total = remove_unnamed(blobs, unnamed, (total, low), (&remove, discard));
     if total <= low {
         return total;
     }
@@ -838,6 +987,117 @@ fn evict_to(
     total
 }
 
+/// Each blob of `seen` that `keep` keeps, by its number: each it names,
+/// each a record it names names, and each a tree it names, or that one of
+/// those names, holds at any depth; a tree that no record names read from
+/// the store, or from `aside`, where it may have been moved.
+fn kept_blobs(seen: &StoreSeen<'_>, keep: &Keep) -> HashSet<u32> {
+    kept_blobs_in(seen, keep, None)
+}
+
+/// [`kept_blobs`], a tree that no record names read from `aside` too.
+fn kept_blobs_in(seen: &StoreSeen<'_>, keep: &Keep, aside: Option<&Path>) -> HashSet<u32> {
+    let mut held: HashSet<u32> = HashSet::new();
+    let mut pending: Vec<u32> = keep
+        .blobs
+        .iter()
+        .chain(&keep.trees)
+        .filter_map(|digest| seen.blobs.number(digest))
+        .collect();
+    for key in &keep.records {
+        if let Some(record) = seen.records.get(&key.hex()) {
+            pending.extend(record.roots.iter().copied());
+        }
+    }
+    while let Some(blob) = pending.pop() {
+        if !held.insert(blob) {
+            continue;
+        }
+        if let Some(entries) = seen.trees.get(&blob) {
+            pending.extend(entries.iter().copied());
+            continue;
+        }
+        // A tree no record names, read as its blob has it, if it is one.
+        let digest = seen.blobs.get(blob).digest;
+        let Some(tree) = read_tree_at(seen.store, &digest, aside) else {
+            continue;
+        };
+        for entry in tree.entries {
+            let named = match entry {
+                crate::store::TreeEntry::File { file, .. } => file.digest,
+                crate::store::TreeEntry::Dir { tree, .. } => tree,
+                crate::store::TreeEntry::Link { .. } => continue,
+            };
+            pending.extend(seen.blobs.number(&named));
+        }
+    }
+    held
+}
+
+/// The tree `digest`, if its blob is one, read from `store`, or from
+/// `aside`, where an eviction may have moved it.
+fn read_tree_at(
+    store: &Store,
+    digest: &Digest,
+    aside: Option<&Path>,
+) -> Option<crate::store::Tree> {
+    if store.is_tree_blob(digest) {
+        return store.read_tree_once(digest).ok();
+    }
+    let bytes = fs::read(aside?.join(digest.hex())).ok()?;
+    bytes
+        .starts_with(b"{\"entries\":")
+        .then(|| serde_json::from_slice(&bytes).ok())
+        .flatten()
+}
+
+/// Puts back into the store each blob, or copy, an eviction moved into
+/// `aside` that a live process published it uses since the eviction began,
+/// directly or through a record or tree (see [Shared
+/// eviction](#shared-eviction)): unless one of its name is there again,
+/// which a process put meanwhile, of the same contents.
+fn put_back(seen: &StoreSeen<'_>, aside: &Path) -> io::Result<()> {
+    let root = seen.store.root();
+    let mut published = Keep::default();
+    for used in crate::using::live(root)? {
+        published.blobs.extend(used.blobs);
+        published.records.extend(used.records);
+        published.trees.extend(used.trees);
+    }
+    let held = kept_blobs_in(seen, &published, Some(aside));
+    for entry in fs::read_dir(aside)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(digest) = name.get(..64).and_then(Digest::from_hex) else {
+            continue;
+        };
+        let wanted = published.blobs.contains(&digest)
+            || seen
+                .blobs
+                .number(&digest)
+                .is_some_and(|blob| held.contains(&blob));
+        if !wanted {
+            continue;
+        }
+        let target = root.join("cas").join(&name[..2]).join(&name);
+        let moved = rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            entry.path(),
+            rustix::fs::CWD,
+            &target,
+            rustix::fs::RenameFlags::NOREPLACE,
+        );
+        // Put meanwhile by another process, of the same contents: dropped.
+        if moved.is_err() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+/// What removes a blob, by its number, from the store's size, `total`.
+type Remove<'a> = dyn Fn(u32, &mut u64) + 'a;
+
 /// Removes from `blobs` each of `unnamed`, blobs no live record names, and
 /// each copy of a blob, the largest first, by `remove`, until the store,
 /// `total` bytes, is at `low` or below: its size after.
@@ -845,7 +1105,7 @@ fn remove_unnamed(
     blobs: &Blobs,
     unnamed: impl Iterator<Item = u32>,
     (mut total, low): (u64, u64),
-    remove: &dyn Fn(u32, &mut u64),
+    (remove, discard): (&Remove<'_>, &dyn Fn(&Path)),
 ) -> u64 {
     let mut found: Vec<(u64, Result<u32, &Path>)> = unnamed
         .map(|blob| (blobs.get(blob).size, Ok(blob)))
@@ -864,7 +1124,7 @@ fn remove_unnamed(
         match what {
             Ok(blob) => remove(blob, &mut total),
             Err(path) => {
-                let _ = fs::remove_file(path);
+                discard(path);
                 total = total.saturating_sub(size);
             }
         }

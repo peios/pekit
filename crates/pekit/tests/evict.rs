@@ -2,12 +2,14 @@
 //! (see `design/additive.md`, F3).
 
 mod building;
+mod skipping;
 
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use building::{Options, build_in, observed_with};
+use skipping::skip;
 use pekit::evict::{DEFAULT_LIMIT, limit_of};
 use pekit::store::{Digest, Store, TreeEntry};
 
@@ -99,11 +101,36 @@ fn a_store_another_process_has_is_not_evicted() {
     assert_eq!(built(dir.path(), state.path(), None), (0, 2));
 }
 
+/// Another process holding the store at `root` open that publishes
+/// nothing of what it uses, as an older pekit does, until it is killed:
+/// none if `flock` cannot be run.
+fn older_holder(root: &Path) -> Option<std::process::Child> {
+    let child = std::process::Command::new("flock")
+        .args(["-s", "-F"])
+        .arg(root.join("lock"))
+        .args(["sleep", "60"])
+        .spawn()
+        .ok()?;
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < given_up {
+        if fs::read_to_string("/proc/locks")
+            .is_ok_and(|locks| locks.contains(&format!(" {} ", child.id())))
+        {
+            return Some(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
 #[test]
 fn a_store_over_its_limit_that_another_process_has_says_so() {
     let state = tempfile::tempdir().unwrap();
     let store = Store::open(&state.path().join("store")).unwrap();
-    let other = Store::open(&state.path().join("store")).unwrap();
+    let Some(mut other) = older_holder(&state.path().join("store")) else {
+        skip("no `flock`");
+        return;
+    };
     ledger(state.path(), 3 << 30, 0);
     // Nothing is evicted, as another has the store, and it says why.
     let skipped = pekit::evict::evict(&store, &store.used(), 2 << 30).unwrap_err();
@@ -119,7 +146,8 @@ fn a_store_over_its_limit_that_another_process_has_says_so() {
             .unwrap()
             .is_none()
     );
-    drop(other);
+    let _ = other.kill();
+    let _ = other.wait();
 }
 
 #[test]
@@ -485,11 +513,16 @@ fn room_made_during_a_build_keeps_what_the_build_used() {
         blobs: [used].into(),
         ..Keep::default()
     };
-    // Another process has the store open: nothing is evicted.
-    let other = Store::open(&state.path().join("store")).unwrap();
+    // Another process has the store open that publishes nothing of what
+    // it uses: nothing is evicted.
+    let Some(mut other) = older_holder(&state.path().join("store")) else {
+        skip("no `flock`");
+        return;
+    };
     assert_eq!(make_room(&store, 1 << 30, &keep).unwrap(), Room::NotAlone);
     assert!(store.has(&unused));
-    drop(other);
+    let _ = other.kill();
+    let _ = other.wait();
     // Alone: all it may evict, but what the build used.
     let Room::Made(made) = make_room(&store, 1 << 30, &keep).unwrap() else {
         panic!("no room made");
@@ -513,11 +546,7 @@ fn an_eviction_alone_removes_what_outputs_still_hold_of_what_it_evicted() {
         .0
         .unwrap();
     let steps = dir.path().join("pekit-out/.steps");
-    let exposed = |function: &str| {
-        fs::read_dir(steps.join(function))
-            .map(|entries| entries.count())
-            .unwrap_or(0)
-    };
+    let exposed = |function: &str| fs::read_dir(steps.join(function)).map_or(0, Iterator::count);
     assert_eq!((exposed("quick"), exposed("slow")), (1, 1));
     // The workspace's output directory is noted beside its stamps.
     let noted = pekit::outputs::noted(&state.path().join("store"));

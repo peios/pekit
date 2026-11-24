@@ -41,4 +41,5 @@ pub mod sweep;
 pub mod target;
 pub mod trace;
 pub mod unpack;
+pub mod using;
 pub mod verify;

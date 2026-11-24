@@ -542,6 +542,12 @@ impl Digest {
         Self(hasher.finalize().into())
     }
 
+    /// The digest of the bytes `bytes`, as [`Digest::bytes`] gives them.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Its 64 lower-case hex digits.
     #[must_use]
     pub fn hex(&self) -> String {
@@ -774,6 +780,10 @@ pub struct Store {
     /// what an eviction during its build keeps (see
     /// [`crate::evict::make_room`]).
     touched: Arc<Mutex<HashSet<Digest>>>,
+    /// Where this process publishes what it uses, for an eviction while it
+    /// has the store open (see [Publishing what is
+    /// used](crate::using#publishing-what-is-used)).
+    publisher: Option<Arc<crate::using::Publisher>>,
 }
 
 /// How a tree was found complete (see [`Store::holds_tree`]).
@@ -1062,6 +1072,7 @@ impl Store {
             complete: Arc::default(),
             materialised: Arc::default(),
             touched: Arc::default(),
+            publisher: crate::using::publisher(root),
         })
     }
 
@@ -1081,6 +1092,9 @@ impl Store {
 
     /// Notes that the record `key` was found or written.
     pub fn note_record(&self, key: &Digest) {
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(crate::using::Kind::Record, key);
+        }
         if let Ok(mut used) = self.used.lock() {
             used.records.insert(*key);
         }
@@ -1110,6 +1124,12 @@ impl Store {
     /// Whether the tree `digest` is known complete, by what this process
     /// found or by its mark, without a walk.
     fn marked_complete(&self, digest: &Digest) -> bool {
+        // Published before it is looked for, as all it names is then relied
+        // on (see [Publishing what is
+        // used](crate::using#publishing-what-is-used)).
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(crate::using::Kind::Tree, digest);
+        }
         self.complete
             .lock()
             .is_ok_and(|complete| complete.contains(digest))
@@ -1215,6 +1235,9 @@ impl Store {
     /// Notes that this process uses the blob `digest`, which an eviction
     /// during its build then keeps.
     fn touch(&self, digest: &Digest) {
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(crate::using::Kind::Blob, digest);
+        }
         if let Ok(mut touched) = self.touched.lock() {
             touched.insert(*digest);
         }
@@ -1235,10 +1258,17 @@ impl Store {
             .lock()
             .map(|used| (used.records.clone(), used.scratch.clone()))
             .unwrap_or_default();
+        // Each tree it took as complete, all of which it relies on.
+        let trees = self
+            .complete
+            .lock()
+            .map(|complete| complete.clone())
+            .unwrap_or_default();
         crate::evict::Keep {
             blobs,
             records,
             scratch,
+            trees,
         }
     }
 
@@ -2394,11 +2424,11 @@ impl Store {
     ///
     /// That it cannot be read.
     pub fn record_bytes(&self, key: &Digest) -> io::Result<Option<Vec<u8>>> {
+        // Published before it is read (see [Publishing what is
+        // used](crate::using#publishing-what-is-used)).
+        self.note_record(key);
         match fs::read(self.record_path(key)) {
-            Ok(bytes) => {
-                self.note_record(key);
-                Ok(Some(bytes))
-            }
+            Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }

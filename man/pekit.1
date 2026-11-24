@@ -316,6 +316,11 @@ A build evicts only when it ends with no other
 using the store;
 .B store evict
 waits until the builds that have the store end, and a build that starts meanwhile waits for the eviction.
+A build that ends while other
+.B pekit
+processes have the store evicts beside them instead, if every one publishes what it uses, keeping all of it; an older
+.BR pekit ,
+which publishes nothing, keeps it from evicting.
 It then removes, from the output directories of the store's workspaces, the exposures of what any eviction evicted under
 .IR .steps/ ,
 .IR .unpack/ ,

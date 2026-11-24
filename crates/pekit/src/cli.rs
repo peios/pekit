@@ -2075,6 +2075,13 @@ fn stats_command(root: &Path, shown_limit: &str, terminal: &mut Terminal<'_>) ->
         None => "not measured yet: an eviction measures it".to_owned(),
     };
     let _ = writeln!(terminal.out, "held by outputs of evicted steps: {held}");
+    // Materialised trees an eviction beside other builds leaves, which one
+    // with the store to itself removes.
+    let trees = std::fs::read_dir(root.join("trees")).map_or(0, Iterator::count);
+    let _ = writeln!(
+        terminal.out,
+        "materialised trees: {trees}, removed by an eviction with the store to itself"
+    );
     let used = match crate::evict::in_use(root) {
         Ok(true) => "by another pekit",
         Ok(false) => "by none",

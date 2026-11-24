@@ -134,3 +134,36 @@ holds a file of the store's file system that no name in `cas/` links. It
 never touches the files a target gives, nor anything on another file system,
 which is a copy rather than a link. What it found is kept in `orphaned`, which
 `pekit store stats` shows.
+
+## Eviction beside other builds
+
+While other processes have the store open, a build evicts beside them, if
+every process that holds the store publishes what it uses. Each process
+keeps a file of its own in `using/`, `<pid>-<token>`, locked for as long as
+it lives. Before it relies on anything of the store, it appends it there,
+once: each record before it reads it, each blob before it looks for it or
+links it, and each tree it takes as complete. The kernel's `/proc/locks` says
+which processes hold the store. One that publishes nothing, an older pekit
+say, keeps the build from evicting beside it, and the build warns as it
+always did.
+
+One such eviction runs at a time, holding the `evicting` lock:
+
+1. It evicts as an eviction alone does, keeping everything any live
+   process has published, but it moves each blob it evicts into
+   `tmp/evicting-<token>/` rather than deleting it.
+2. It reads what each live process has published again, and moves back
+   each blob published meanwhile, directly or through a record or a tree.
+   If a process has meanwhile put a blob of the same name, of the same
+   contents, the one moved aside is dropped instead.
+3. It deletes what is still aside.
+
+A process that published a blob before step 2 has it moved back. One that
+published it after finds it gone, and puts or builds it again. So no
+process relies on what is deleted. Such an eviction removes every mark that
+a tree is complete, but it leaves the materialized trees, which a running
+step might have mounted, and the outputs of what it evicted, for an
+eviction with the store to itself. `pekit store stats` shows how many
+materialized trees there are. A file in `using/` whose lock no process
+holds is a dead process's, and is removed. What a dead evictor moved aside
+is deleted by the next.
